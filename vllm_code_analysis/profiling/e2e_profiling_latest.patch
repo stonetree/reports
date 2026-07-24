@@ -1,0 +1,63 @@
+diff --git a/vllm/utils/cpu_timer.py b/vllm/utils/cpu_timer.py
+new file mode 100644
+index 0000000..1122334
+--- /dev/null
++++ b/vllm/utils/cpu_timer.py
+@@0,0 +1,65 @@
++import time
++from collections import defaultdict
++from contextlib import contextmanager
++
++class FullCPUE2ETimer:
++    """适用于 vLLM & vLLM-Ascend 的全量 CPU E2E 计时器"""
++    def __init__(self):
++        self.durations_ns = defaultdict(float)
++        self.counts = defaultdict(int)
+
++    @contextmanager
++    def timer(self, name: str):
++        start_ns = time.perf_counter_ns()
++        try:
++            yield
++        finally:
++            elapsed_ns = time.perf_counter_ns() - start_ns
++            self.durations_ns[name] += elapsed_ns
++            self.counts[name] += 1
+
++    def print_summary(self):
++        main_stages = [k for k in self.durations_ns.keys() if k.startswith("Stage_")]
++        total_main_cpu_ns = sum(self.durations_ns[k] for k in main_stages)
++        if total_main_cpu_ns == 0:
++            print("[FullCPUE2ETimer] No main stage timing data collected.")
++            return
+
++        print("\n" + "="*80)
++        print(f"{'vLLM & vLLM-Ascend CPU E2E Performance Breakdown':^80}")
++        print("="*80)
++        print(f"{'Stage / Sub-Stage Name':<45} | {'Cost (ms)':<12} | {'Ratio in CPU Total (%)':<20}")
++        print("-" * 80)
+
++        for stage_idx in range(1, 7):
++            stage_prefix = f"Stage_{stage_idx}"
++            matched_stage = next((k for k in main_stages if k.startswith(stage_prefix)), None)
++            if not matched_stage:
++                continue
+
++            stage_ns = self.durations_ns[matched_stage]
++            stage_ms = stage_ns / 1e6
++            stage_ratio = (stage_ns / total_main_cpu_ns) * 100
++            print(f"► {matched_stage:<43} | {stage_ms:<12.4f} | {stage_ratio:<20.2f}%")
+
++            sub_stages = [k for k in self.durations_ns.keys() if k.startswith(f"Sub-{stage_idx}.")]
++            for sub_k in sub_stages:
++                sub_ns = self.durations_ns[sub_k]
++                sub_ms = sub_ns / 1e6
++                sub_ratio = (sub_ns / total_main_cpu_ns) * 100
++                print(f"   └── {sub_k:<40} | {sub_ms:<12.4f} | ({sub_ratio:.2f}% of Total CPU)")
+
++        total_cpu_ms = total_main_cpu_ns / 1e6
++        print("-" * 80)
++        print(f"{'TOTAL CPU TRACKED LATENCY (100%)':<45} | {total_cpu_ms:<12.4f} | 100.00%")
++        print("="*80 + "\n")
+
++global_cpu_timer = FullCPUE2ETimer()
