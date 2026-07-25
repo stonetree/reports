@@ -31,7 +31,6 @@ _ReSharper*/
 .idea/
 #Nuget packages folder
 packages/
-*.py
 node_modules/
 outputs/
 tmp/
