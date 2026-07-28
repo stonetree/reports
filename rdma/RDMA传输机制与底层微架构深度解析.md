@@ -6,7 +6,7 @@
 
 在现代超大规模 AI 集群训练、大语言模型（LLM）分布式推理（如 Disaggregated Prefill/Decode 架构）以及高性能分布式存储系统（如 NVMe-oF）中，传统基于 CPU 内核网络栈与内存拷贝的通信范式已成为系统吞吐量与时延抖动的主要瓶颈（I/O 墙）。**远程直接内存访问（Remote Direct Memory Access, RDMA）** 技术通过硬件卸载、内核旁路（Kernel Bypass）与零拷贝（Zero-Copy）机制，彻底重构了节点间的通信模型。
 
-本文基于微架构与物理第一性原理（First Principles），系统性地解构 RDMA 传输机制。全文从异构节点间的 **GPUDirect RDMA (GDR)** 显存到内存直接搬运全流程切入，深入剖析 **队列对（Queue Pair, QP）** 的硬件抽象模型，提炼出现代异构芯片交互的通用范式——**“内存结构化队列 + MMIO Doorbell 异步通知”**；随后进一步下沉至物理层与微架构层，解析 **MMIO 机制、PCIe BAR 映射、DMA 控制器硬件 RTL 结构与传输速率建模**，并阐述异步事件通知在硬件、操作系统至上层应用栈的全栈传导路径。本文旨在为高性能计算与系统架构领域的工程师与研究者提供一份兼具理论深度与微架构实操视野的专业技术指南。
+本文基于微架构与物理第一性原理（First Principles），系统性地解构 RDMA 传输机制。全文从异构节点间的 **GPUDirect RDMA (GDR)** 显存到内存直接搬运全流程切入，深入剖析 **队列对（Queue Pair, QP）** 的硬件抽象模型，提炼出现代异构芯片交互的通用范式——**“内存结构化队列 + MMIO Doorbell 异步通知”**；随后下沉至物理层与微架构层，解析 **MMIO 机制、PCIe BAR 映射、DMA 控制器硬件 RTL 结构与传输速率建模**；重点探讨了**内存语义下的完成信号捕获机制（RDMA CQE 硬件生成与 CXL.mem 微架构级 `MONITOR/MWAIT` 唤醒）**、**CPU 直写 GPU HBM 的四大工业界通知模式**；并以大模型推理引擎（vLLM / TensorRT-LLM）中的 **`block_table` 动态刷新** 为实战案例，微观拆解了“两次直写 + 内存屏障（`sfence`）”在消除 CUDA API 重税（3~5 $\mu\text{s}$）与平抑尾部抖动（Jitter）上的物理本质；最后阐述了异步事件通知的全栈传导路径。本文旨在为高性能计算与系统架构领域的工程师与研究者提供一份兼具理论深度与微架构实操视野的专业技术指南。
 
 ---
 
@@ -41,10 +41,24 @@
   - [6.1 DMA 控制器的四大 RTL 核心逻辑组件](#61-dma-控制器核心-rtl-逻辑组件)
   - [6.2 DMA 在芯片内部的分布式部署架构](#62-dma-在芯片内部的分布式部署架构)
   - [6.3 DMA 传输速率建模与计算公式](#63-dma-传输速率建模与计算公式)
-- [第 7 章 异步事件通知与软件栈全栈传导](#第-7-章-异步事件通知与软件栈全栈传导)
-  - [7.1 完成通知机制：硬件中断（MSI-X） vs 用户态轮询（Polling CQ）](#71-完成通知机制硬件中断msi-x-vs-用户态轮询polling-cq)
-  - [7.2 从硬件信号到应用层的全栈传导路径](#72-从硬件信号到应用层的全栈传导路径)
-  - [7.3 总结与异构计算 I/O 设计哲学展望](#73-总结与异构计算-io-设计哲学展望)
+- [第 7 章 内存语义完成信号捕获与通知机制](#第-7-章-内存语义完成信号捕获与通知机制)
+  - [7.1 内存语义的“静默”本质与通知机制叠加](#71-内存语义的静默本质与通知机制叠加)
+  - [7.2 RDMA 协议的 CQE 硬件生成与上层捕获实践](#72-rdma-协议的-cqe-硬件生成与上层捕获实践)
+  - [7.3 CXL.mem 协议下的 Snoop Invalidation 与微架构级 `MONITOR/MWAIT` 唤醒](#73-cxlmem-协议下的-snoop-invalidation-与微架构级-monitormwait-唤醒)
+  - [7.4 PCIe DMA vs RDMA vs CXL.mem 完成捕获对比分析](#74-pcie-dma-vs-rdma-vs-cxlmem-完成捕获对比分析)
+- [第 8 章 CPU 直写 GPU HBM 与通知机制最佳实践](#第-8-章-cpu-直写-gpu-hbm-与通知机制最佳实践)
+  - [8.1 内存语义直写 GPU HBM 的静默通知难题](#81-内存语义直写-gpu-hbm-的静默通知难题)
+  - [8.2 工业界四大通知方案解构](#82-工业界四大通知方案解构)
+  - [8.3 工业界技术方案选型决策矩阵](#83-工业界技术方案选型决策矩阵)
+- [第 9 章 案例实战：大模型推理引擎 block_table 动态更新微架构解析](#第-9-章-案例实战大模型推理引擎-block_table-动态更新微架构解析)
+  - [9.1 PagedAttention block_table 刷新瓶颈与内存直写机制](#91-pagedattention-block_table-刷新瓶颈与内存直写机制)
+  - [9.2 Option A 微观物理过程：数据直写 $\rightarrow$ 内存屏障 ($\text{sfence}$) $\rightarrow$ Flag 直写](#92-option-a-微观物理过程数据直写-rightarrow-内存屏障-sfence-rightarrow-flag-直写)
+  - [9.3 物理时延量化：Posted Write (50ns) vs `cudaMemcpyAsync` (3-5$\mu$s)](#93-物理时延量化posted-write-50ns-vs-cudamemcpyasync-3-5us)
+  - [9.4 行业来源与工程落地现状](#94-行业来源与工程落地现状)
+- [第 10 章 异步事件通知与软件栈全栈传导](#第-10-章-异步事件通知与软件栈全栈传导)
+  - [10.1 完成通知机制：硬件中断（MSI-X） vs 用户态轮询（Polling CQ）](#101-完成通知机制硬件中断msi-x-vs-用户态轮询polling-cq)
+  - [10.2 从硬件信号到应用层的全栈传导路径](#102-从硬件信号到应用层的全栈传导路径)
+  - [10.3 总结与异构计算 I/O 设计哲学展望](#103-总结与异构计算-io-设计哲学展望)
 
 ---
 
@@ -516,9 +530,216 @@ $$\text{BW}_{\text{Effective}} = \text{BW}_{\text{Theoretical}} \times \eta_{\te
 
 ---
 
-## 第 7 章 异步事件通知与软件栈全栈传导
+## 第 7 章 内存语义完成信号捕获与通知机制
 
-### 7.1 完成通知机制：硬件中断（MSI-X） vs 用户态轮询（Polling CQ）
+### 7.1 内存语义的“静默”本质与通知机制叠加
+
+在探讨 **RDMA、PCIe DMA 以及 CXL.mem** 等内存语义（Memory-Semantic）协议在数据发送完成后的信号通知机制时，必须确立一个极重要的物理认知：
+
+> [!IMPORTANT]
+> **内存语义的物理本质是“静默的（Silent）”。**  
+> 纯粹的内存写事务（如 PCIe Memory Write TLP 或 CXL.mem Write Flit）的设计初衷是**直接修改目标介质的物理状态，而不去打扰 CPU 核心**。如果 Node A 仅仅往 Node B 的内存地址中推送 Payload 数据，**Node B 的 CPU 默认是完全不知情且静默的**。
+
+要让接收方（Node B）捕获到“数据传输完成”的信号，必须在**硬件传输协议**与**上层软件协作**两个维度，主动叠加通知机制（Notification Mechanism）。
+
+### 7.2 RDMA 协议的 CQE 硬件生成与上层捕获实践
+
+在 RDMA 体系中，单边纯 `RDMA Write` 是完全静默的；而 **`RDMA Write with Immediate`** 或是双边 `Send/Recv` 则是工业界最常用的完成通知范式。
+
+```
+[ Node A RNIC ] ──(RoCEv2 Packet: BTH+RETH+ImmData)──> [ Node B RNIC ]
+                                                              │
+     ┌────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────┐
+     │ (1. Payload 落地)                                                                                               │ (2. 信号落地)
+     ▼                                                                                                                 ▼
+[ Node B DDR / L3 ] <──(PCIe MemWrite TLP)── [ RNIC B DMA Engine ] ──(PCIe MemWrite TLP, 32/64B CQE)──> [ Node B CQ Ring (DRAM) ]
+                                                                                                                       │
+                                                                                                                       │ (3. MSI-X TLP)
+                                                                                                                       v
+                                                                                                            [ Local APIC (0xFEE00000) ]
+```
+*图 7-1：RDMA Write with Immediate 硬件 Payload 落地与 CQE 生成流程*
+
+#### 1. 底层硬件信号传递细节：
+- **Payload 写入与 PCIe 保序**：RNIC B 的硬件 ASIC 接收 RoCEv2 报文，提取 RETH 头的目标 VA 与 `rkey`，构建 PCIe MemWrite TLP 将 Payload 写入 Node B 的 DDR。PCIe 规范严格保证：在同一个 Traffic Class (TC) 下，**先发出的 Payload TLP 必定先抵达/先生效**。
+- **CQE 描述符硬件生成**：确信 Payload TLP 全部注入片上 Fabric 后，RNIC B 硬件根据报文中的 `ImmData` 与 QPN，在 Node B 的内存中找到绑定的 CQ (Completion Queue) 物理首地址，作为 PCIe Master 发起一个 32/64 字节的 PCIe MemWrite TLP，将 **CQE 描述符** 写入 CQ 环形缓冲区中。
+- **MSI-X 硬件中断**：若开启了中断，RNIC B 硬件向 PCIe 总线发送一个 MSI-X TLP（写往 CPU 的 Local APIC 专属地址 `0xFEE00000`），拉高 CPU 核心的中断引脚。
+
+#### 2. 上层应用的三种捕获实践：
+- **模式 A：用户态纯轮询 (`ibv_poll_cq()`)**：应用线程死循环读取 CQE 在 DRAM 中的 Phase Bit（相位翻转位/Owner Bit）。时延小于 **1 $\mu\text{s}$**，零上下文切换开销，但 CPU 占用率 100%。适用于 LLM 推理与高频交易。
+- **模式 B：中断 + Channel 事件通知 (`epoll_wait()`)**：注册 `ibv_req_notify_cq()` 后进入阻塞。RNIC 写入 CQE 后触发 MSI-X 中断唤醒进程。响应延迟约 $2 \sim 5\text{ }\mu\text{s}$，闲置时 CPU 占用率为 0%。
+- **模式 C：内存 Flag 尾部轮询 (In-Band Memory Flag Polling)**：Node A 使用纯 `RDMA Write`，将 Payload 尾部最后一个字节写入 `Ready_Flag = 1`。Node B 线程打入内存屏障后用 `volatile` 轮询该尾部内存。
+
+### 7.3 CXL.mem 协议下的 Snoop Invalidation 与微架构级 `MONITOR/MWAIT` 唤醒
+
+CXL.mem (Compute Express Link 内存协议) 提供的是**硬件级物理内存映射语义 (HDM)**。Node A 访问 Node B 的 CXL 内存，执行的是标准的 `MOV/STORE` 汇编指令。
+
+CXL.mem 协议本身**没有任何硬件队列与 CQE 的概念**。Node A 的 CPU 执行完 `STORE` 指令收到 Flit ACK，仅代表数据写落到了 Node B 的 CXL 存储芯片上，Node B 的 CPU 依然是静默不知情的。
+
+```
+[ Node A CPU (STORE 指令) ]
+           │
+           ▼ (CXL.mem M2S MemWr Flit)
+[ CXL Fabric / Switch ]
+           │
+           ▼ (1. 写入 CXL Memory)
+[ Node B CXL Device / HDM ] ──(2. CXL.cache Snoop Invalidation)──> [ Node B CPU L3 Cache ]
+                                                                            │
+                                                                            ▼ (3. 硬件唤醒 Core)
+                                                                 [ MONITOR / MWAIT 指令 ]
+```
+*图 7-2：CXL.mem 下基于 CXL.cache Snoop Invalidation 的 MONITOR/MWAIT 唤醒*
+
+#### 微架构级捕获实践：`MONITOR / MWAIT` 指令对（超低时延范式）
+为了避免轮询打满 CXL 片上 Fabric 带宽，现代微架构（x86 与 ARM `LDXR/WFE`）利用 Cache 一致性 Snoop 机制实现零 CPU 占用唤醒：
+
+1. **Node B (接收方) 注册监听**：执行 **`MONITOR` 指令** 绑定待监听的 Flag 物理地址（如 `0x7FFF0000`），注册至 CPU 核心内部的 Address Monitor 逻辑；随后执行 **`MWAIT` 指令**，CPU 核心进入低功耗休眠（C-state），暂停指令流水线。
+2. **Node A (发送方) 写入触发**：Node A 写入 Payload 并打入 `sfence` 屏障，随后将 `0x7FFF0000` 地址的值修改为 `1`。
+3. **硬件 Snoop 唤醒**：Node A 修改该地址触发 CXL.cache 的 **Snoop Invalidate（探针失效）** 报文抵达 Node B。Node B CPU 核心内部的 Address Monitor 硬件捕获到该 Cache Line 失效，**在小于 100 ns 内直接硬件唤醒 CPU 核心**，继续向下执行。
+
+### 7.4 PCIe DMA vs RDMA vs CXL.mem 完成捕获对比分析
+
+表 7-1 总结了三种主流协议在完成信号捕获上的微架构对比：
+
+| 评估维度 | PCIe DMA (Host-to-Device) | RDMA (RoCEv2 / IB) | CXL.mem (HDM 架构) |
+| :--- | :--- | :--- | :--- |
+| **物理语义层级** | PCIe 总线事务层 (TLP) | 网络传输层 (Transport Protocol) | **CPU 内存总线层 (Load/Store/Flit)** |
+| **接收端默认状态** | **静默写入 DRAM** | **静默写入 DRAM** | **静默写入 DRAM/CXL Block** |
+| **硬件完成通知载体** | PCIe MSI-X TLP / DMA 描述符 | **CQE (Completion Queue Entry)** | **Cache Line Invalidation (Snoop Flit)** |
+| **应用层主流捕获方式**| 驱动层 Interrupt / Polling | `ibv_poll_cq()` / `epoll` | **`MONITOR / MWAIT` (Cache 唤醒)** |
+| **完成信号捕获延迟** | $\approx 1 \sim 3\text{ }\mu\text{s}$ (中断) | **$\approx 0.5 \sim 1\text{ }\mu\text{s}$ (CQ Polling)** | **$< 100\text{ ns}$ (MWAIT 唤醒)** |
+| **CPU 资源开销** | 依赖模式 (中断低，轮询高) | CQ Polling 占用单核 100% | **`MWAIT` 休眠不占算力且超低延迟** |
+
+---
+
+## 第 8 章 CPU 直写 GPU HBM 与通知机制最佳实践
+
+### 8.1 内存语义直写 GPU HBM 的静默通知难题
+
+在基于 **NVLink-C2C（如 NVIDIA GH200 Grace Hopper / GB200 Grace Blackwell）** 或 **CXL.mem / Resizable BAR** 的异构架构中，CPU 可以像访问本地内存一样，通过简单的 Store 指令将数据直写（Direct Store）到 GPU 的 HBM 显存中。
+
+然而，由于内存语义的静默本质，数据落到了 GPU HBM，但 GPU 的算力单元（SM, Streaming Multiprocessors）**既不会收到硬件中断，也不会自动弹出事件**。GPU 必须高效感知数据更新，方可发起后续的 Tensor 计算。
+
+### 8.2 工业界四大通知方案解构
+
+```
+方案一: cudaStreamWaitValue32 (最佳平衡)
+CPU Direct Store ──> [ GPU HBM Payload & Flag ] ──> [ GPU HWS (前端调度器) 自动监听/唤醒 ] ──> [ 派发 SM 执行 Kernel ]
+
+方案二: Persistent CUDA Kernel (极致低延迟 <100ns)
+[ GPU SM 驻留 Warp ] ──> [ ld.acquire.sys 轮询 Flag ] ──> [ 唤醒内部算子, 零 Launch 开销 ]
+
+方案三: NVSHMEM + TMA Signal (GH200/GB200 原生)
+[ CPU/TMA Engine ] ──(NVLink-C2C 拉取数据)──> [ 硬件自动发送 Atomic Write-Signal ] ──> [ nvshmemx_signal_wait 捕获 ]
+
+方案四: 用户态 Doorbell Kick (控制面/数据面彻底解耦)
+CPU Direct Store ──> [ GPU HBM ] + [ CPU 敲响 GPU MMIO Doorbell ] ──> [ 触发 Work Queue ]
+```
+
+1. **方案一：GPU 硬件命令调度器等待（`cudaStreamWaitValue32` / 硬件信号量，推荐度：★★★★★）**：
+   - CPU 将数据与 `Ready_Flag = 1` 直写写入 GPU HBM 后，通过 CUDA Stream 调用 `cudaStreamWaitValue32()`。
+   - **微架构机制**：该等待节点**完全不占用 GPU SM 算力单元**，而是由 GPU 前端的**硬件命令调度器（Hardware Work Scheduler, HWS / GigaThread Engine）**在硬件层监听 Flag。Flag 翻转后，HWS 瞬间在硬件层面解封 Stream 并派发 Kernel，响应延迟约 $0.5 \sim 1\text{ }\mu\text{s}$。
+2. **方案二：Persistent CUDA Kernel + 原子轮询（推荐度：★★★★☆）**：
+   - 在 GPU 端预先启动一个不退出的常驻 Kernel（占用 1 个 Warp），使用系统级 Acquire 语义指令（`ld.acquire.sys` 或 `__threadfence_system()`）轮询 HBM 上的 Flag。配合 `asm volatile("nanosleep.u32 20;");` 避免打满 L2 Cache 总线。
+   - **性能**：捕获延迟小于 **100 ns**，零 Kernel Launch 开销。应用于 NCCL NVLink P2P 通信与 NVSHMEM。
+3. **方案三：NVSHMEM / TMA 异步信号操作（推荐度：★★★★★，GH200/GB200 原生）**：
+   - 依靠 Hopper/Blackwell 架构专有的 **TMA (Tensor Memory Accelerator)** 硬件引擎通过 900 GB/s - 1.8 TB/s 的 NVLink-C2C 总线拉取数据。TMA 硬件保证：**当且仅当数据全部落盘 HBM 后，自动发起一个原子的 Write-Signal 操作**，GPU 算子通过 `nvshmemx_signal_wait_until()` 捕获。
+4. **方案四：用户态门铃触发（User-Space Doorbell Kick，推荐度：★★★☆☆）**：
+   - 适用于大块低频更新（如加载权重）。CPU 直写 HBM 后，通过 MMIO 敲响 GPU 的 Doorbell 寄存器，唤醒 GPU Work Queue。
+
+### 8.3 工业界技术方案选型决策矩阵
+
+表 8-1 汇总了四种实践的微架构指标对比：
+
+| 业务场景 | 最佳实践方案 | 端到端响应时延 | GPU SM 资源消耗 | CPU 算力开销 | 典型代表案例 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **大模型 Decode 阶段** (Token-by-Token) | **方案二：Persistent Kernel 轮询** | **$< 100\text{ ns}$** | 占用 1 个 Warp (极小) | 仅做 Memory Store | NCCL NVLink P2P、vLLM Persistent Worker |
+| **跨节点 / Prefill-Decode KV-Cache 挂载**| **方案一：`cudaStreamWaitValue32`** | **$\approx 0.5 \sim 1.0\text{ }\mu\text{s}$** | **$0\%$ (完全不占 SM)** | 极低控制面调用 | Megatron-LM、TensorRT-LLM 异步队列 |
+| **GH200 / GB200 异构芯片数据交互** | **方案三：NVSHMEM + TMA Signal** | **$< 200\text{ ns}$** | **$0\%$ (硬件 TMA 接管)** | 零 CPU 阻塞 | NVIDIA Transformer Engine、DeepSpeed-MoE |
+| **批量模型权重 / 吞吐型 Memory Offload**| **方案四：控制面 Doorbell Kick** | $\approx 2 \sim 5\text{ }\mu\text{s}$ | $0\%$ | 低 | FastChat 批处理加载、Megatron Checkpoint |
+
+---
+
+## 第 9 章 案例实战：大模型推理引擎 block_table 动态更新微架构解析
+
+### 9.1 PagedAttention block_table 刷新瓶颈与内存直写机制
+
+在大语言模型 PagedAttention 推理架构中，CPU 调度器需要在每次 Decode 迭代前，将最新的物理页映射表 **`block_table`** 动态更新至 GPU 显存中。
+
+`block_table` 的更新具备三大微架构特征：数据体积微小（几十至几百字节）、更新频率极高（每个 Token Step 触发 1 次）、后续 GEMM 算子极度消耗 SM。在此场景下，利用 **内存语义直写 + `cudaStreamWaitValue32`（配合 CUDA Graph）** 成为性能调优的黄金标准。
+
+### 9.2 Option A 微观物理过程：数据直写 $\rightarrow$ 内存屏障 ($\text{sfence}$) $\rightarrow$ Flag 直写
+
+在 CPU 通过 PCIe BAR1 或 NVLink 直写 GPU HBM 上的 `block_table` 时，必须严格遵循 **Option A（两次远端写 + 中间打入内存屏障）**。
+
+```
+[ CPU Core ]
+     │
+     ├── Step 1: 执行多条 Store 指令写入 block_table 更改项 (写入 GPU HBM 地址 A)
+     │           (数据进入 CPU Store Buffer，打包为 Posted Write TLP)
+     │
+     ├── Step 2: 执行内存屏障指令 (_mm_sfence / asm "dmb st")
+     │           (清空 CPU Store Buffer，挂起后续写指令，确保数据 TLP 已发往 PCIe/NVLink 总线)
+     │
+     └── Step 3: 执行单条 Store 指令写入 Flag 变量 (写入 GPU HBM 地址 B = step_id)
+                 (触发 GPU 端 HWS 硬件解封 cudaStreamWaitValue32)
+```
+
+> [!CAUTION]
+> **绝对不能合并为“一次写”或省略屏障的原因（Store Buffer 乱序）：**  
+> 现代 CPU 具有强大的乱序写缓冲区（Store Buffer）。若无 `sfence` 屏障，CPU 乱序流水线可能会将 `Flag = step_id` 的写请求**优先于 `block_table` 的写请求发往总线**。远端 GPU 的 HWS 监听到 Flag 翻转后瞬间解封 Stream，导致 GPU SM 扑上去读到了旧的或垃圾的 `block_table` 数据，引爆推理乱码或 CUDA Illegal Address 崩溃！
+
+#### 真实代码实现规范（x86 与 ARM64）：
+
+```cpp
+// x86_64 架构规范:
+gpu_block_table_ptr[slot] = new_block_id;  // 1. 数据面直写 GPU HBM
+_mm_sfence();                              // 2. 清空 Store Buffer 写屏障
+gpu_flag_ptr[0] = current_step_id;         // 3. 控制面直写 Flag 触发解封
+
+// ARM64 架构规范 (如 NVIDIA Grace CPU):
+gpu_block_table_ptr[slot] = new_block_id;  // 1. 数据面直写 GPU HBM
+asm volatile("dmb st" ::: "memory");       // 2. Data Memory Barrier Store
+gpu_flag_ptr[0] = current_step_id;         // 3. 控制面直写 Flag
+```
+
+### 9.3 物理时延量化：Posted Write (50ns) vs `cudaMemcpyAsync` (3-5$\mu$s)
+
+#### 1. Posted Write 的算力开销：
+CPU 访问 MMIO 直写 GPU HBM 是 **Posted Write（非阻塞写）**。
+- `MOV` 指令入 Store Buffer：$\approx 2 \sim 5\text{ ns}$；
+- `sfence` 刷新屏障开销：$\approx 10 \sim 20\text{ ns}$；
+- **CPU 算力线程阻塞时间仅 $< 50\text{ ns}$**（虽然 TLP 在总线上的飞行落地时间约 $200 \sim 300\text{ ns}$，但 CPU 线程已转头去干别的事）。
+
+#### 2. `cudaMemcpyAsync` 的微架构开销重税：
+即便只传输 4 字节的 Delta `block_table`，调用 `cudaMemcpyAsync` 依然会触发繁重的链路开销：
+- CUDA Driver/Runtime API 陷入与虚拟地址查找：$\approx 1 \sim 2\text{ }\mu\text{s}$；
+- 敲响 Copy Engine (CE) Doorbell 并由 CE 发起 DMA Read：$\approx 1\text{ }\mu\text{s}$；
+- 硬件跨引擎同步（CE-to-SM Synchronization）：$\approx 1 \sim 2\text{ }\mu\text{s}$。
+- **固定起步开销高达 $3 \sim 5\text{ }\mu\text{s}$！**
+
+#### 3. 对 TPOT 与尾部抖动（Jitter）的影响：
+- **小模型 / Speculative Decoding（投机解码）**：当 Decode 步耗时仅 $500\text{ }\mu\text{s}$ 时，消灭 $5\text{ }\mu\text{s}$ 的 API 拷贝重税可直接带来 **$1\%$ 的显性 TPOT 性能提升**。
+- **大模型 (如 Llama-3-70B)**：消灭 API 拷贝避免了 Python GIL 与 CUDA Driver 上下文切换引发的 CPU 线程打嗝，**显著压低了 P99 尾部时延抖动（Tail Latency Jitter）**，使推理流水线保持绝对平滑。
+
+### 9.4 行业来源与工程落地现状
+
+这一微架构优化思路在顶级学术研究、官方 API 指南与开源引擎重构中均有明确来源：
+
+1. **顶级学术会议来源：vAttention (ASPLOS 2025)**
+   - 微软研究院在 ASPLOS 2025 论文 *vAttention* (arXiv:2405.04437) 中定量披露：在 vLLM/TRT-LLM 中，CPU 每次准备和拷贝 `block_table` 的开销占到了 Decode 迭代延迟的 **10% ~ 30%**。论文利用 `cuMemMap` / BAR1 内存映射彻底消除了 `block_table` 的 Host-to-Device 传输。
+2. **NVIDIA 官方 API 与 CUDA Toolkit 指南**
+   - NVIDIA 在 CUDA Virtual Memory Management (`cuMemAddressReserve` / `cuMemMap`) 及 CUDA Graph 指南中明确要求：低延迟流水线应避开 `cudaMemcpy`，推荐使用 `cudaStreamWaitValue32` 或 `cudaGraphAddBatchMemOpNode` 配合内存直写进行事件解封。
+3. **开源引擎与工业界自研平台演进**
+   - **vLLM V1 引擎重构**：vLLM V1 架构重构的核心动力之一就是消除 Python 控制面每次 Decode 构建与传输 `block_table` 的 CPU Overhead，全面转向固定内存区与全异步调度。
+   - **TensorRT-LLM C++ Runtime**：放弃 Python 层的拷贝，采用纯 C++ Executor 运行时配合 Pinned Mapped Memory 减少驱动开销。
+   - **工业界闭源平台**：大厂自研推理平台在统一的集群（全线 Resizable BAR + C++ 运行时）中，直接通过底层 `cuMemMap` API 预先将 `block_table` 空间映射给 CPU，配合 `cudaStreamWaitValue32` 实现微秒级零拷贝调度。
+
+---
+
+## 第 10 章 异步事件通知与软件栈全栈传导
+
+### 10.1 完成通知机制：硬件中断（MSI-X） vs 用户态轮询（Polling CQ）
 
 当 DMA 完成数据搬运后，硬件通知 CPU/软件完成状态存在两种经典物理机制：
 
@@ -531,9 +752,9 @@ $$\text{BW}_{\text{Effective}} = \text{BW}_{\text{Theoretical}} \times \eta_{\te
   - **微架构开销**：专用 CPU 核心运行轮询死循环（Polling Loop），一旦检测到 CQE 标志位改变即视作完成。零中断开销，延迟可达亚微秒级。
   - **适用场景**：RDMA 高性能通信、DPDK、SPDK 及 AI 训练/推理框架。
 
-### 7.2 从硬件信号到应用层的全栈传导路径
+### 10.2 从硬件信号到应用层的全栈传导路径
 
-数据落地并产生完成信号后，通知从硬件 ASIC 逐层向上传导至应用层编程框架，如图 7-1 所示：
+数据落地并产生完成信号后，通知从硬件 ASIC 逐层向上传导至应用层编程框架，如图 10-1 所示：
 
 ```
 [ DMA 控制器硬件完成 ]
@@ -554,23 +775,23 @@ $$\text{BW}_{\text{Effective}} = \text{BW}_{\text{Theoretical}} \times \eta_{\te
                                v
              [ 应用逻辑恢复执行: await socket.read() / stream.synchronize() ]
 ```
-*图 7-1：硬件完成信号至应用层的全栈传导路径*
+*图 10-1：硬件完成信号至应用层的全栈传导路径*
 
 1. **Linux `io_uring` / `epoll` 栈**：内核 ISR 或内核 Polling 线程捕获事件后，修改对应 `fd` 状态，解除 `epoll_wait()` 阻塞。
 2. **CUDA / AI 框架 (PyTorch) 栈**：GPU DMA (Copy Engine) 完成传输后，在 Host DRAM 写入 Stream Event。PyTorch 捕获该 Event，`stream.synchronize()` 返回，唤醒下一个 CUDA Kernel 执行。
 3. **高级语言异步运行时 (Rust Tokio / Python `asyncio`)**：底层驱动将 Completion 传递至 Event Loop，Event Loop 修改挂起 `Future` 的状态为 Ready，调度器唤醒 `await` 上下文继续往下执行。
 
-### 7.3 总结与异构计算 I/O 设计哲学展望
+### 10.3 总结与异构计算 I/O 设计哲学展望
 
-本文从第一性原理出发，系统解构了 RDMA 的传输机制、QP 抽象、MMIO 物理交互以及 DMA 硬件速率建模。
+本文从第一性原理出发，系统解构了 RDMA 的传输机制、QP 抽象、MMIO 物理交互、DMA 硬件速率建模、内存语义完成通知以及大模型推理引擎中的内存直写优化。
 
 全篇分析表明，现代高性能计算机体系结构在解决高吞吐、低延迟 I/O 难题时，收敛于一个最优雅的终极范式：
 
-$$\text{控制面注册物理映射} \longrightarrow \text{数据写内存队列} \longrightarrow \text{MMIO 敲击 Doorbell} \longrightarrow \text{硬件 DMA 自主搬运} \longrightarrow \text{CQE 异步通知 / 轮询唤醒}$$
+$$\text{控制面注册物理映射} \longrightarrow \text{数据写内存队列/直写 HBM} \longrightarrow \text{内存屏障保序} \longrightarrow \text{MMIO Doorbell / Flag 触发} \longrightarrow \text{硬件 DMA / HWS 自动解封}$$
 
-从跨国数据中心的大规模 GPU 集群通信，到芯片内部 Core Die 与 I/O Die 之间的 Chiplet 互联，这种“**控制与数据分离、大流量走高带宽内存、小信号走低延迟门铃、软硬件协同解耦**”的设计哲学，将持续作为下一代异构计算与 AI 算力基础设施的核心基石。
+从跨国数据中心的大规模 GPU 集群通信，到芯片内部 Core Die 与 I/O Die 之间的 Chiplet 互联，再到推理引擎中 `block_table` 的微秒级直写刷新，这种“**控制与数据分离、大流量走高带宽内存/NVLink、小信号走低延迟门铃/硬件 Wait、软硬件协同解耦**”的设计哲学，将持续作为下一代异构计算与 AI 算力基础设施的核心基石。
 
 ---
 
-*文档生成时间：2026-07-28*  
+*文档更新时间：2026-07-28*  
 *格式规范：Markdown / GitHub Flavored Markdown / LaTeX Standard*
