@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">RNIC DPU 到 SSD 的 PCIe P2P 直通数据通路</title>
+  <desc id="desc">以参考图风格绘制的 RNIC DPU 到 SSD 的 P2P 直通场景，Host DDR payload 被绕过，数据经 PCIe P2P 到 SSD controller 的 CMB 或 peer buffer。</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#e8edf0" stroke-width="1"/></pattern>
+    <marker id="tealArrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#2a9698"/></marker>
+    <marker id="orangeArrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0 0L9 4.5L0 9Z" fill="#c67b25"/></marker>
+    <style>
+      text{font-family:Arial,"Microsoft YaHei","Noto Sans CJK SC",sans-serif;fill:#111}
+      .title{font-size:39px;font-weight:700}.sub{font-size:17px;fill:#364152}.box{fill:#fff;stroke:#111;stroke-width:2;rx:8}.gray{fill:#e9eef0;stroke:#87929a;stroke-width:2;stroke-dasharray:8 6;rx:8}.head{font-size:23px;font-weight:700}.body{font-size:19px}.small{font-size:16px;fill:#28323b}.pill{fill:#4f5961;rx:17}.pillText{font-size:18px;fill:#fff;font-weight:700}.teal{stroke:#2a9698;stroke-width:4;fill:none;marker-end:url(#tealArrow)}.orange{stroke:#c67b25;stroke-width:3;stroke-dasharray:8 7;fill:none;marker-end:url(#orangeArrow)}.note{font-size:17px;font-weight:700}.bottom{font-size:16px;fill:#111}
+    </style>
+  </defs>
+  <rect width="1600" height="900" fill="#fff"/>
+  <rect width="1600" height="900" fill="url(#grid)"/>
+  <text class="title" x="60" y="58">RNIC / DPU → SSD: PCIe P2P Direct Path</text>
+  <text class="title" x="60" y="103">Host DDR Payload Bypass</text>
+
+  <rect class="box" x="60" y="265" width="235" height="190"/>
+  <text class="head" x="178" y="345" text-anchor="middle">RNIC / DPU</text>
+  <text class="body" x="178" y="380" text-anchor="middle">RDMA receive</text>
+  <text class="body" x="178" y="408" text-anchor="middle">CRC / Decompress</text>
+  <rect x="115" y="425" width="126" height="15" fill="#2a9698"/>
+  <text class="small" x="178" y="483" text-anchor="middle">MR · IOVA · DMA queue</text>
+
+  <rect class="box" x="365" y="265" width="255" height="190"/>
+  <text class="head" x="493" y="330" text-anchor="middle">PCIe Root Complex</text>
+  <text class="head" x="493" y="360" text-anchor="middle">/ Switch</text>
+  <text class="body" x="493" y="398" text-anchor="middle">P2P routing</text>
+  <text class="small" x="493" y="428" text-anchor="middle">IOMMU · ACS · P2PDMA</text>
+
+  <rect class="box" x="695" y="265" width="310" height="190"/>
+  <text class="head" x="850" y="330" text-anchor="middle">NVMe SSD Controller</text>
+  <text class="body" x="850" y="367" text-anchor="middle">CMB / PMR / peer buffer</text>
+  <text class="body" x="850" y="400" text-anchor="middle">NVMe SQ / CQ</text>
+  <text class="small" x="850" y="430" text-anchor="middle">FTL · ECC/LDPC · NAND</text>
+
+  <line class="teal" x1="295" y1="360" x2="365" y2="360"/>
+  <line class="teal" x1="620" y1="360" x2="695" y2="360"/>
+  <text class="note" x="655" y="330" text-anchor="middle">P2P DMA</text>
+
+  <rect class="gray" x="1100" y="190" width="300" height="190"/>
+  <text class="head" x="1250" y="260" text-anchor="middle">Host DDR DRAM</text>
+  <text class="body" x="1250" y="295" text-anchor="middle">payload bypassed</text>
+  <text class="small" x="1250" y="330" text-anchor="middle">仅保留 descriptor / metadata</text>
+  <line x1="1130" y1="220" x2="1370" y2="350" stroke="#c23636" stroke-width="5"/>
+  <line x1="1370" y1="220" x2="1130" y2="350" stroke="#c23636" stroke-width="5"/>
+  <rect class="pill" x="1120" y="395" width="260" height="36"/>
+  <text class="pillText" x="1250" y="420" text-anchor="middle">Host DDR payload = 0</text>
+
+  <rect class="box" x="365" y="530" width="255" height="105"/>
+  <text class="head" x="493" y="572" text-anchor="middle">Host CPU / OS</text>
+  <text class="body" x="493" y="605" text-anchor="middle">QP · MR · queue control</text>
+  <path class="orange" d="M493 530C493 490 493 470 493 455"/>
+  <text class="small" x="515" y="505">control / CQE</text>
+
+  <rect class="box" x="695" y="530" width="310" height="105"/>
+  <text class="head" x="850" y="572" text-anchor="middle">SSD completion</text>
+  <text class="body" x="850" y="605" text-anchor="middle">CQE → DPU / host control</text>
+  <path class="orange" d="M850 530C850 490 850 470 850 455"/>
+
+  <rect x="60" y="710" width="1340" height="100" fill="#eef2f3" stroke="#929ba2" stroke-width="1.5" rx="5"/>
+  <text class="note" x="85" y="745">Protocol / topology dependencies</text>
+  <text class="bottom" x="85" y="778">RoCEv2 / IB → PCIe P2P DMA → NVMe SQ/CQ → controller buffer → NAND</text>
+  <text class="bottom" x="85" y="802">same switch or allowed hierarchy · ACS/IOMMU policy · Linux P2PDMA provider/client/orchestrator · CMB/PMR peer resource</text>
+  <text class="small" x="60" y="850">P2P 通常到 SSD controller、CMB 或 PMR，不是 RNIC 直接写 NAND。</text>
+</svg>

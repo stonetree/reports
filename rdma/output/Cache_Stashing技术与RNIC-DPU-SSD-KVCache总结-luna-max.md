@@ -325,6 +325,46 @@ SSD NAND → SSD controller buffer/CMB → DPU/压缩解压缩/CRC engine → RN
 4. 20 GiB 不能整体放入 L3。L3 数值代表把流分成微块，例如让单个 in-flight window 小于 I/O LLC 可用容量，并由消费者及时推进；不是申请 20 GiB 的 L3。
 5. 如果微块在 CPU 消费前发生大量 LLC eviction，L3 hot 列应替换为基线列或两者之间的实测混合值。
 
+### 7.3.1 SSD 读走数据后，cacheline 是否还会回写 DDR？
+
+**结论：在普通的 write-back、一致性 Cache Stashing 实现中，SSD 通过 DMA read 取走数据后，cacheline 不会自动变成无效；如果该 cacheline 相对 DDR 仍是 dirty/modified，后续正常剔除、flush 或回收时仍可能回写 DDR。**
+
+这里要区分两个容易混淆的事件：
+
+- **SSD 读数据**：SSD 发起一致性 DMA read，从 L3/LLC 命中并取得最新数据；
+- **cacheline 失效/剔除**：缓存层回收该 line 的本地副本，可能需要把 dirty 数据写回 backing memory。
+
+SSD 已经拿到一份数据，并不自动向 CPU cache 发出“消费后丢弃”语义。普通 PCIe DMA read 是 read transaction，不是通用的 read-and-invalidate transaction。
+
+在典型的 RNIC→L3→SSD 流程中，可以按以下状态理解：
+
+RNIC DMA 写入 L3 → L3 保存最新 payload，DDR 可能仍是旧值 → SSD 一致性 DMA read 从 L3 取数 → L3 line 仍可能 valid 且相对 DDR 为 dirty/modified → 后续 eviction/flush/reclaim 时回写 DDR。
+
+Intel DDIO 的公开资料说明，I/O read 命中 L3/LLC 时，数据可以直接从缓存返回给 PCIe 设备；I/O 消费操作本身不会必然驱逐该 cacheline。[Intel DDIO 分析文档](https://www.intel.com/content/www/us/en/developer/articles/technical/ddio-analysis-performance-monitoring.html)、[Intel DDIO Primer](https://www.intel.com/content/dam/www/public/us/en/documents/technology-briefs/data-direct-i-o-technology-brief.pdf)同时说明，dirty cacheline 在后续驱逐时会产生 DRAM write-back。
+
+| 事件 | cacheline 的典型状态 | Host DDR 影响 |
+|---|---|---|
+| RNIC 将完整 cacheline stash 到 L3 | L3 保存最新数据；相对仍可能保存旧值的 DDR，可按 dirty/modified 或 I/O-owned 理解 | 当下可以没有 DDR write，但 DDR backing copy 可能尚未更新 |
+| SSD 对同一地址发起一致性 DMA read 且 L3 命中 | SSD 从 L3 取得最新数据；该 read 不等于消费并失效 | 这次可以没有 DDR read；不保证未来没有 DDR write-back |
+| 后续普通 eviction、flush 或回收 | dirty line 需要先写回再失效；clean line 可以直接失效 | dirty line 通常增加一次 cacheline 粒度的 DDR write |
+| 非分配 DMA / cache bypass | 该 payload 不在 L3 中形成可回写的 cacheline | 没有这条 cacheline 对应的回写；数据可能直接在 DDR 或设备内存 |
+| RNIC/DPU 直接 P2P 到 SSD CMB/peer memory | Host CPU L2/L3 不持有 payload | 不产生 Host DDR payload write-back |
+
+因此，“数据传递回 SSD 后，直接将 cacheline 设置为无效，触发剔除时不再写 DDR”不是普通 Cache Stashing 的默认行为。直接丢弃 dirty line 会使 DDR 中的 backing copy 继续保持旧值；如果该内存地址还可能被 CPU、其它 DMA 或回收后的新使用者访问，就会产生一致性错误。普通的 cache flush/失效操作也不能被当作无条件的 dirty discard；在 Intel 的 I/O 计数语义中，对 modified line 的 I/O flush 会导致 write-back。
+
+只有以下条件之一成立时，才可能不产生该 line 的回写：
+
+1. **cacheline 是 clean**：DDR 已经包含相同的最新数据；
+2. **采用非分配/cache-bypass 或真正的 P2P 路径**：payload 从未进入 Host L2/L3，或目标是 SSD 的 CMB/peer memory；
+3. **平台和驱动显式支持 discardable buffer**：已经确认 SSD DMA 完成、CPU 和其它设备不再访问该地址，并且硬件/驱动提供安全的“丢弃 dirty line 而不写回”语义。这个能力不是普通 PCIe DMA read 或通用 Cache Stashing 自动提供的。
+
+这也解释了本节表格中同时给出两种口径：
+
+- **关键窗口**：RNIC 收到微块到 SSD 取走微块期间，理想的 L3 hit 路径可以是 W0/R0；
+- **完整生命周期保守值**：若没有显式 discard 机制，未压缩直通场景仍按输入 dirty line 回写一次，即约 1× DDR write；有解压缩时，压缩输入和未压缩输出都可能形成 dirty line，按 C+R 回写，即约 (1+α)×。
+
+如果系统的真实目标是“SSD 取数后绝不产生 Host DDR payload 回写”，更稳妥的选择是 RNIC/DPU→SSD CMB/peer memory 的 P2P 路径，或经过验证的非分配 DMA；不要把“SSD 已经读取”本身当作 cacheline ownership transfer 或自动失效保证。[Linux PCI P2PDMA 文档](https://www.kernel.org/doc/html/latest/driver-api/pci/p2pdma.html)对设备间 peer resource、拓扑和驱动协同也有明确限制。
+
 ### 7.4 用 DDR 带宽换算的下界示例
 
 为了只说明流量量级，假设可供该数据面使用的有效 DDR 带宽为 400 GiB/s。下表是 DDR bytes / 400 GiB/s 的总线流量下界，不是端到端时延：
@@ -604,6 +644,7 @@ Cache Stashing 和 P2P 都不能只靠“写完 flag”来证明数据可见。�
 
 - [Intel Data Direct I/O Technology](https://www.intel.com/content/www/us/en/io/data-direct-i-o-technology.html)
 - [Intel DDIO Analysis and Performance Monitoring](https://www.intel.com/content/www/us/en/developer/articles/technical/ddio-analysis-performance-monitoring.html)
+- [Intel Data Direct I/O Technology: A Primer](https://www.intel.com/content/dam/www/public/us/en/documents/technology-briefs/data-direct-i-o-technology-brief.pdf)
 - [Intel VTune: Effective Utilization of Intel DDIO](https://www.intel.com/content/www/us/en/docs/vtune-profiler/cookbook/2024-2/effective-utilization-of-intel-ddio-technology.html)
 - [Intel Xeon DDIO support matrix](https://www.intel.com/content/www/us/en/support/articles/000087975/processors/intel-xeon-processors.html)
 - [Linux PCI TPH Support](https://docs.kernel.org/7.1/PCI/tph.html)

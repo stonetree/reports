@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">RNIC 到 SSD 三种数据通路对比</title>
+  <desc id="desc">以参考图风格对比 P2P 直通、Cache Stashing 后 dirty 回写 DDR、Cache Stashing 后显式 discard 不回写 DDR 三种路径。</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#e8edf0" stroke-width="1"/></pattern>
+    <style>
+      text{font-family:Arial,"Microsoft YaHei","Noto Sans CJK SC",sans-serif;fill:#111}
+      .title{font-size:39px;font-weight:700}.sub{font-size:17px;fill:#364152}.head{font-size:21px;font-weight:700}.body{font-size:17px}.small{font-size:15px;fill:#28323b}.pill{fill:#4f5961;rx:17}.greenPill{fill:#2f8a67;rx:17}.pillText{font-size:17px;fill:#fff;font-weight:700}.line{stroke:#aab4bc;stroke-width:1.5}.box{fill:#fff;stroke:#111;stroke-width:2;rx:7}.gray{fill:#e9eef0;stroke:#87929a;stroke-width:2;stroke-dasharray:8 6;rx:7}.blueHead{fill:#eef8f8;stroke:#2a9698;stroke-width:2;rx:7}.redHead{fill:#fff2f2;stroke:#b43a3a;stroke-width:2;rx:7}.greenHead{fill:#eff8f1;stroke:#2f8a67;stroke-width:2;rx:7}
+    </style>
+  </defs>
+  <rect width="1600" height="900" fill="#fff"/>
+  <rect width="1600" height="900" fill="url(#grid)"/>
+  <text class="title" x="60" y="58">RNIC → SSD: Data Path Comparison</text>
+  <text class="title" x="60" y="103">Host DDR Payload Semantics</text>
+
+  <rect class="blueHead" x="60" y="165" width="460" height="85"/>
+  <text class="head" x="90" y="202">A. PCIe P2P Direct</text>
+  <text class="body" x="90" y="230">RNIC / DPU → peer buffer → SSD controller</text>
+
+  <rect class="redHead" x="570" y="165" width="460" height="85"/>
+  <text class="head" x="600" y="202">B. Cache Stash + Writeback</text>
+  <text class="body" x="600" y="230">RNIC → L3 → SSD read → dirty eviction</text>
+
+  <rect class="greenHead" x="1080" y="165" width="460" height="85"/>
+  <text class="head" x="1110" y="202">C. Cache Stash + Discard</text>
+  <text class="body" x="1110" y="230">RNIC → L3 → read-and-invalidate → drop</text>
+
+  <rect class="box" x="60" y="285" width="460" height="405"/>
+  <rect class="box" x="570" y="285" width="460" height="405"/>
+  <rect class="box" x="1080" y="285" width="460" height="405"/>
+
+  <text class="small" x="85" y="325">CACHE PAYLOAD</text>
+  <text class="body" x="85" y="358">Host L2/L3：不持有 payload</text>
+  <line class="line" x1="85" y1="380" x2="495" y2="380"/>
+  <text class="small" x="85" y="415">DDR 关键窗口</text>
+  <rect class="pill" x="85" y="435" width="205" height="38"/><text class="pillText" x="188" y="461" text-anchor="middle">payload = 0</text>
+  <text class="small" x="85" y="510">DDR 完整生命周期</text>
+  <text class="head" x="85" y="548">0× payload writeback</text>
+  <text class="small" x="85" y="590">关键依赖</text>
+  <text class="body" x="85" y="620">P2PDMA · topology · ACS/IOMMU</text>
+  <text class="body" x="85" y="650">CMB/PMR · peer driver</text>
+
+  <text class="small" x="595" y="325">CACHE PAYLOAD</text>
+  <text class="body" x="595" y="358">SSD read 后仍可能 valid + dirty</text>
+  <line class="line" x1="595" y1="380" x2="1005" y2="380"/>
+  <text class="small" x="595" y="415">DDR 关键窗口</text>
+  <rect class="pill" x="595" y="435" width="205" height="38"/><text class="pillText" x="698" y="461" text-anchor="middle">DRAM Read = 0</text>
+  <text class="small" x="595" y="510">DDR 完整生命周期</text>
+  <text class="head" x="595" y="548">≈ 1× DDR write</text>
+  <text class="small" x="595" y="590">关键依赖</text>
+  <text class="body" x="595" y="620">I/O coherence · LLC allocation</text>
+  <text class="body" x="595" y="650">eviction / flush / reclaim</text>
+
+  <text class="small" x="1105" y="325">CACHE PAYLOAD</text>
+  <text class="body" x="1105" y="358">SSD read 后显式 INVALID / dropped</text>
+  <line class="line" x1="1105" y1="380" x2="1515" y2="380"/>
+  <text class="small" x="1105" y="415">DDR 关键窗口</text>
+  <rect class="greenPill" x="1105" y="435" width="205" height="38"/><text class="pillText" x="1208" y="461" text-anchor="middle">DDR Write = 0*</text>
+  <text class="small" x="1105" y="510">DDR 完整生命周期</text>
+  <text class="head" x="1105" y="548">0×，条件成立时</text>
+  <text class="small" x="1105" y="590">关键依赖</text>
+  <text class="body" x="1105" y="620">completion + fence + ownership</text>
+  <text class="body" x="1105" y="650">dirty-discard primitive</text>
+
+  <rect x="60" y="740" width="1480" height="100" fill="#eef2f3" stroke="#929ba2" stroke-width="1.5" rx="5"/>
+  <text class="head" x="85" y="775">Engineering rule</text>
+  <text class="body" x="300" y="775">大 payload → A；CPU 必须立即处理的热微块 → B；C 只有在平台协议和驱动证明 read-and-invalidate / dirty-discard 安全时才可采用。</text>
+  <text class="small" x="85" y="810">*普通 PCIe DMA read、TPH/Steering Tag 不自动带来 discard；无法证明时回退到 A 或 B。</text>
+</svg>
