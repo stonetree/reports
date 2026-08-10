@@ -1,0 +1,31 @@
+## L2层新增需求
+需求唯一标识,优先级,核心模块,需求描述,重点针对场景
+L2-CONN-CostAwareReturn-039,P0,统一协议与标准接口,本需求要求 KVConnector 的前缀查询与获取接口实现“算力代偿感知自适应返回协议”：存储池根据底层链路 P99 时延和拓扑质量，自动评估将命中 KV 搬运至目标端（或协商 staging area）的端到端加载耗时；若该耗时超过推理框架设定的重算时延阈值（或导致 TTFT 负收益），存储池内部判定为逻辑 Miss，向推理框架返回统一的 MISS 或 RECOMPUTE 信号，由框架触发本地重算，禁止返回低效、超时的物理块地址。,拥塞链路下的前缀命中低效绕行
+L2-CONN-BufferContract-040,P0,统一协议与标准接口,本需求要求明确划分推理框架执行内存（Execution HBM）与存储池存储资源（Storage Pool）的权责边界。统一存储池不负责维护推理运行时的算力准入状态与本地卡上执行 HBM 剩余容量校验；存储池接口采用“拉取至指定指针（Pull to Provided Device Pointer）”契约，由上层推理框架独立确保目标 device_ptr 分配的可用性与安全性，存储池在检测到目标地址不可写或引发寻址错误时，仅通过标准错误码进行感知与上报，防止存储池逻辑过度侵入算力内存管理。,算力执行内存与存储池内存管理解耦
+
+## L3层新增需求
+需求唯一标识,优先级,核心模块,需求描述,重点针对场景
+L3-CO-RefCountLifecycle-086,P0,一致性、隔离与QoS,本需求要求统一存储池的分层流转与驱逐引擎必须复用或集成上层推理框架的活跃引用计数（Active Reference Count）机制。对于驻留于 HBM/DDR 的 KVCache 块，当收到租约到期或强行换出信号时，系统必须校验其 refcount；若 refcount > 0（表明当前仍有活动推理 Batch 正在 attach 或消费），系统必须将该块置于 EVICTING 锁定状态，绝对禁止执行物理空间释放、覆盖或降级换出，只有当引用计数降至 0 且底层硬件 Stream 的 Fence 屏障完成后，方可实施物理回收。,活动计算流中 KVCache 块的驱逐保护
+L3-MS-AtomicPublishVisibility-087,P0,前缀目录与元数据平面,本需求要求放弃控制面的三阶段提交（3PC）与分布式 WAL 日志，数据平面全面拥抱单写者最终一致性架构；但为了确保元数据匹配的正确性，元数据平面必须实现“前缀索引原子化可见性流水线（Atomic Metadata Publication Pipeline）”。当 KVCache 生成并写入时，其额外属性（包含模型 ID、版本、Tokenizer 属性、Layout 架构等）必须在后台完全写入前缀元数据表单，在全部属性与校验和（Checksum）验证通过前，前缀索引节点在全局检索树中必须处于掩码不可见状态（Masked），严禁提前对部分元数据暴露匹配查询，避免跨请求产生误匹配或空地址引用。,高吞吐低时延元数据发布一致性
+L3-MS-TTFTIndexLayout-088,P1,前缀目录与元数据平面,本需求要求针对 TTFT 关键路径，设计并实现一套高吞吐、超低延迟的前缀匹配元数据检索结构：分布式前缀表必须采用多级分片（Sharding）的一致性哈希架构，且核心 Radix Tree 的前两级拓扑节点必须常驻于非交换（Non-Swappable）的本地 Host DDR 或 NPU 专用侧内存中，结合 SIMD（AVX-512 / ARM Neon）指令集对 Token Span 和哈希键进行硬件级并行比对，确保在微秒级内完成确定性 Miss 或命中判定，将索引查询开销彻底从 TTFT 核心路径中解耦。,TTFT 关键路径高性能元数据检索
+L3-SE-MultiReplicaResolver-089,P1,语义策略与路径管理,本需求要求实现多副本位置自适应感知与最优路由路径解析算法（Multi-Replica Path Resolver）：当同一份 KVCache 在集群内存在 HBM、本地 DDR、远端 DDR、SSD 等多个异构节点副本时，路径解析器必须实时汇总硬件拓扑（NVLink / UBLink / RDMA / PCIe）、队列拥塞深度（Queue Depth）和介质读取时延，构建启发式惩罚/奖励代价得分模型，动态选出端到端提取耗时最短的最优源端位置，并将解析延迟控制在 <5μs 内，避免多副本场景下的盲目拉取。,异构分布式多副本的最优路径路由决策
+L3-CO-MigrationRCULock-090,P1,一致性、隔离与QoS,本需求要求针对处于冷热升降级或碎片整理过程中的活跃中途迁移（In-Flight Migrating / Tiering）KV 块，实现基于 RCU（Read-Copy-Update）理念的无锁高并发一致性读写切换机制：当某一 KV 块正在被后台引擎复制至新介质时，前台查询与 Attach 动作仍被路由至旧有物理地址，保证读取流绝不发生 Stall 或 Block；在目标端数据完整性校验（CRC）及可见性 fence 触发完成的瞬间，通过原子操作一次性更替元数据指针至新物理 Extent，并进入一轮 Batch 的安全退出期后释放旧空间，确保整个迁移生命周期对推理计算层完全透明。,动态升降级与碎片整理期间的并发无感消费
+
+
+## L4层新增需求
+需求唯一标识,优先级,核心模块,需求描述,重点针对场景
+L4-HW-NICSpecConstraint-075,P1,Fabric能力与统一路由,本需求要求针对底层传输层所依赖的高性能网卡（RNIC）和 DPU 提出硬性硬件规格诉求：支持硬件级 SR-IOV 虚拟通道，且单硬件端口必须提供不少于 4 个具备独立硬件速率限制（Hardware Rate Limiting）的硬件队列对（QP）；网卡固件板载 SRAM 必须满足至少 128K 个并发 QP 上下文的高速缓存（QP Context Cache），防止在多租户、多业务流量复用 4 类经典优先级队列时发生固件上下文频繁换出（Context Thrashing），从而在大规模迁移挤兑下确保底层控制信令与前台加载通道的硬时延边界。,大规模集群网络软硬件协同性能兜底
+
+## 横向模块分类sheet刷新内容
+第一个 Sheet（横向模块分类）同步刷新：
+
+TM1: 推理调度与标准接口控制：其 LKVConnector 层需求 ID 字段成功追加 L2-CONN-CostAwareReturn-039 与 L2-CONN-BufferContract-040；其 L传输管理层需求 ID 字段追加 L3-SE-MultiReplicaResolver-089；其 L底层传输层需求 ID 字段追加 L4-HW-NICSpecConstraint-075。
+
+TM2: 分布式前缀索引与元数据平面：其 L传输管理层需求 ID 字段同步追加 L3-MS-AtomicPublishVisibility-087 与 L3-MS-TTFTIndexLayout-088。
+
+TM5: 共享协同、安全隔离与 QoS 管控：其 L传输管理层需求 ID 字段同步追加 L3-CO-RefCountLifecycle-086 与 L3-CO-MigrationRCULock-090。
+
+## 01_核心模块字典sheet刷新内容
+最后一个 Sheet（01_核心模块字典）校验：
+
+经验证，新增加需求所在的 统一协议与标准接口、一致性、隔离与QoS、前缀目录与元数据平面、语义策略与路径管理 以及 Fabric能力与统一路由 核心模块均完整命中现有 L2/L3/L4 架构字典，其层级从属职责完全合理，元数据结构未发生任何物理冲突。
