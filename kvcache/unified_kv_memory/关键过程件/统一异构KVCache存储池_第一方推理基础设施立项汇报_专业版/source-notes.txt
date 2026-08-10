@@ -1,0 +1,30 @@
+本次 PPT 使用 codex-ppt skill，最终页面为内置 image_gen 生成的 16:9 全页图片，不导入或复用现有 PPTX 模板。
+
+本地项目来源（项目相关信息必须以这些材料为准）：
+- 统一异构KVCache存储池_项目竞争力与业界方案深度对比分析报告_V3.2_立项论证与潜在壁垒版.md
+- 统一异构KVCache存储池总体架构与SRS评审导读_V2.2评审稿.md
+- others/统一异构KVCache存储池_关键技术原型验证清单_V1.5_SRS-V2.2对齐修订版.xlsx
+- outputs/需求树_V2.3.1_术语小修_20260724/统一异构KVCache存储池_全量需求树_V2.3.1_专属术语中文释义修订版_Excel兼容性修复版.xlsx
+- outputs/需求基线复核_20260717/KVCache SRS需求列表 V2.2_传输底座视角_建议修订版.xlsx
+- 项目SR需求关系关联架构图.pptx（仅作为内容参考）
+- 竞争力总结/统一异构KVCache存储池_在线推理软件栈框架图与关键竞争力_核心技术重构版_四项竞争力版.pptx（仅作为内容参考）
+
+本页厂商公开来源（优先官方）：
+- AMD Silo AI: https://www.amd.com/en/solutions/ai/silo-ai.html
+- AMD ZT Systems: https://www.amd.com/en/newsroom/press-releases/2024-8-19-amd-to-significantly-expand-data-center-ai-systems.html
+- AMD Brium: https://www.amd.com/en/blogs/2025/amd-acquires-brium-to-strengthen-open-ai-software-ecosystem.html
+- AMD Enosemi: https://www.amd.com/en/blogs/2025/amd-acquires-enosemi-to-accelerate-co-packaged-optics-innovation-for-ai-systems.html
+- AMD MK1: https://www.amd.com/en/blogs/2025/amd-acquires-mk1-to-advance-ai-inference-performance.html
+- NVIDIA Dynamo overall architecture: https://docs.nvidia.com/dynamo/v-0-7-1/design-docs/overall-architecture
+- NVIDIA Dynamo current architecture: https://docs.dynamo.nvidia.com/dynamo/design-docs/overall-architecture
+- NVIDIA Dynamo / NIXL / KV cache overview: https://www.nvidia.com/en-us/ai/dynamo/
+- Intel OpenVINO KV-cache quantization: https://docs.openvino.ai/2026/openvino-workflow-generative/inference-with-optimum-intel.html
+- Intel OpenVINO GenAI workflow: https://docs.openvino.ai/nightly/openvino-workflow-generative.html
+- Intel OpenVINO release notes: https://docs.openvino.ai/2026/about-openvino/release-notes-openvino.html
+- Intel Gaudi 3: https://www.intel.com/content/dam/www/central-libraries/us/en/documents/2024-09/gaudi3-ai-infographic.pdf
+- Arm Kleidi: https://newsroom.arm.com/news/pytorch-kleidi-integrations-cloud-to-edge
+- Arm KleidiAI: https://developer.arm.com/community/arm-community-blogs/b/ai-blog/posts/kleidiai
+- Arm Neoverse / AI infrastructure: https://newsroom.arm.com/blog/cloud-ai-is-purpose-built
+
+厂商页措辞边界：AMD/NVIDIA/Intel/Arm 的公开动作主要覆盖软硬件整栈、内存与数据移动、推理运行时、系统集成和生态适配；不能把每家厂商都表述成已经公开交付了完整的 KVCache 全生命周期存储池。PPT 与文字稿将“KVCache 是这些投入在推理状态层的共同收敛点”表述为基于来源的分析判断，并保留必要限定语。
+

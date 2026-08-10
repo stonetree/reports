@@ -1,0 +1,43 @@
+{
+  "slide": 7,
+  "title": "交付目标与验证节奏：以原型验证获取关键证据，以阶段门禁控制投入",
+  "prompt": "# Codex PPT Slide Image Prompt\n\n## Canvas\n{\n  \"type\": \"16:9 full-slide PowerPoint image\",\n  \"language\": \"Chinese\",\n  \"slide_number\": 7,\n  \"render_slide_number\": false\n}\n\n## Deck Goal\n面向技术CTO、部门主管、首席架构师、开发团队主管与市场部门主管，用正式立项汇报方式证明：面向国产硬件的第一方KVCache全生命周期基础设施值得投资，并且项目架构、关键技术、收益路径与验证节奏已经拆解到可交付层面。\n\n## Required Background\n{\n  \"deck_context\": {\n    \"source_summary\": \"项目面向国产硬件建设统一异构KVCache存储池，原生管理高带宽显存、主机内存、固态存储及远端存储等多层介质，结合UBMEM、URMA等硬件能力，对KVCache的身份、可消费资格、冷热状态、预取前递、路径选择、传输、回退、观测和客户收益进行全生命周期管理。\",\n    \"core_claim\": \"硬件厂商需要第一方推理基础设施，把非公开硬件信息、跨层修改权限和生产负载闭环转化为客户可感知的时延、吞吐、容量与全生命周期成本收益；KVCache是最适合率先落地的高价值状态对象。\",\n    \"argument_sequence\": [\n      \"看自己：回答为什么要做、为什么现在做、为什么独立做、为什么由硬件厂商做。\",\n      \"看产业：用AMD、NVIDIA、Intel、Arm的官方动作证明第一方推理基础设施已成为产业竞争焦点。\",\n      \"看同类：与Mooncake、LMCache共生，但第一方责任不可替代。\",\n      \"给证据：用四层架构、关键问题与技术手段、复合收益和原型验证节奏证明可以交付。\",\n      \"做决策：申请有条件、分阶段释放投入。\"\n    ],\n    \"fact_boundaries\": [\n      \"产业页的厂商动作只作为趋势背书，不作为本项目性能证明。\",\n      \"所有性能数字都是最终交付目标或建议门槛，不得写成当前已经达成。\",\n      \"需求树结构自洽不等于硬件能力、性能收益或商业价值已经验证。\",\n      \"不主张替代开源软件，不提复用Mooncake或LMCache的数据平面。\",\n      \"不以某个版本的静态功能领先作为长期壁垒。\"\n    ],\n    \"canonical_terms\": [\n      \"第一方推理基础设施\",\n      \"KVCache全生命周期\",\n      \"物理命中、可消费命中、正收益命中\",\n      \"访问意图、路径计划、传输描述、可见性约束、实际路径回执\",\n      \"客户结果闭环\",\n      \"跨层修改权限\",\n      \"国产硬件样板工程\",\n      \"原型验证门禁\"\n    ]\n  },\n  \"slide_local_context\": {\n    \"required_background\": \"本地V2.2评审导读确认8个必做原型包、3个条件/证伪项和24条中层需求覆盖。阶段释放不是机械完成率：阶段0投入30%建设地基；阶段1投入50%打通主流程；阶段2投入80%进入受控灰度；阶段3完成100%交付。每个门禁必须输出原始数据、固定对照、故障注入结果、可复用代码和签字结论。若核心假设失败，允许停止或限定场景。\"\n  }\n}\n\n## Global Style\n{\n  \"name\": \"正式立项评审风（定制）\",\n  \"visual_direction\": \"面向高层技术评审的正式立项汇报；结论先行、证据链完整、工程感克制。每页都必须让正文证据自然推导出结论，不能只在底部放口号。\",\n  \"color_palette\": \"暖白或极浅灰底色，深海军蓝为主色，低饱和青绿色为辅助色，克制的焦橙色只用于关键差异、门禁或风险。\",\n  \"typography\": \"中文无衬线商务字体；页面标题清晰但不过度夸张，约34至38磅视觉尺度；副标题17至19磅；正文14至18磅；避免细小脚注和过多英文。\",\n  \"texture_and_finish\": \"扁平、精确、轻量边框和细分隔线；不使用渐变、三维、霓虹、装饰插画、夸张图标或营销海报效果。\",\n  \"density_and_spacing\": \"信息密度中高，保留清楚的层级和安全边距；允许流程、架构、时间线和证据表，不允许空洞卡片堆叠。\",\n  \"language_rule\": \"正文以准确中文为主；仅保留厂商名称、KVCache、UBMEM、URMA、TTFT、TPOT等确有必要的行业名称或指标。禁止使用Best-OSS、State Intelligence、Capability Profile、QueryPlan、ActualPathReceipt等内部英文缩写或对象名。\",\n  \"deck_consistency\": \"匹配获批第3页的配色、字体气质、内容密度、细线边框和深蓝结论带；各页按内容角色变化布局，不机械复制四卡片结构。\"\n}\n\n## Input Images\n\n- Image 1: D:/codes/reports/kvcache/unified_kv_memory/outputs/统一异构KVCache存储池_第一方推理基础设施立项汇报_专业版/origin_image/slide_03.png — 获批第3页样张；仅作为全稿视觉风格、字体层级、内容密度和配色参考; 匹配风格，不复制该页的具体内容和四卡片布局\n\n\n## Slide\n{\n  \"number\": 7,\n  \"title\": \"交付目标与验证节奏：以原型验证获取关键证据，以阶段门禁控制投入\",\n  \"role\": \"delivery roadmap and gates\",\n  \"intent\": \"说明数值是最终交付目标，并用4至5周原型验证、分阶段门禁和证据包降低立项风险。\"\n}\n\n## Text\n{\n  \"title\": \"交付目标与验证节奏：以原型验证获取关键证据，以阶段门禁控制投入\",\n  \"key_points\": [\n    \"最终目标：首字时延高分位降低不低于20%；混合流量下生成时延高分位回退小于3%；可消费命中提升不低于15%，错误或过期消费为0；高带宽显存有效容量提升不低于30%。\",\n    \"第0周：冻结硬件、模型、业务负载、服务目标和公平比较基线；完成重算、介质与传输基线。\",\n    \"第1周：验证传输描述、直接访问、可见性约束和路径计划，回答硬件能力边界是否成立。\",\n    \"第2周：验证容量、生命周期和‘物理命中→可消费→挂接成功’漏斗，回答真实复用上限。\",\n    \"第3至4周：完成前后台混合流量、故障注入和薄闭环，按通过、有条件通过或停止进入阶段0至阶段3。\",\n    \"口径：目标数字是最终交付门槛，不是当前已经达成的成绩。\"\n  ],\n  \"speaker_focus\": null\n}\n\n## Layout\n{\n  \"composition\": \"上半部为四项最终目标契约，每项同时显示目标值、测量对象和验收边界；下半部为第0周至第4周时间线，穿插三个决策门。最右侧为阶段0至阶段3的投入释放阶梯。\",\n  \"content_zones\": \"顶部标题和口径声明；上部目标契约；下部原型验证时间线；右侧阶段门禁；底部证据包清单。\",\n  \"variation_rule\": \"采用目标契约加时间线，不使用收益闭环。\",\n  \"relationship_to_previous_slide\": \"从复合收益转到如何用事实兑现目标、控制风险。\",\n  \"spacing\": \"数字醒目但必须标注‘最终目标’，时间线与投入门禁一一对应。\"\n}\n\n## Visual Elements\n{\n  \"main_visual\": \"四项目标契约与4至5周原型验证时间线。\",\n  \"supporting_elements\": \"通过/有条件通过/停止三态门禁、30%/50%/80%/100%释放阶梯、证据包图标化短标签。\"\n}\n\n## Constraints\n[\n  \"禁止把任何目标写成已实测。\",\n  \"不用PVT、Go、Conditional、No-Go等缩写作为主要可见文字。\",\n  \"保留TTFT、TPOT时必须配中文含义。\",\n  \"目标、验证动作和决策门必须形成对应关系。\"\n]\n\n## Style Reference Rule\nUse Image 1 as the approved sample-slide style reference. Match its palette, typography mood, density, texture, and overall visual identity. Do not copy its exact layout unless this slide's layout explicitly asks for it.\n\n## Input Image Handling Rules\nFor any input image marked as a strict input asset, include it visibly and preserve its content. Do not redraw, replace, relabel, or invent a similar figure. Scale and crop only as needed for composition while keeping the important labels, arrows, data, and relationships recognizable.\n\n## Universal Constraints\n- The final image itself must contain the title and key points.\n- Render Chinese text exactly and legibly; avoid garbled characters.\n- Keep the confirmed deck style consistent while varying layout by slide role.\n- No watermark, unrelated logo, or extra slide number.\n",
+  "out": "slide_07.png",
+  "input_images": [
+    {
+      "path": "D:/codes/reports/kvcache/unified_kv_memory/outputs/统一异构KVCache存储池_第一方推理基础设施立项汇报_专业版/origin_image/slide_03.png",
+      "role": "获批第3页样张；仅作为全稿视觉风格、字体层级、内容密度和配色参考",
+      "fidelity": "匹配风格，不复制该页的具体内容和四卡片布局"
+    }
+  ],
+  "requires_context_images": true,
+  "expected_backend": "built-in image tool",
+  "sample_generation_method": {
+    "backend_used": "built-in image tool",
+    "tool_name": "image_gen",
+    "mode": "edit",
+    "prompt_source": "parent-thread iterative sample prompt for slide 03, approved after typography, content-density and Chinese-wording review",
+    "size": "16:9 landscape, 1664x935 generated output",
+    "quality": "built-in default",
+    "model_config": "built-in default; model details not exposed",
+    "approved_sample_path": "D:/codes/reports/kvcache/unified_kv_memory/outputs/统一异构KVCache存储池_第一方推理基础设施立项汇报_专业版/origin_image/slide_03.png",
+    "input_context_preparation": "Parent loads the approved sample with view_image; workers use it as a style-only referenced image and completely redraw each assigned slide.",
+    "handoff_rule": "Subagents must use the same built-in image_gen tool and referenced-image edit workflow; return a blocker if unavailable."
+  },
+  "generation_contract": {
+    "must_use_selected_image_backend": true,
+    "must_match_sample_generation_method": true,
+    "forbidden_final_image_methods": [
+      "local drawing/rendering scripts",
+      "Pillow-generated slides",
+      "SVG/HTML/CSS/canvas screenshots",
+      "python-pptx/PptxGenJS/native PPT layout screenshots",
+      "manually composited text/image overlays"
+    ],
+    "must_return": [
+      "backend_used",
+      "selected_source",
+      "qa_note"
+    ]
+  }
+}
