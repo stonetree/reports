@@ -1,10 +1,10 @@
 # PVT-02：异构框架 Layout 描述符编译器与异步 DAG 流水验证实施方案设计
 
 > **验证 ID**：PVT-02  
-> **验证名称**：异构框架 Layout 描述符编译器与 Prefill/Decode 异步 DAG 流水验证  
+> **验证名称**：异构框架 Layout 描述符编译器与异步 DAG 流水验证  
 > **对应证据门**：**E1 能力路径**  
 > **证伪标记**：否（关键执行链确认）  
-> **建议周期**：10~12 人日  
+> **建议周期**：5~7 人日  
 > **主关联 IR**：`IR-01-02`, `IR-01-04`  
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L3-SE-DescriptorFromManifest-079`, `L3-MC-LayoutTransformPlan-078`, `L2-OL-BulkDescriptor-025`, `L2-OL-LayoutNegotiation-024`  
@@ -12,292 +12,364 @@
 
 ---
 
-## 1. 验证项概述与映射追溯
+## 1. 验证目标与交付结论定义
 
-### 1.1 背景诉求与必要性
+### 1.1 待验证核心命题
+不同开源推理框架在内存布局上存在本质差异：
+- **vLLM** 采用固定槽位大小的 Paged Block（如 16 或 32 Tokens 为一物理 Block）；
+- **SGLang** 采用基于 Radix Tree 动态扩展的物理连续 Spans（长度从几十到数千 Tokens 不等）。
 
-不同开源推理框架在内存布局上存在显著差异，例如 vLLM 采用固定 Block 大小（如 16/32 tokens），而 SGLang 采用基于 Radix Tree 的连续 page/span 机制。如果每次传输都需要 CPU 逐块做格式转换或单个描述符轮询提交，CPU 提交瓶颈与小 I/O 放大将完全吞噬底层硬件的高带宽收益。
+如果底层传输每次都由 Host CPU 逐块做格式转换或单个描述符轮询提交，CPU 提交瓶颈与小 I/O 放大将完全吞噬底层硬件的高带宽收益。本验证旨在通过算法与数据结构原型实现，证明：
+1. **Layout 描述符编译器（Descriptor Compiler）**能够将跨框架离散物理 Block 零拷贝编译为硬件 Scatter-Gather 描述符，使**描述符提交数量下降 $\ge 50\%$**，**Host CPU 提交耗时下降 $\ge 40\%$**；
+2. **异步 DAG 流水调度引擎**能够实现 NPU 算力计算流（Compute Stream）与 DMA 传输流（Transfer Stream）的高效重叠，**计算-传输重叠率（Overlap Ratio）达到 $\ge 60\%$**。
 
-### 1.2 与项目竞争力关联
-
-支撑**竞争力 #1（面向布局编译的 Descriptor 引擎）**与**竞争力 #4（统一 QueryPlan 异步执行）**。证明将不同框架逻辑布局零拷贝编译为批量 Hardware Descriptors 并构建异步 DAG，能够实现 Prefill/Decode 计算算力 Stream 与 KV 传输 Stream 的高效重叠。
-
-### 1.3 SRS / SR23 / IR 需求追溯矩阵
-
-| 需求层级 | 标识符 / 编号 | 描述 | 验证承接责任 |
-|---|---|---|---|
-| **IR** | `IR-01-02` | 逻辑 Extent 到物理 Descriptor 批量编译 | 验证零拷贝 Descriptor Compiler 编译开销与压缩率 |
-| **IR** | `IR-01-04` | 异步计算-传输重叠流水线 | 构建 NPU Compute Stream 与 DMA Transfer Stream 的异步重叠 DAG |
-| **SRS** | `L3-SE-DescriptorFromManifest-079` | ExtentManifest 到 Hardware Descriptor 转化 | 零拷贝内存映射与描述符链表生成 |
-| **SR23** | `SR23-01-02-01` | 硬件描述符编译器 (Descriptor Compiler) | 交付 C++ 批量描述符生成引擎 |
-
----
-
-## 2. 核心验证假设与实验矩阵设计
-
-### 2.1 待验证核心假设（Hypotheses）
-
-1. **H2-1**：Descriptor Compiler 能够将连续或离散的物理 Block/Page 一次性编译为 Scatter-Gather 描述符，**描述符提交数量下降 $\ge 50\%$**，**Host CPU 提交开销下降 $\ge 40\%$**。
-2. **H2-2**：通过异步 DAG 调度，NPU 计算与 KV 传输的**重叠率（Overlap Ratio）达到 $\ge 60\%$**。
-
-### 2.2 详细实验矩阵
-
-| 框架内存布局 | 逻辑数据块 (Extent) | Scatter-Gather 段数 | 队列深度 (QD) | 异步重叠场景 |
-|---|---|---|---|---|
-| **vLLM Paged Block** (16/32 tokens) | 256KB ~ 64MB | 1 ~ 1024 段 | 1 ~ 64 | Prefill 算力 Stream 重叠 |
-| **SGLang Radix Span** (动态 page) | 256KB ~ 64MB | 1 ~ 1024 段 | 1 ~ 64 | Decode 算力 Stream 重叠 |
-| **异常/取消用例** | 随机离散 Span | 512 段 | 32 | 流文中途 Cancel / Timeout |
+### 1.2 最终交付数据与结论产出
+开发人员执行完本方案后，必须输出以下交付件：
+1. **《Descriptor 编译器耗时与 Scatter-Gather 压缩率实测表》**（覆盖 16~1024 离散段）；
+2. **《CPU 提交时延基线 vs 批量编译优化对比表》**；
+3. **《NPU Compute 与 DMA Transfer 异步流水 Timeline 重叠率分析表》**（附 Profiler Trace）；
+4. **《Go / No-Go 判定结论》**：依据重叠率 $\ge 60\%$ 与 CPU 提交降幅 $\ge 40\%$ 门槛判定。
 
 ---
 
-## 3. 测试 Harness 架构与量化数学模型
+## 2. 核心数据结构与算法原型详细设计
 
-### 3.1 描述符编译器与 DAG 调度架构
+为了让开发人员准确理解并实现 Layout 描述符编译器与异步 DAG 流水调度器，本节给出完整的数据结构定义、核心编译算法与流水状态机设计。
 
-```mermaid
-flowchart LR
-    subgraph Framework_Tier["1. 推理框架逻辑层"]
-        vLLM_Blocks["vLLM Block Table"]
-        SGLang_Spans["SGLang Radix Spans"]
-    end
-
-    subgraph Compiler_Tier["2. Descriptor Compiler Engine"]
-        Manifest["ExtentManifest (Logical Ranges)"]
-        ScatterBuilder["Scatter-Gather Merger & Offset Calculator"]
-        BatchCQ["Bulk Hardware Descriptor Generator"]
-    end
-
-    subgraph DAG_Engine["3. Async Stream DAG Runner"]
-        NPU_Compute_Stream["NPU Kernel Execution Stream"]
-        DMA_Transfer_Stream["URMA / DMA Transfer Stream"]
-        Sync_Fence["Hardware Fence / Event Barrier"]
-    end
-
-    vLLM_Blocks --> Manifest
-    SGLang_Spans --> Manifest
-    Manifest --> ScatterBuilder
-    ScatterBuilder --> BatchCQ
-    BatchCQ --> DMA_Transfer_Stream
-    NPU_Compute_Stream <== "Overlap Computation & Transfer" ==> DMA_Transfer_Stream
-    DMA_Transfer_Stream --> Sync_Fence
-```
-
----
-
-## 4. 对照基线与因果消融设计
-
-1. **基线 A（单块拷贝基线）**：逐 Block 单个提交 CPU DMA 命令的原始方式。
-2. **基线 B（开源批量实现）**：Mooncake / LMCache 现有的 Batch Transfer 模块。
-3. **消融控制**：
-   - 拆分测量编译时间、提交时间与硬件传输等待时间，防止大包传输吞噬小 I/O 放大；
-   - 显式关闭计算-传输重叠，测量纯串行耗时。
-
----
-
-## 5. 指标体系与 Go/No-Go 显式判定门槛
-
-- **Go 门槛**：
-  1. 描述符数量下降 $\ge 50\%$；
-  2. 有效带宽提升 $\ge 30\%$；
-  3. CPU 提交时间下降 $\ge 40\%$；
-  4. 布局协商错误 $= 0$；
-  5. 计算-传输重叠率 $\ge 60\%$；
-  6. 额外内存开销 $\le 15\%$。
-- **No-Go 门槛**：描述符编译开销过大抵消传输收益、布局协商错误不可防止，或流水调度导致 TPOT/内存严重退化。
-
----
-
-## 6. 完整原型验证实施方案与具体步骤
-
-### 6.1 验证环境准备与依赖安装
-
-1. **编译环境**：GCC 11+ / Clang 14+, CMake 3.22+, C++17 Standard。
-2. **硬件/驱动**：NPU Control Driver, URMA Library (`liburma`), CUDA/NPU Stream Runtime。
-3. **工作目录**：`/tmp/pvt02_harness/`。
-
-### 6.2 核心 C++ 代码实现
-
-#### 代码 1：`descriptor_compiler.cc` (C++ 零拷贝 Scatter-Gather 描述符编译器)
+### 2.1 核心数据结构定义
 
 ```cpp
-#include <iostream>
-#include <vector>
-#include <chrono>
-#include <cstdint>
-#include <algorithm>
-#include <cassert>
-
-struct LogicalBlock {
-    uint64_t block_id;
-    uint64_t phys_offset;
-    uint32_t size_bytes;
+// 1. 跨框架逻辑 Block 描述 (由 vLLM BlockTable 或 SGLang Span 解析得出)
+struct LogicalBlockExtent {
+    uint64_t logical_token_start; // 逻辑起始 Token 偏移 (如 0, 16, 32...)
+    uint32_t token_count;         // 本段 Token 数量 (如 16 或 128)
+    uint64_t phys_base_addr;      // NPU HBM 或 UBMEM 物理起始地址 (需 64B 对齐)
+    uint32_t stride_bytes;        // 层间或 Head 间跨步 (Stride)，用于多维张量映射
+    uint32_t block_bytes;         // 本块总字节数 = 2 * N_layer * N_head * Head_dim * token_count * 2B
 };
 
-struct HardwareSGEntry {
-    uint64_t src_addr;
-    uint64_t dst_addr;
-    uint32_t len;
+// 2. 统一框架清单 (ExtentManifest)
+struct ExtentManifest {
+    uint64_t request_id;
+    std::string framework_type;   // "vllm_paged" 或 "sglang_radix"
+    uint32_t total_tokens;
+    uint32_t layer_count;
+    std::vector<LogicalBlockExtent> block_extents;
 };
 
-struct BatchDescriptorHeader {
-    uint32_t entry_count;
-    uint32_t flags; // 0x01: ASYNC, 0x02: FENCE_ON_COMPLETION
-    HardwareSGEntry entries[1024];
+// 3. 硬件 Scatter-Gather 描述符条目 (直接映射至 URMA / DMA 硬件队列)
+struct alignas(64) HardwareSGEntry {
+    uint64_t src_phys_addr;       // 源物理地址 (NPU HBM / UBMEM)
+    uint64_t dst_phys_addr;       // 目的物理地址 (NPU HBM)
+    uint32_t len_bytes;           // 传输连续字节长度
+    uint16_t stream_id;           // 绑定 DMA Stream 标识
+    uint16_t flags;               // 控制位: 0x01=Notify, 0x02=Fence Barrier, 0x04=LastSegment
 };
 
-class DescriptorCompiler {
-public:
-    BatchDescriptorHeader compile_manifest(const std::vector<LogicalBlock>& blocks, uint64_t src_base, uint64_t dst_base) {
-        BatchDescriptorHeader batch;
-        batch.entry_count = 0;
-        batch.flags = 0x03;
-
-        if (blocks.empty()) return batch;
-
-        // 核心优化：合并物理连续的 Block 减少 Descriptor 数量
-        uint64_t current_src = src_base + blocks[0].phys_offset;
-        uint64_t current_dst = dst_base + blocks[0].phys_offset;
-        uint32_t current_len = blocks[0].size_bytes;
-
-        for (size_t i = 1; i < blocks.size(); ++i) {
-            uint64_t next_src = src_base + blocks[i].phys_offset;
-            uint64_t next_dst = dst_base + blocks[i].phys_offset;
-
-            if (next_src == current_src + current_len && next_dst == current_dst + current_len) {
-                // 物理地址连续，直接累加长度合并
-                current_len += blocks[i].size_bytes;
-            } else {
-                // 不连续，写入当前 SG Entry，开启新 Entry
-                batch.entries[batch.entry_count++] = {current_src, current_dst, current_len};
-                current_src = next_src;
-                current_dst = next_dst;
-                current_len = blocks[i].size_bytes;
-            }
-        }
-        // 写入最后一个 SG Entry
-        batch.entries[batch.entry_count++] = {current_src, current_dst, current_len};
-        return batch;
-    }
-};
-
-int main() {
-    // 构造包含 256 个 vLLM Paged Block (每个 64KB) 的离散/半连续 Block Table
-    std::vector<LogicalBlock> vllm_blocks;
-    for (int i = 0; i < 256; ++i) {
-        // 每 4 个 Block 连续，第 5 个跳跃
-        uint64_t offset = (i / 4 * 8 + i % 4) * 65536;
-        vllm_blocks.push_back({static_cast<uint64_t>(i), offset, 65536});
-    }
-
-    DescriptorCompiler compiler;
-    auto start = std::chrono::high_resolution_clock::now();
-    BatchDescriptorHeader batch = compiler.compile_manifest(vllm_blocks, 0x10000000, 0x20000000);
-    auto end = std::chrono::high_resolution_clock::now();
-
-    double compile_us = std::chrono::duration<double, std::micro>(end - start).count();
-
-    std::cout << "[PVT-02] Raw Block Count: " << vllm_blocks.size() << std::endl;
-    std::cout << "[PVT-02] Compiled SG Entries: " << batch.entry_count << std::endl;
-    std::cout << "[PVT-02] Reduction Ratio: " << (1.0 - (double)batch.entry_count / vllm_blocks.size()) * 100.0 << " %" << std::endl;
-    std::cout << "[PVT-02] Compile Time: " << compile_us << " us" << std::endl;
-
-    assert(batch.entry_count < vllm_blocks.size() * 0.5); // 断言缩减率 >= 50%
-    std::cout << ">>> PVT-02 Descriptor Reduction Assertion PASSED! <<<" << std::endl;
-    return 0;
-}
-```
-
-#### 代码 2：`async_dag_runner.cc` (NPU 计算 Stream 与 DMA 传输 Stream 异步重叠模拟器)
-
-```cpp
-#include <iostream>
-#include <thread>
-#include <chrono>
-#include <cassert>
-
-class AsyncDAGRunner {
-public:
-    void run_overlapped_pipeline(int compute_time_ms, int transfer_time_ms) {
-        auto start = std::chrono::high_resolution_clock::now();
-
-        // 启动 DMA 传输 Stream
-        std::thread dma_thread([transfer_time_ms]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(transfer_time_ms));
-        });
-
-        // NPU 计算 Stream 并行运行
-        std::this_thread::sleep_for(std::chrono::milliseconds(compute_time_ms));
-
-        dma_thread.join();
-
-        auto end = std::chrono::high_resolution_clock::now();
-        double total_dur_ms = std::chrono::duration<double, std::milli>(end - start).count();
-        double serial_dur_ms = compute_time_ms + transfer_time_ms;
-        double overlap_ratio = (serial_dur_ms - total_dur_ms) / std::min(compute_time_ms, transfer_time_ms);
-
-        std::cout << "[PVT-02 DAG] Serial Duration: " << serial_dur_ms << " ms | Overlapped: " << total_dur_ms << " ms" << std::endl;
-        std::cout << "[PVT-02 DAG] Overlap Ratio: " << overlap_ratio * 100.0 << " % (Goal: >= 60%)" << std::endl;
-        assert(overlap_ratio >= 0.60);
-    }
+// 4. 批量描述符包头 (Batch Descriptor Header)
+struct alignas(64) BatchDescriptorHeader {
+    uint32_t batch_id;
+    uint32_t total_entries;       // 编译合并后的 SG Entry 数量
+    uint64_t total_payload_bytes; // 本批次总正文字节数
+    uint64_t completion_fence_id;// 完成屏障 Fence ID
+    std::vector<HardwareSGEntry> entries;
 };
 ```
 
-### 6.3 步骤化具体操作流程
+### 2.2 物理连续块贪心合并算法 (Greedy SG Extent Merger)
+
+编译器核心算法必须在 $O(N)$ 时间复杂度与 $O(1)$ 额外空间开销下，一次性完成离散 Block 的连续性探测与合并：
 
 ```mermaid
 flowchart TD
-    Step1["Step 1: 编写 Descriptor Compiler 与 DAG Runner"] --> Step2["Step 2: 运行 vLLM / SGLang 内存布局编译测试"]
-    Step2 --> Step3["Step 3: 测量描述符缩减率 & CPU 提交 CPU Cycles"]
-    Step3 --> Step4["Step 4: 运行 NPU Stream 与 DMA Stream 异步重叠压测"]
-    Step4 --> Step5["Step 5: 注入 Flow Cancel 异常，验证资源安全释放"]
+    Start["输入: 逻辑源/目的 Block 数组 (N 个)"] --> Init["初始化: Entry[0] = {src[0], dst[0], len[0]}"]
+    Init --> Loop["遍历 i 从 1 到 N-1"]
+    Loop --> CheckSrc{"src[i].addr == current.src + current.len ?"}
+    CheckSrc -- "YES" --> CheckDst{"dst[i].addr == current.dst + current.len ?"}
+    CheckSrc -- "NO" --> Emit["推入当前 Entry 到 Batch; 开启新 Entry"]
+    CheckDst -- "YES" --> Merge["物理连续! current.len += len[i] (贪心合并)"]
+    CheckDst -- "NO" --> Emit
+    Merge --> Next["i++"]
+    Emit --> Next
+    Next --> Loop
+    Loop -- "遍历结束" --> FinalEmit["推入末尾 Entry; 生成 BatchHeader; 输出 SG 链表"]
 ```
 
-#### 步骤 1：准备工作目录并编译 C++ 代码
-```bash
-mkdir -p /tmp/pvt02_harness && cd /tmp/pvt02_harness
+#### 算法伪代码实现：
+```cpp
+BatchDescriptorHeader DescriptorCompiler::compile_and_merge(const ExtentManifest& src_manifest, 
+                                                            const ExtentManifest& dst_manifest) {
+    BatchDescriptorHeader batch;
+    batch.batch_id = src_manifest.request_id;
+    const auto& src = src_manifest.block_extents;
+    const auto& dst = dst_manifest.block_extents;
+    
+    if (src.empty() || src.size() != dst.size()) return batch;
 
-# 编译 C++ 描述符编译器与 DAG 模拟器
-g++ -O3 descriptor_compiler.cc -o descriptor_compiler
-g++ -O3 -std=c++17 async_dag_runner.cc -o async_dag_runner -lpthread
+    HardwareSGEntry cur;
+    cur.src_phys_addr = src[0].phys_base_addr;
+    cur.dst_phys_addr = dst[0].phys_base_addr;
+    cur.len_bytes = src[0].block_bytes;
+    cur.flags = 0;
+
+    for (size_t i = 1; i < src.size(); ++i) {
+        bool src_contig = (src[i].phys_base_addr == cur.src_phys_addr + cur.len_bytes);
+        bool dst_contig = (dst[i].phys_base_addr == cur.dst_phys_addr + cur.len_bytes);
+
+        if (src_contig && dst_contig) {
+            cur.len_bytes += src[i].block_bytes; // 连续合并，压缩描述符
+        } else {
+            batch.entries.push_back(cur);
+            cur.src_phys_addr = src[i].phys_base_addr;
+            cur.dst_phys_addr = dst[i].phys_base_addr;
+            cur.len_bytes = src[i].block_bytes;
+            cur.flags = 0;
+        }
+    }
+    cur.flags |= 0x02 | 0x04; // 置位 Fence Barrier 与 LastSegment
+    batch.entries.push_back(cur);
+    batch.total_entries = batch.entries.size();
+    return batch;
+}
 ```
 
-#### 步骤 2：运行 Layout 描述符编译测试
-```bash
-./descriptor_compiler > pvt02_compiler_res.log
-cat pvt02_compiler_res.log
-```
+### 2.3 异步 DAG 流水线编排与 Event 屏障状态机
 
-#### 步骤 3：使用 `perf stat` 测量 CPU 提交开销与 CPU Cycles 降低率
-```bash
-perf stat -e cycles,instructions,cache-misses ./descriptor_compiler
-```
+针对长前缀 Prefill 请求，系统将其划分为 $K$ 个 Chunk（如每个 Chunk 16K Tokens）。调度引擎基于双 Stream 构建异步 DAG：
+- **Stream 0 (Compute Stream)**：执行 NPU Attention 与 Prefill Kernel 计算；
+- **Stream 1 (DMA Transfer Stream)**：执行 URMA / DMA 跨节点 KVCache 拉取。
 
-#### 步骤 4：运行异步 DAG 计算-传输重叠测试
-```bash
-./async_dag_runner
-```
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Host as Host CPU (Scheduler)
+    participant DMA as Transfer Stream (DMA)
+    participant NPU as Compute Stream (NPU)
+    participant Fence as Hardware Event Fence
 
-#### 步骤 5：注入 Cancel & Timeout 异常演练
-```bash
-python3 -c "
-# 模拟中途 Cancel 场景下 Descriptor 的撤销与释放
-cancel_success = True
-assert cancel_success, 'Cancel execution failed!'
-print('PVT-02 Cancel Fault Injection PASSED.')
-"
+    Host->>DMA: 异步提交 Chunk 0 描述符
+    DMA-->>Fence: Chunk 0 传输完成 (Event 0 Ready)
+    Fence-->>NPU: 触发 NPU Prefill Chunk 0
+    par 计算与传输重叠流水
+        NPU->>NPU: 计算 Chunk 0 (GEMM / Attention)
+        Host->>DMA: 并发提交 Chunk 1 描述符 (DMA 异步拉取)
+    end
+    DMA-->>Fence: Chunk 1 传输完成 (Event 1 Ready)
+    NPU-->>Fence: 等待 Event 1 Ready
+    par 次轮重叠流水
+        NPU->>NPU: 计算 Chunk 1
+        Host->>DMA: 并发提交 Chunk 2 描述符
+    end
+    DMA-->>Fence: Chunk 2 传输完成 (Event 2 Ready)
+    NPU->>NPU: 计算 Chunk 2
+    NPU-->>Host: 全部 Chunk 计算完毕，首 Token Ready
 ```
 
 ---
 
-## 7. 数据记录规范与立项证据包模板
+## 3. 基础/对照 Micro-Benchmark 构建方法
 
-需导出并保存：
-- `pvt02_compiler_perf.csv`：描述符编译效率与 CPU 开销数据表。
-- `pvt02_dag_overlap_trace.json`：NPU 与 DMA 异步流重叠 Timeline。
+### 3.1 测试工具与源码结构
+本项验证涉及的全部编译器与异步流水压测源码均存放在 `./原型验证代码/PVT-02/` 目录下：
+
+```
+原型验证代码/PVT-02/
+├── descriptor_compiler.h  # 跨框架离散物理 Block 连续性合并与 Scatter-Gather 描述符编译器头文件
+├── descriptor_compiler.cc # 描述符贪心合并与硬件描述符生成的核心算法实现
+├── async_dag_bench.cc     # NPU 计算流与 DMA 传输流异步 DAG 重叠流水压测工具
+├── Makefile               # 编译 async_dag_bench 的工程构建文件 (make -j16)
+└── make_manifests.py      # 生成不同碎片离散度 (10%~100%) Block Table Manifest 的脚本
+```
+
+编译方法：
+```bash
+# 编译压测 Harness
+cd ./原型验证代码/PVT-02 && make clean && make
+```
+- **Manifest 生成器**：生成脚本为 `./原型验证代码/PVT-02/make_manifests.py`，模拟具有不同离散度的物理 Block 描述（`ExtentManifest`）；
+- **Descriptor 编译器**：执行内存地址连续性合并与 Scatter-Gather 硬件描述符生成；
+- **异步 DAG 执行器**：基于 NPU Stream / Event 与 URMA DMA Queue 构建异步执行流水。
+
+### 3.2 三组实验对照设置
+- **对照组 A（逐 Block 同步提交基线）**：
+  - 框架每遍历到一个物理 Block，直接调用底层驱动发起一次独立的 DMA 传输，CPU 轮询等待完成。
+- **对照组 B（纯串行基线）**：
+  - 先批量传输完所需的所有 KVCache，等待全部传输完成后，再启动 NPU Compute Stream 进行 Prefill 计算。
+- **实验组 C（批量编译 + 异步 DAG 流水）**：
+  - 启动 Descriptor Compiler 一次性生成 Scatter-Gather 批量描述符；
+  - 采用 Chunked 流水：在 NPU 执行 Chunk[i] 计算的同时，DMA 异步传输 Chunk[i+1] 的 KV Cache，通过硬件 Event 同步。
 
 ---
 
-## 8. 原型代码延续与正式架构迁入规划
+## 4. 业务 Benchmark 构造与流量特征编排
 
-- `descriptor_compiler.cc` 直接迁入正式仓库 `SR23-01-02-01` (Descriptor Compiler 模块)；
-- `async_dag_runner.cc` 的 DAG 节点关系计算迁入 `SR23-01-04-01` (异步传输流水线)。
+### 4.1 内存离散度测试场景构造
+构造具有不同碎片特征的物理内存分布：
+- **场景 1（低离散度，连续率 90%）**：模拟刚启动或已整理的显存池，每 10 个 Block 中有 9 个在物理上连续；
+- **场景 2（中离散度，连续率 50%）**：模拟中等运行负载下的显存池；
+- **场景 3（高离散度，完全离散 100%）**：模拟长时间高负载推理后的极端碎片化显存池，1024 个 Block 在物理上完全不连续。
+
+### 4.2 异步流水时序设计
+构造由 4 个 Chunk 组成的 64K Token Prefill 流水线：
+```
+Time Line ----------------------------------------------------------------->
+Compute Stream:  [ Compute Chunk 0 ] [ Compute Chunk 1 ] [ Compute Chunk 2 ] [ Compute Chunk 3 ]
+Transfer Stream: [ Transfer Chunk 1 ] [ Transfer Chunk 2 ] [ Transfer Chunk 3 ] (Done)
+                      ^--- 异步重叠 1 ---^    ^--- 异步重叠 2 ---^    ^--- 异步重叠 3 ---^
+```
+
+---
+
+## 5. 软硬件环境与打点插桩方案
+
+### 5.1 环境与 Profiler 工具
+- **硬件**：8× NPU (96GB HBM3), 800G URMA 网卡；
+- **性能分析工具**：PyTorch Profiler / NPU Profiler（抓取 Stream Timeline 与 Kernel 耗时）。
+
+### 5.2 关键路径插桩打点位置
+在 `async_dag_bench` 中植入高精度打点：
+
+| 打点标识 | 测量代码位置 | 测量含义 |
+|---|---|---|
+| `T_compile_start` / `end` | DescriptorCompiler::compile_and_merge | 描述符编译合并算法耗时 |
+| `T_submit_start` / `end` | 驱动队列提交接口入参/出参 | CPU 推送描述符到硬件队列的耗时 |
+| `T_compute_start` / `end` | NPU Compute Stream Kernel 执行 | 算力计算实际耗时 |
+| `T_dma_start` / `end` | URMA DMA Stream 传输执行 | 硬件传输实际耗时 |
+| `T_wall_total` | DAG 开始到全部 Stream 同步结束 | 端到端总挂钟耗时 |
+
+---
+
+## 6. 分步执行测试操作规程
+
+开发人员请按以下 12 个步骤依次执行：
+
+### 步骤 1：生成各离散度测试用例
+生成包含 16, 64, 256, 1024 个离散 Block 的测试 Manifest：
+```bash
+python3 ./原型验证代码/PVT-02/make_manifests.py \
+    --block-count 1024 --frag 0.5 --out ./manifest_1024_frag0.5.json
+```
+
+### 步骤 2：运行对照组 A（逐 Block 同步提交）
+测试传统逐块提交的 CPU 耗时与总传输耗时。
+
+### 步骤 3：运行 Descriptor Compiler 编译测试
+测试编译器将 1024 个 Block 编译为 Scatter-Gather 描述符的耗时与生成的描述符数量：
+```bash
+./async_dag_bench
+```
+
+### 步骤 4：运行实验组批量提交测试
+测试批量推送 SG 描述符至硬件队列的 CPU 耗时。
+
+### 步骤 5：计算描述符压缩率与 CPU 提交时延降幅
+提取数据计算：
+- 描述符数量减少比例；
+- 包含编译耗时在内的综合 CPU 开销降幅。
+
+### 步骤 6：运行对照组 B（纯串行基线）
+执行纯串行流水（先完整传输，再完整计算）。
+
+### 步骤 7：运行实验组 C（异步 DAG 流水）
+执行异步重叠流水（Chunked 计算与传输重叠）。
+
+### 步骤 8：抓取 Profiler Trace 并提取重叠区间
+在时间轴上提取：
+- NPU 计算总耗时 $T_{compute} = \sum T_{compute}(i)$
+- DMA 传输总耗时 $T_{transfer} = \sum T_{dma}(i)$
+- 异步 DAG 端到端总挂钟耗时 $T_{wall\_dag}$
+
+### 步骤 9：计算计算-传输重叠率 Overlap Ratio
+根据第 8 节公式计算实际重叠百分比。
+
+### 步骤 10：注入异常与取消测试
+在 Chunk 2 计算中途注入 `Cancel` 信号，验证异步 DMA 传输是否能够被安全中止、硬件 Fence 是否正确重置。
+
+### 步骤 11：扩展框架布局格式
+分别加载 vLLM Block 格式（固定 16/32 Token）与 SGLang Radix Span 格式（动态 64~512 Token），重复上述测试。
+
+### 步骤 12：执行 Go / No-Go 判定与交付报告导出。
+
+---
+
+## 7. 数据采集清单与记录格式
+
+### 7.1 编译与提交性能记录表 (`pvt02_compiler_bench.csv`)
+| 字段名称 | 含义 | 单位 | 示例值 |
+|---|---|---|---|
+| `block_count` | 原始输入 Block 数量 | 整数 | 1024 |
+| `frag_ratio` | 碎片化离散度 | 百分比 | 50% |
+| `sg_entries_count` | 编译后 SG 描述符条数 | 整数 | 512 |
+| `t_compile_us` | 描述符编译总耗时 | 微秒 ($\mu s$) | 14.5 |
+| `t_submit_single_us`| 单块逐个提交 CPU 耗时 | 微秒 ($\mu s$) | 420.0 |
+| `t_submit_batch_us` | 批量提交 CPU 耗时 | 微秒 ($\mu s$) | 18.0 |
+| `cpu_saving_pct` | CPU 提交总开销降幅 | 百分比 | 92.2% |
+
+### 7.2 异步流水重叠记录表 (`pvt02_async_overlap.csv`)
+| 字段名称 | 含义 | 单位 | 示例值 |
+|---|---|---|---|
+| `chunks_count` | 流水 Chunk 分块数 | 整数 | 4 |
+| `total_tokens` | 总序列 Token 长度 | 整数 | 65536 |
+| `t_serial_wall_ms` | 串行基线总耗时 | ms | 1850.0 |
+| `t_compute_sum_ms` | 计算时间总和 | ms | 1200.0 |
+| `t_dma_sum_ms` | 传输时间总和 | ms | 650.0 |
+| `t_async_wall_ms` | 异步 DAG 实际端到端耗时 | ms | 1260.0 |
+| `overlap_ratio_pct`| 计算-传输重叠率 | 百分比 | 90.7% |
+
+---
+
+## 8. 数据交叉组合与运算推导逻辑
+
+### 8.1 描述符压缩率 (Descriptor Compression Ratio)
+$$\text{Compression Ratio} = \left( 1 - \frac{N_{\text{sg\_entries}}}{N_{\text{raw\_blocks}}} \right) \times 100\%$$
+
+### 8.2 CPU 提交开销综合降幅
+$$\text{CPU Overhead Reduction} = \frac{T_{\text{submit\_single}} - (T_{\text{compile}} + T_{\text{submit\_batch}})}{T_{\text{submit\_single}}} \times 100\%$$
+
+### 8.3 计算-传输重叠率 (Overlap Ratio)
+$$\text{Overlap Ratio} = \frac{T_{\text{compute\_sum}} + T_{\text{dma\_sum}} - T_{\text{async\_wall}}}{\min(T_{\text{compute\_sum}}, T_{\text{dma\_sum}})} \times 100\%$$
+- 当 $T_{\text{async\_wall}} \approx \max(T_{\text{compute\_sum}}, T_{\text{dma\_sum}})$ 时，重叠率趋近于 $100\%$。
+
+---
+
+## 9. 多维扩展与扫参矩阵
+
+| 维度 | 参数网格 |
+|---|---|
+| **原始 Block 规模** | 16, 64, 256, 512, 1024, 2048 Blocks |
+| **显存碎片离散度** | 10% (高连续), 30%, 50%, 80%, 100% (完全离散) |
+| **框架布局格式** | vLLM Paged Block (16/32 tokens), SGLang Radix Span (动态) |
+| **流水分块数 (Chunks)** | 2, 4, 8, 16 Chunks |
+
+---
+
+## 10. Go / No-Go 判定规则与交付报告模板
+
+### 10.1 判定规则
+- **Go 门槛**：
+  1. 描述符数量压缩率 $\ge 50\%$（在中等连续性下）；
+  2. 包含编译在内的 Host CPU 提交开销下降 $\ge 40\%$；
+  3. 异步 DAG 流水计算-传输重叠率 $\ge 60\%$；
+  4. 编译算法单次运行耗时 $P99 < 50\mu s$。
+- **No-Go 门槛**：
+  - 描述符编译开销过大（$> 500\mu s$），吞噬了传输收益；
+  - 异步流水调度导致严重 Bubble，重叠率 $< 30\%$。
+
+### 10.2 开发者交付报告格式模板
+```markdown
+# PVT-02 提前验证交付报告
+
+## 1. 编译优化实测汇总
+- 1024 离散 Block 编译耗时: 14.5 us
+- 描述符数量从 1024 压缩至 512 (压缩率 50.0%)
+- CPU 提交耗时从 420 us 降至 32.5 us (包含编译耗时)，降幅 92.26% (PASS)
+
+## 2. 异步 DAG 流水实测汇总 (64K Tokens 4 Chunks)
+- 串行基线总耗时: 1850.0 ms
+- 异步 DAG 实际总耗时: 1260.0 ms (端到端提速 31.89%)
+- 理论最小极限: 1200.0 ms (受限于计算时间)
+- 计算-传输重叠率: 90.77% (PASS, 门槛 >= 60%)
+
+## 3. 最终结论
+【Go / Conditional / No-Go】: GO
+```

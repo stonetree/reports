@@ -4,7 +4,7 @@
 > **验证名称**：HBM↔SSD 直达容量主路径与 DDR 条件角色 Tiering 验证  
 > **对应证据门**：**E2/E3 决策与系统净收益**  
 > **证伪标记**：否（容量价值确认）  
-> **建议周期**：10~14 人日  
+> **建议周期**：6~8 人日  
 > **主关联 IR**：`IR-01-01`, `IR-02-08`, `IR-02-09`  
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L3-MS-Tiering-038`, `L3-MC-HIER-STORE-002`, `L3-MS-DDRRolePolicy-092`, `L3-SE-TierBypassPolicy-091`  
@@ -12,256 +12,292 @@
 
 ---
 
-## 1. 验证项概述与映射追溯
+## 1. 验证目标与交付结论定义
 
-### 1.1 背景诉求与必要性
+### 1.1 待验证核心命题
+HBM 显存容量有限且昂贵，必须扩展 NVMe SSD 作为二级大容量介质。本验证旨在通过超载压测证明：
+1. **HBM ↔ SSD 直达容量主路径**有效读写带宽达到 NVMe 物理设备顺序峰值的 **$\ge 80\%$**；
+2. 在 130% ~ 200% HBM 额定容量的超载压力（Memory Overcommit）下，通过分层换入换出，实现**可服务有效 Token 容量提升 $\ge 30\%$**，**OOM / 请求抢占驱逐率（Preemption Rate）下降 $\ge 50\%$**；
+3. 验证 **Payload 路径严格 Bypass Host DDR**，证明 DDR 仅适合作为元数据索引与轻量注册缓冲的“条件角色”，杜绝将 DDR 作为必经中转带来的无效益 CPU 拷贝与带宽争用。
 
-HBM 显存昂贵且容量有限，必须利用 NVMe SSD 扩展 KV Cache 的可寻址容量。然而，“可寻址字节”不等于“可服务能力”；如果分层搬运造成 HBM 内存碎片、抢占（Preemption）抖动或 DDR 缓存无效益拷贝，将严重损害 QPS 与成本效益。
-
-必须验证 **HBM↔SSD 直达/低主机参与为容量主路径**，而 **DDR 仅作为具备独立持续正收益时的“条件角色”**（如元数据、注册池、预取缓冲），否则 Payload 严格 Bypass DDR。
-
-### 1.2 与项目竞争力关联
-
-支撑**竞争力 #1（分层容量与 DDR 条件角色）**与**竞争力 #2（可服务容量与 NPU 吞吐提效）**。确保扩展的每一 GB 容量都能转化为实际业务 QPS，降低单位 SLO 合格事务成本（TCO）。
-
-### 1.3 SRS / SR23 / IR 需求追溯矩阵
-
-| 需求层级 | 标识符 / 编号 | 描述 | 验证承接责任 |
-|---|---|---|---|
-| **IR** | `IR-01-01` | HBM / DDR / SSD 多介质分层存储管理 | 验证 HBM↔SSD 直达搬运与介质水位 |
-| **IR** | `IR-02-08` | DDR 条件角色与 Bypass 策略 (RolePolicy) | 评估 DDR 作为 Payload 必经介质 vs Bypass 的净收益 |
-| **IR** | `IR-02-09` | 可服务有效容量与 NPU 吞吐提效 | 测量 HBM 有效容量提升与 OOM / Preemption 降低率 |
+### 1.2 最终交付数据与结论产出
+开发人员执行完本方案后，必须输出以下交付件：
+1. **《HBM ↔ SSD 裸盘与直达读写带宽达成率实测表》**；
+2. **《超载压力下 纯 HBM vs DDR 中转 vs SSD 直达扩容与 OOM 对比表》**；
+3. **《Payload Bypass DDR vs DDR 软中转 CPU 开销与时延对账表》**；
+4. **《Go / No-Go 判定结论》**：依据有效容量提升 $\ge 30\%$ 与 OOM 下降 $\ge 50\%$ 门槛判定。
 
 ---
 
-## 2. 核心验证假设与实验矩阵设计
+## 2. 核心数据结构与算法原型详细设计
 
-### 2.1 待验证核心假设（Hypotheses）
+### 2.1 核心数据结构定义
 
-1. **H5-1**：HBM↔SSD 直达容量主路径闭环，有效顺序读写带宽达到 NVMe 设备峰值的 **$\ge 80\%$**。
-2. **H5-2**：通过容量分层，**HBM 有效容量提升 $\ge 30\%$**，**OOM / Preemption 抢占率下降 $\ge 50\%$**，**内存碎片率 $< 5\%$**。
-3. **H5-3**：若 DDR 不具备独立持续正收益，Payload **严格 Bypass DDR**；DDR 仅承担 Metadata / Registered Pool 角色。
+```cpp
+// 1. 分层存储块位置枚举
+enum class TierLocation : uint8_t {
+    HBM_ACTIVE = 0,    // 驻留在一级 NPU HBM
+    SSD_EVICTED = 1,   // 已换出至 NVMe SSD 阵列
+    MIGRATING = 2      // 正在异步换入/换出中
+};
 
-### 2.2 详细实验矩阵
+// 2. 分层 KV 块描述符 (TierBlockDescriptor)
+struct alignas(64) TierBlockDescriptor {
+    uint64_t block_id;
+    uint32_t token_count;
+    TierLocation location;
+    uint64_t hbm_phys_addr;       // HBM 物理地址
+    uint64_t ssd_lba_offset;      // NVMe 块设备物理 LBA 扇区偏移 (4KB 对齐)
+    uint32_t size_bytes;          // 块字节大小 (如 64KB 或 2MB Extent)
+    std::atomic<uint64_t> last_access_epoch; // LRU 访问热度时间戳
+    std::atomic<uint16_t> pin_count;         // 活跃推理 Pin 计数 (禁止驱逐)
+};
 
-| 上下文场景 | 容量压力 (Overcommit) | 并发度 | DDR 角色配置 | 负载模式 |
-|---|---|---|---|---|
-| 128K, 256K, 1M 超长上下文 | 10%, 30%, 50% 水位超载 | 1 ~ 64 | 0GB (Direct Bypass) / 128GB / 512GB | Hot-spot (高频重用) / Long-tail (长尾长上下文) |
+// 3. 水位线控制配置
+struct WatermarkConfig {
+    double high_watermark_pct = 0.85; // 85% 显存占用触发异步换出
+    double low_watermark_pct = 0.65;  // 降至 65% 停止换出
+    uint32_t max_concurrent_ios = 32; // io_uring / SPDK 最大并发 QD
+};
+```
 
----
-
-## 3. 测试 Harness 架构与量化数学模型
-
-### 3.1 离线 Replayer 与受控物理介质 Tiering 架构
+### 2.2 水位线驱动的冷 KV 异步换出与热 KV 回源算法
 
 ```mermaid
 flowchart TD
-    TraceDriver["Trace Driven Capacity Replayer"] --> TierManager["SUT: TierManager Engine"]
-
-    subgraph Memory_Tiers["Multi-Tier Physical Storage"]
-        HBM["Tier 0: NPU HBM (High Speed, Limited Capacity)"]
-        DDR["Tier 1: Host DDR (Conditional Role / Registered Pool)"]
-        SSD["Tier 2: NVMe SSD (Capacity Main Path)"]
-    end
-
-    TierManager --> HBM
-    TierManager -- "DDR RolePolicy (Bypass Option)" --> DDR
-    TierManager -- "Direct I/O (SPDK / O_DIRECT)" --> SSD
-
-    TierManager --> CounterProbe["Fragmentation & IOPS Counter Probe"]
-    CounterProbe --> NetTCO["Net TCO & QPS Evaluator"]
+    Mon["HBM 显存水位周期监控 (100Hz)"] --> CheckHigh{"Current_HBM_Usage >= HighWatermark (85%) ?"}
+    CheckHigh -- "NO" --> Idle["保持监控 (无换出开销)"]
+    CheckHigh -- "YES" --> ScanLRU["LRU 扫描器: 遍历查找未被 Pin 且最冷 TierBlock"]
+    ScanLRU --> FormBatch["聚合为 16MB/64MB 连续 I/O Batch (Direct I/O)"]
+    FormBatch --> SubmitDirect["通过 io_uring / SPDK Direct I/O 发起写盘 (Payload Bypass DDR)"]
+    SubmitDirect --> UpdateMeta["写盘完成: 更新元数据 location=SSD_EVICTED, 释放 HBM 物理页"]
+    UpdateMeta --> CheckLow{"Current_HBM_Usage <= LowWatermark (65%) ?"}
+    CheckLow -- "NO" --> ScanLRU
+    CheckLow -- "YES" --> Idle
 ```
 
----
-
-## 4. 对照基线与因果消融设计
-
-1. **基线 A（原生框架 Baseline）**：vLLM / SGLang 原生基于 Swap 的容量管理（频繁造成 NPU Wait）。
-2. **基线 B（三级传递 Baseline）**：强制经过 `HBM -> DDR -> SSD` 的三级固定串行迁移。
-3. **消融实验（Ablation）**：
-   - **Bypass DDR 消融**：比较 `HBM↔SSD 直达` vs `HBM↔DDR↔SSD 三级` 的端到端 Hop 延迟与 Host CPU 占用；若 DDR 无正收益，强制剔除 DDR Payload 路径。
-   - **关闭状态智能消融**：关闭 Cost-aware 淘汰算法，退化为简单 LRU/LFU 双水位策略。
-
----
-
-## 5. 指标体系与 Go/No-Go 显式判定门槛
-
-- **Go 门槛**：
-  1. HBM↔SSD 容量主路径闭环且有效带宽 $\ge$ 设备峰值 $80\%$；
-  2. HBM 有效容量提升 $\ge 30\%$；
-  3. OOM/Preemption 降低 $\ge 50\%$；
-  4. 内存碎片率 $< 5\%$；
-  5. DDR 角色至少有一项持续正收益，否则**退出 Payload 主路径**；
-  6. 迁移 Bytes 降低 $\ge 20\%$。
-- **No-Go 门槛**：SSD 扩容带来的迁移抖动使端到端 TTFT/TPOT 净收益为负，或碎片率 $> 15\%$ 导致频繁 Preemption。
-
----
-
-## 6. 完整原型验证实施方案与具体步骤
-
-### 6.1 验证环境准备与依赖安装
-
-1. **软件与驱动**：`fio`, `libaio-dev`, `spdk` (选配), Linux Kernel Direct I/O (`O_DIRECT`)。
-2. **硬件要求**：4× NVMe SSD (PCIe Gen4/Gen5 Direct I/O 阵列)。
-3. **工作目录**：`/tmp/pvt05_harness/`。
-
-### 6.2 核心代码实现
-
-#### 代码 1：`tier_manager_direct.cc` (HBM↔SSD 直达与 DDR Bypass 控制器)
-
+#### 换出核心算法伪代码：
 ```cpp
-#include <iostream>
-#include <vector>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/mman.h>
-#include <cassert>
-#include <chrono>
+void TierManager::trigger_eviction_if_needed(const WatermarkConfig& cfg) {
+    double usage = get_current_hbm_usage_ratio();
+    if (usage < cfg.high_watermark_pct) return;
 
-enum TierTarget { TIER_HBM, TIER_DDR_STAGING, TIER_NVME_SSD };
-
-struct DDRRolePolicy {
-    bool enable_ddr_payload_staging; // 若 false，严格 Bypass DDR
-    bool enable_ddr_metadata;
-};
-
-class TierManager {
-private:
-    DDRRolePolicy policy_;
-    int nvme_fd_;
-
-public:
-    TierManager(DDRRolePolicy policy) : policy_(policy) {
-        // 打开 NVMe 块设备/大文件，指定 O_DIRECT 绕过 OS Page Cache
-        nvme_fd_ = open("/tmp/pvt05_nvme_mock.bin", O_RDWR | O_CREAT | O_DIRECT, 0666);
-        if (nvme_fd_ < 0) {
-            // 降级为普通 mmap 模拟
-            nvme_fd_ = open("/tmp/pvt05_nvme_mock.bin", O_RDWR | O_CREAT, 0666);
+    std::vector<TierBlockDescriptor*> evict_candidates;
+    {
+        std::lock_guard<std::mutex> lk(manifest_lock_);
+        for (auto& [id, blk] : block_map_) {
+            if (blk.location == TierLocation::HBM_ACTIVE && blk.pin_count.load() == 0) {
+                evict_candidates.push_back(&blk);
+            }
         }
-        ftruncate(nvme_fd_, 1024 * 1024 * 1024); // 1GB 镜像
+        // 按最后访问时间升序排序 (最冷优先)
+        std::sort(evict_candidates.begin(), evict_candidates.end(), 
+                  [](auto* a, auto* b){ return a->last_access_epoch < b->last_access_epoch; });
     }
 
-    ~TierManager() {
-        if (nvme_fd_ >= 0) close(nvme_fd_);
+    for (auto* blk : evict_candidates) {
+        blk->location = TierLocation::MIGRATING;
+        // Direct I/O 写入 SSD: 严禁将数据拷贝至 Host DDR
+        async_nvme_direct_write(blk->hbm_phys_addr, blk->ssd_lba_offset, blk->size_bytes, 
+            [blk, this]() {
+                free_hbm_block(blk->hbm_phys_addr);
+                blk->location = TierLocation::SSD_EVICTED;
+            });
+
+        if (get_current_hbm_usage_ratio() <= cfg.low_watermark_pct) break;
     }
-
-    bool transfer_hbm_to_ssd_direct(void* hbm_addr, size_t size, off_t offset) {
-        auto start = std::chrono::high_resolution_clock::now();
-
-        if (policy_.enable_ddr_payload_staging) {
-            // 途径 DDR 的三级路径 (HBM -> DDR -> SSD)
-            void* ddr_buf = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-            memcpy(ddr_buf, hbm_addr, size); // CPU Memcpy 触碰正文
-            pwrite(nvme_fd_, ddr_buf, size, offset);
-            munmap(ddr_buf, size);
-            std::cout << "[TierManager] Executed 3-Stage Path (HBM -> DDR -> SSD)" << std::endl;
-        } else {
-            // HBM↔SSD 容量主路径 (Direct Bypass DDR)
-            pwrite(nvme_fd_, hbm_addr, size, offset);
-            std::cout << "[TierManager] Executed Direct Main Path (HBM <-> SSD Bypass DDR)" << std::endl;
-        }
-
-        auto end = std::chrono::high_resolution_clock::now();
-        double dur_ms = std::chrono::duration<double, std::milli>(end - start).count();
-        std::cout << "[TierManager] Transfer Size: " << size / (1024*1024) << " MB | Time: " << dur_ms << " ms" << std::endl;
-        return true;
-    }
-};
-
-int main() {
-    size_t chunk_size = 16 * 1024 * 1024; // 16MB Chunk
-    void* hbm_buffer = mmap(NULL, chunk_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-
-    // 运行 Bypass DDR 直达主路径
-    DDRRolePolicy direct_policy = {false, true};
-    TierManager manager_direct(direct_policy);
-    manager_direct.transfer_hbm_to_ssd_direct(hbm_buffer, chunk_size, 0);
-
-    // 运行 DDR Staging 三级路径
-    DDRRolePolicy staging_policy = {true, true};
-    TierManager manager_staging(staging_policy);
-    manager_staging.transfer_hbm_to_ssd_direct(hbm_buffer, chunk_size, chunk_size);
-
-    munmap(hbm_buffer, chunk_size);
-    std::cout << ">>> PVT-05 Tiering Execution PASSED! <<<" << std::endl;
-    return 0;
 }
 ```
 
-#### 代码 2：`pvt05_tco_eval.py` (单位 SLO 合格事务成本 TCO 计算器)
-
-```python
-#!/usr/bin/env python3
-import numpy as np
-
-def calculate_tco(hbm_only_qps: float, tiering_qps: float, hbm_cost: float = 10000.0, ssd_cost: float = 500.0):
-    cost_hbm_only = hbm_cost
-    cost_tiering = hbm_cost + ssd_cost
-
-    tco_hbm_only = cost_hbm_only / hbm_only_qps
-    tco_tiering = cost_tiering / tiering_qps
-    
-    saving_ratio = (tco_hbm_only - tco_tiering) / tco_hbm_only * 100.0
-    print(f"HBM-Only TCO: ${tco_hbm_only:.2f} / QPS")
-    print(f"Tiering TCO:  ${tco_tiering:.2f} / QPS")
-    print(f"TCO Saving:   {saving_ratio:.2f}% (Goal: > 15.0%)")
-    return saving_ratio
-
-if __name__ == "__main__":
-    calculate_tco(hbm_only_qps=100.0, tiering_qps=145.0)
-```
-
-### 6.3 步骤化具体操作流程
+### 2.3 DDR 条件角色决策状态机 (DDR Role Policy Engine)
 
 ```mermaid
-flowchart TD
-    Step1["Step 1: 编译 TierManager 并配置 NVMe 设备"] --> Step2["Step 2: 运行 HBM-SSD 直达 vs 三级路径压测"]
-    Step2 --> Step3["Step 3: 测量 HBM 有效容量提升率 (断言 >= 30%)"]
-    Step3 --> Step4["Step 4: 运行 TCO 节约计算脚本"]
-    Step4 --> Step5["Step 5: 导出 DDR RolePolicy 决策白名单"]
-```
+stateDiagram-v2
+    [*] --> Request_Incoming: 请求到达存储池
 
-#### 步骤 1：编译 C++ TierManager 控制器
-```bash
-mkdir -p /tmp/pvt05_harness && cd /tmp/pvt05_harness
+    state "Payload 传输判定" as PayloadPolicy {
+        [*] --> CheckPathType
+        CheckPathType --> Direct_Bypass: HBM ↔ SSD 或 HBM ↔ URMA 网卡
+        Direct_Bypass --> Strict_Bypass_DDR: 严禁 CPU memcpy, 数据零进 DDR
 
-g++ -O3 tier_manager_direct.cc -o tier_manager
-```
+        CheckPathType --> DDR_Buffer_Condition: 源节点/驱动不支持 P2P Direct
+        DDR_Buffer_Condition --> Staging_Fallback: 仅降级暂存为环形缓冲 (RingBuffer)
+    }
 
-#### 步骤 2：运行 HBM↔SSD 直达 vs 经过 DDR 三级路径的性能对比
-```bash
-./tier_manager > pvt05_res.log
-cat pvt05_res.log
-```
-
-#### 步骤 3：压测 50% 水位超载场景，验证 OOM 降幅
-```bash
-python3 -c "
-# 模拟容量扩展后的 OOM/Preemption 降低率
-preempt_before = 100
-preempt_after = 35
-reduction = (preempt_before - preempt_after) / preempt_before * 100.0
-print(f'Preemption Reduction: {reduction:.2f}% (Goal: >= 50%)')
-assert reduction >= 50.0
-"
-```
-
-#### 步骤 4：运行 TCO 评估计算
-```bash
-python3 pvt05_tco_eval.py
+    state "Metadata 判定" as MetaPolicy {
+        [*] --> Metadata_Alloc: 路由表 / PrefixTree / Manifest
+        Metadata_Alloc --> Stay_In_DDR: 允许常驻 Host DDR (高速 CPU 检索)
+    }
 ```
 
 ---
 
-## 7. 数据记录规范与立项证据包模板
+## 3. 基础/对照 Micro-Benchmark 构建方法
 
-需导出并保存：
-- `pvt05_effective_capacity_curve.json`：有效容量与 QPS 提升曲线。
-- `pvt05_ddr_bypass_ablation.csv`：DDR Bypass 消融数据对比表。
+### 3.1 测试工具与源码结构
+本项验证涉及的全部存储分层与超载压测源码均存放在 `./原型验证代码/PVT-05/` 目录下：
+
+```
+原型验证代码/PVT-05/
+├── tier_storage_bench.cc # NVMe SSD Direct I/O (Bypass DDR) 与 DDR 中转吞吐对比的 C++ 压测工具
+├── Makefile             # 编译 tier_storage_bench 的工程构建文件 (make -j16)
+└── benchmark_tiering.py # 150%~200% HBM 显存超载下分层扩容与 OOM 统计驱动脚本
+```
+
+编译方法：
+```bash
+# 编译存储分层压测 Harness
+cd ./原型验证代码/PVT-05 && make clean && make
+```
+- 支持配置直接 I/O 驱动（SPDK / `io_uring` + `O_DIRECT`）；
+- 支持设置 DDR 内存中间缓冲（Buffer Mode）或完全旁路（Bypass Mode）。
+
+### 3.2 三组实验对照设计
+- **基线 A（纯 HBM 孤岛模式）**：
+  - 不外挂任何二级存储，显存用尽时直接拒绝请求（OOM）或抢占驱逐已有请求。
+- **对照组 B（传统 HBM ↔ DDR 两级中转模式）**：
+  - 换出时：NPU HBM $\to$ PCIe $\to$ Host DDR 缓存池；
+  - 换入时：Host DDR $\to$ PCIe $\to$ NPU HBM。
+- **实验组 C（HBM ↔ SSD 直达容量主路径 + DDR Bypass）**：
+  - 换出/换入时：NPU HBM $\leftrightarrow$ NVMe SSD Direct I/O 直达通路，Payload 严格绕过 Host DDR。
 
 ---
 
-## 8. 原型代码延续与正式架构迁入规划
+## 4. 业务 Benchmark 构造与流量特征编排
 
-- `tier_manager_direct.cc` 直接迁入正式仓库 `SR23-01-01-01` (多介质分层存储 TierManager)；
-- DDR Bypass 策略逻辑固化为 `SR23-02-08-01` (DDR RolePolicy 策略引擎)。
+### 4.1 超载工作负载构造
+- **模型配置**：Qwen2.5-72B ($TP=8$)，单卡限制可用 KVCache 显存配额为 30GB；
+- **请求流量**：持续注入 64K ~ 128K Token 的长文本请求，累积总 KV 需求达到 45GB ~ 60GB（超载率 150% ~ 200%）；
+- **冷热访问分布**：70% 请求命中内存中活跃会话，30% 请求访问已被换出至 SSD 的历史会话。
+
+---
+
+## 5. 软硬件环境与打点插桩方案
+
+### 5.1 硬件配置
+- **存储介质**：4× NVMe PCIe Gen5 SSD 组建软 RAID0，标称读带宽 28GB/s；
+- **打点监控**：通过 eBPF 监控 CPU DDR Memcpy 字节数，通过 `iostat` 记录 SSD 实际读写带宽。
+
+---
+
+## 6. 分步执行测试操作规程
+
+开发人员请按以下 12 个步骤依次执行：
+
+### 步骤 1：编译底层存储分层压测 Harness
+编译 `tier_storage_bench`。
+
+### 步骤 2：测试 NVMe Direct 裸 I/O 读写带宽
+运行基准测量 SPDK/io_uring 直达读写带宽与 CPU 开销：
+```bash
+./tier_storage_bench
+```
+
+### 步骤 3：测试传统 DDR 软中转读写带宽与 CPU 占用
+开启 DDR 中转模式，记录此时带宽与 CPU 消耗。
+
+### 步骤 4：计算直达主路径带宽达成率与 CPU 节省率
+计算 $\text{Bandwidth}_{\text{direct}} / \text{Bandwidth}_{\text{raw}}$。
+
+### 步骤 5：启动推理服务超载压测基线 A（纯 HBM）
+注入 150% 超载长文本请求，记录 OOM 请求数与被抢占中断会话数：
+```bash
+python3 ./原型验证代码/PVT-05/benchmark_tiering.py --mode pure_hbm --overcommit 1.5
+```
+
+### 步骤 6：启动推理服务对照组 B（HBM ↔ DDR 中转）
+测试 DDR 中转模式下的完成请求数与 Host CPU/DDR 占用率：
+```bash
+python3 ./原型验证代码/PVT-05/benchmark_tiering.py --mode hbm_ddr_tier --overcommit 1.5
+```
+
+### 步骤 7：启动推理服务实验组 C（HBM ↔ SSD 直达扩容）
+测试 SSD 直达模式下的完成请求数、OOM 拦截率与 CPU 占用：
+```bash
+python3 ./原型验证代码/PVT-05/benchmark_tiering.py --mode hbm_ssd_direct --overcommit 1.5
+```
+
+### 步骤 8：验证 Payload 路径严格 Bypass DDR
+在实验组 C 运行期间，通过 eBPF 脚本验证 CPU Memcpy 调用次数与字节数严格为 0。
+
+### 步骤 9：提升超载压力至 200%
+将超载率提升至 200%（总需求 60GB），测量实验组 C 在极端压力下的服务吞吐维持能力。
+
+### 步骤 10：验证冷热换入换出的正确性
+提取换入至 HBM 的历史会话并继续生成 32 Token，比对输出准确率。
+
+### 步骤 11：统计有效容量提升与 OOM 下降比率
+根据第 8 节公式计算综合收益指标。
+
+### 步骤 12：输出判定结论与立项证据包。
+
+---
+
+## 7. 数据采集清单与记录格式
+
+### 7.1 介质性能与 CPU 开销记录表 (`pvt05_tier_storage.csv`)
+| 路径模式 | 块大小 (MB) | 实测带宽 (Gbps) | 平均延迟 (ms) | Host CPU 占用 |
+|---|---|---|---|---|
+| **NVMe Direct (Bypass DDR)** | 64 | 190.4 | 2.68 | 1.2% |
+| **DDR 软中转 (HBM-DDR-SSD)** | 64 | 85.2 | 6.02 | 65.4% |
+
+### 7.2 150% 超载分层扩容对账表 (`pvt05_overcommit_summary.csv`)
+| 实验组别 | 总注入请求 | 成功完成数 | OOM 失败数 | 抢占重算数 | 服务总 Token (M) | Host CPU 峰值 |
+|---|---|---|---|---|---|---|
+| **纯 HBM 孤岛** | 500 | 333 | 117 | 50 | 20.4 | 1.2% |
+| **DDR 中转分层** | 500 | 475 | 0 | 25 | 31.8 | 65.4% |
+| **SSD 直达分层** | 500 | 492 | 0 | 8 | 33.2 | 1.8% |
+
+---
+
+## 8. 数据交叉组合与运算推导逻辑
+
+### 8.1 有效服务容量提升率 (Effective Capacity Gain)
+$$\text{Capacity Gain} = \frac{\text{Tokens}_{\text{ssd\_direct}} - \text{Tokens}_{\text{pure\_hbm}}}{\text{Tokens}_{\text{pure\_hbm}}} \times 100\%$$
+
+### 8.2 OOM 与抢占综合下降率 (Preemption Drop Ratio)
+$$\text{Drop Ratio} = \frac{(\text{OOM} + \text{Preempt})_{\text{pure\_hbm}} - (\text{OOM} + \text{Preempt})_{\text{ssd\_direct}}}{(\text{OOM} + \text{Preempt})_{\text{pure\_hbm}}} \times 100\%$$
+
+---
+
+## 9. 多维扩展与扫参矩阵
+
+| 维度 | 参数网格 |
+|---|---|
+| **显存超载倍数** | 100% (满载), 130%, 150%, 180%, 200% (重度超载) |
+| **SSD 阵列盘数** | 1 盘, 2 盘 RAID0, 4 盘 RAID0 |
+| **I/O 粒度大小** | 64KB, 1MB, 16MB, 64MB |
+| **DDR 角色** | Bypass (直达), Staging Buffer (中转), Metadata Only (元数据) |
+
+---
+
+## 10. Go / No-Go 判定规则与交付报告模板
+
+### 10.1 判定规则
+- **Go 门槛**：
+  1. HBM ↔ SSD 直达读写带宽达到硬件标称线速的 $\ge 80\%$；
+  2. 150% 超载下有效服务容量提升 $\ge 30\%$，OOM/抢占下降 $\ge 50\%$；
+  3. 直达模式下 Host CPU Payload Touch 严格为 0，CPU 占用 $< 5\%$。
+- **No-Go 门槛**：
+  - SSD 直达带宽 $< 50\%$ 标称带宽；
+  - 超载换入换出引发严重 I/O 拥塞，导致服务总 Token 量反而下降。
+
+### 10.2 开发者交付报告格式模板
+```markdown
+# PVT-05 提前验证交付报告
+
+## 1. 存储主路径带宽与 CPU 开销
+- NVMe Direct 64MB 实测带宽: 190.4 Gbps (达成率 85.0%, PASS)
+- 相对 DDR 软中转带宽提升: +123.4%
+- 直达模式 Host CPU 占用: 1.2% vs DDR 中转 65.4% (降低 64.2 个百分点, PASS)
+- Payload DDR Memcpy 监测: 0 Bytes (100% Bypass 确认)
+
+## 2. 150% 超载容量提升实测
+- 纯 HBM 服务 Token 数: 20.4 MTokens (发生 117 次 OOM)
+- SSD 直达服务 Token 数: 33.2 MTokens (0 次 OOM, 8 次轻微抢占)
+- 有效服务容量提升: +62.74% (PASS, 门槛 >= 30%)
+- OOM 与抢占综合下降: -95.21% (PASS, 门槛 >= 50%)
+
+## 3. 最终结论
+【Go / Conditional / No-Go】: GO
+```

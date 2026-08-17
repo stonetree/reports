@@ -4,7 +4,7 @@
 > **验证名称**：零 Host Touch 极速传输底座与 CapabilityMatrix 探针验证  
 > **对应证据门**：**E1 能力路径**  
 > **证伪标记**：否（底座能力确认）  
-> **建议周期**：10~14 人日  
+> **建议周期**：6~8 人日  
 > **主关联 IR**：`IR-01-06`, `IR-01-08`, `IR-01-09`, `IR-01-12`  
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L4-MC-HIER-STORE-001`, `L3-MS-Tiering-038`, `L4-HW-HostPayloadTouchBudget-076`, `L4-FT-PathIntegrityPolicy-077`  
@@ -12,295 +12,241 @@
 
 ---
 
-## 1. 验证项概述与映射追溯
+## 1. 验证目标与交付结论定义
 
-### 1.1 背景诉求与必要性
+### 1.1 待验证核心命题
+统一异构存储池的数据平面必须建立在零/极低 Host CPU 参与的高性能硬件通路上。本验证旨在通过受控传输 Benchmark 与内核 eBPF 插桩，证明：
+1. **跨节点 URMA / UBMEM 传输**与**本地 NVMe SSD 直达读写**过程中，Host CPU 正文触碰字节数（Host Payload Touch Bytes）**严格为 0**（Host CPU 仅负责提交与轮询 CQ 描述符，严禁参与正文 `memcpy`、编解码或全量 CRC）；
+2. 跨节点有效传输带宽达到物理网络线速的 **$\ge 80\%$**，本地 NVMe SSD 直达顺序读带宽达到设备物理峰值的 **$\ge 80\%$**；
+3. 输出系统级的**《硬件 CapabilityMatrix 探针能力表》**，为上层 QueryPlan 决策引擎提供真实的硬件拓扑时延与带宽参数。
 
-统一异构存储池的数据平面必须建立在真实可达、零/极低 Host Payload 参与的高性能硬件通路上。如果介质间 KV 传输严重依赖 Host CPU/DDR 显式中转，或者 completion/fence/ready 异步通知链不闭环，不仅传输性能惨跌，还可能因脏读导致严重的数据损坏。
+### 1.2 最终交付数据与结论产出
+开发人员执行完本方案后，必须输出以下交付件：
+1. **《eBPF CPU 触碰与内存拷贝检测日志表》**（证明 memcpy 调用次数与字节数为 0）；
+2. **《各介质路径裸传输带宽与时延曲线表》**（涵盖 URMA, UBMEM, NVMe Direct, Host Memcpy, TCP/IP 对照）；
+3. **《硬件 CapabilityMatrix 探针矩阵文件》**（JSON/CSV 格式，包含介质对、带宽、时延、CPU 触碰开销）；
+4. **《Go / No-Go 判定结论》**：依据线速达成率 $\ge 80\%$ 与 Host Touch = 0 门槛判定。
 
-### 1.2 与项目竞争力关联
+---
 
-直接支撑**竞争力 #3（第一方软硬件协同与 Zero-Host-Touch 直达路径）**。验证 UBMEM/URMA, RDMA, C2C, NVMe/SSD 等底层硬件原语能否真正编译为 **Zero Host Payload Touch** 的 KV 极速传输，建立硬件能力矩阵 (CapabilityMatrix)。
+## 2. 基础/对照 Micro-Benchmark 构建方法
 
-### 1.3 SRS / SR23 / IR 需求追溯矩阵
+### 2.1 测试工具与源码结构
+本项验证涉及的全部底层测试与监控源码均存放在 `./原型验证代码/PVT-01/` 目录下：
 
-| 需求层级 | 标识符 / 编号 | 描述 | 验证承接责任 |
+```
+原型验证代码/PVT-01/
+├── raw_trans_bench.cc         # 测量 URMA/UBMEM/NVMe Direct 零拷贝 vs CPU memcpy 性能的 C++ 压测工具
+├── Makefile                   # 编译 raw_trans_bench 的工程构建文件 (make -j16)
+├── host_touch_monitor.py      # 基于 Linux eBPF (bpftrace) 监控 Host CPU 内存拷贝事件的内核探针脚本
+└── export_capability_matrix.py# 自动解析实测吞吐并导出 capability_matrix.json 的工具脚本
+```
+
+编译方法：
+```bash
+# 编译底层传输 Harness
+cd ./原型验证代码/PVT-01 && make clean && make
+```
+
+### 2.2 四组实验路径构建与隔离设置
+- **路径 A（URMA / UBMEM 零拷贝 Direct 模式）**：
+  - 发送端通过 `liburma` / `libubmem` 注册 NPU HBM 物理内存区域；
+  - 接收端发起 RDMA Direct Read/Write，网卡 DMA 直接搬运数据至远端 NPU HBM；
+  - Host CPU 仅执行描述符提交与 CQ Polling。
+- **路径 B（NVMe Direct SSD 直达模式）**：
+  - 采用 SPDK / `io_uring` + `O_DIRECT` + Peer-to-Peer DMA（或内核 Direct I/O Bypass）；
+  - 数据直接在 NVMe SSD 与 NPU HBM 之间流转，禁止 Host DDR Staging。
+- **对照组 C（CPU Memcpy 软中转基准）**：
+  - 模拟传统两阶段中转：网卡/SSD $\to$ Host DDR $\to$ Host CPU `memcpy` $\to$ NPU HBM。
+- **对照组 D（标准 TCP/IP Socket 基准）**：
+  - 通过标准 Linux Socket 协议栈进行内核中转拷贝传输。
+
+---
+
+## 3. 业务 Benchmark 构造与流量特征编排
+
+### 3.1 数据块尺寸梯度设计
+构造覆盖 KVCache 全生命周期典型尺寸的内存 Extent：
+- **小数据块（64KB, 256KB, 1MB）**：模拟前缀元数据、轻量 Manifest、极短系统提示词；
+- **中数据块（4MB, 16MB, 32MB）**：模拟 1K ~ 8K Token 的标准对话上下文前缀；
+- **大数据块（64MB, 256MB, 1GB）**：模拟 32K ~ 128K 超长上下文前缀及大批量并发 Block。
+
+### 3.2 队列深度 (Queue Depth) 与并发流
+- **单流时延压测**：Queue Depth = 1（测量单次微秒级延迟极限）；
+- **并发吞吐压测**：Queue Depth = 4, 16, 32, 64（测试总线打满时的饱和带宽）。
+
+---
+
+## 4. 软硬件环境与打点插桩方案
+
+### 4.1 硬件拓扑与驱动要求
+- **节点配置**：Node-0 与 Node-1，每节点配置 8× NPU (96GB HBM), 800G URMA 网卡, 4× NVMe PCIe Gen5 SSD；
+- **系统支持**：Linux Kernel 6.6+, 开启 `io_uring`, 挂载 UBMEM / URMA 驱动模块。
+
+### 4.2 eBPF 插桩与矩阵导出执行
+内核监控启动：
+```bash
+python3 ./原型验证代码/PVT-01/host_touch_monitor.py <target_pid>
+```
+
+矩阵导出执行：
+```bash
+python3 ./原型验证代码/PVT-01/export_capability_matrix.py --in res_direct.csv,res_memcpy.csv --out capability_matrix.json
+```
+
+---
+
+## 5. 分步执行测试操作规程
+
+开发人员请按以下 12 个步骤依次执行：
+
+### 步骤 1：启动内核 eBPF 监控
+在被测节点上启动 `host_touch_monitor.py`，传入即将运行的测试进程 PID，确保实时捕获系统调用。
+
+### 步骤 2：运行对照组 C（CPU Memcpy 软中转基准）
+测试经过 Host CPU `memcpy` 中转的吞吐与 CPU 占用：
+```bash
+./raw_trans_bench --mode host_memcpy --sizes 64K,1M,16M,64M,256M,1G --qd 1,16,64 --out res_memcpy.csv
+```
+
+### 步骤 3：运行对照组 D（TCP/IP Socket 基准）
+测试标准 Socket 传输在各包大小下的性能：
+```bash
+./raw_trans_bench --mode socket_tcp --sizes 64K,1M,16M,64M,256M,1G --qd 1,16,64 --out res_tcp.csv
+```
+
+### 步骤 4：运行路径 A（URMA / UBMEM 跨节点 Direct RDMA 模式）
+测试零拷贝网络传输性能：
+```bash
+./raw_trans_bench --mode urma_direct --sizes 64K,1M,16M,64M,256M,1G --qd 1,16,64 --out res_urma.csv
+./raw_trans_bench --mode ubmem_direct --sizes 64K,1M,16M,64M,256M,1G --qd 1,16,64 --out res_ubmem.csv
+```
+
+### 步骤 5：读取路径 A 的 eBPF 统计，验证 Host Touch
+从 eBPF 输出中读取路径 A 执行期间的内核统计：
+- 检查 `@memcpy_calls` 是否严格等于 0；
+- 检查 `@memcpy_bytes` 是否严格等于 0；
+- 统计 Host CPU 占用率（从 `/proc/[pid]/stat` 获取）。
+
+### 步骤 6：运行路径 B（NVMe Direct SSD 直达模式）
+测试 HBM ↔ NVMe SSD 直达顺序读写性能：
+```bash
+./raw_trans_bench --mode nvme_direct --sizes 1M,16M,64M,256M,1G --qd 1,8,32 --out res_nvme.csv
+```
+
+### 步骤 7：读取路径 B 的 eBPF 统计，验证 Host Touch
+检查 NVMe 直达传输期间，Host CPU `@memcpy_calls` 与 `@memcpy_bytes` 是否为 0。
+
+### 步骤 8：测量 Completion & Fence 异步通知延迟
+在 `raw_trans_bench` 中打点测量硬件传输完成（CQE 就绪）到内存 Fence 同步屏障生效的微秒级耗时：
+$$T_{fence\_sync} = T_{ready\_visible} - T_{dma\_complete}$$
+
+### 步骤 9：比对路径 A/B 与对照组 C/D，计算吞吐与 CPU 节省
+比对四组实验在相同包大小下的传输耗时与 CPU 周期开销（详见第 7 节推导公式）。
+
+### 步骤 10：注入异常与网络拥塞扰动
+使用 `tc` 限速或注入丢包，测试 URMA/UBMEM 重传机制与超时保护：
+```bash
+# 模拟 5% 丢包
+sudo tc qdisc add dev eth0 root netem loss 5%
+./raw_trans_bench --mode urma_direct --sizes 16M --qd 16 --out res_urma_loss.csv
+sudo tc qdisc del dev eth0 root
+```
+
+### 步骤 11：生成并导出《硬件 CapabilityMatrix 探针能力表》
+将实测数据汇总并导出为标准 JSON 探针配置文件 `capability_matrix.json`。
+
+### 步骤 12：执行 Go / No-Go 判定与交付物打包。
+
+---
+
+## 6. 数据采集清单与记录格式
+
+### 6.1 原始传输性能记录表 (`pvt01_raw_bandwidth.csv`)
+| 字段名称 | 含义 | 单位 | 示例值 |
 |---|---|---|---|
-| **IR** | `IR-01-06` | UBMEM / URMA 底层传输语义绑定 | 验证 URMA 注册内存池与 0 拷贝 Direct Read/Write |
-| **IR** | `IR-01-08` | 本地与远端 NVMe SSD 直达路径 | 验证 NVMe Direct I/O (`O_DIRECT` / SPDK / GDS) |
-| **IR** | `IR-01-09` | 硬件 CapabilityMatrix 探针 | 建立多介质路径时延、带宽、CPU 触碰能力表 |
-| **IR** | `IR-01-12` | 硬件 Completion & Fence 可见性屏障 | 验证 `Completion -> Fence -> Ready` 原子可见性 |
+| `path_mode` | 传输路径模式 | 字符串 | URMA_Direct / NVMe_Direct / Host_Memcpy |
+| `payload_size_kb` | 数据块大小 | KB | 16384 (16MB) |
+| `queue_depth` | 队列深度 | 整数 | 16 |
+| `bandwidth_gbps` | 测得有效带宽 | Gbps | 642.5 |
+| `latency_p50_us` | 传输中位数时延 | 微秒 ($\mu s$) | 198.5 |
+| `latency_p99_us` | 传输 P99 时延 | 微秒 ($\mu s$) | 235.0 |
+| `host_cpu_pct` | Host CPU 占用率 | 百分比 | 0.8% |
+| `host_memcpy_bytes`| Host CPU 拷贝正文字节数 | 字节 | 0 |
+| `fence_delay_us` | 异步 Fence 同步耗时 | 微秒 ($\mu s$) | 2.1 |
 
 ---
 
-## 2. 核心验证假设与实验矩阵设计
+## 7. 数据交叉组合与运算推导逻辑
 
-### 2.1 待验证核心假设（Hypotheses）
+### 7.1 线速达成率 (Line-Rate Efficiency)
+$$\text{LineRate Efficiency} = \frac{\text{Measured Bandwidth (Gbps)}}{\text{Hardware Physical Peak Bandwidth (Gbps)}} \times 100\%$$
+- 目标：800G URMA 网卡实测有效带宽 $\ge 640\text{ Gbps}$（达成率 $\ge 80\%$）；
+- 目标：NVMe SSD 阵列实测顺序读带宽 $\ge 80\%$ 物理标称值。
 
-1. **H1-1**：URMA / RDMA 跨节点传输及 NVMe SSD 本地直达传输，其 **Host Payload Touch 字节数严格为 0**（Host 仅提交 CQ 描述符）。
-2. **H1-2**：跨节点 URMA / RDMA 路径有效带宽达到网卡物理线速的 **$\ge 80\%$**；NVMe SSD 直达顺序读带宽达到设备峰值的 **$\ge 80\%$**。
+### 7.2 Host Payload Touch 判定
+$$\text{Host Touch Ratio} = \frac{\text{Host Copied Bytes}}{\text{Total Transferred Payload Bytes}} \times 100\%$$
+- **判定硬指标**：对于 URMA_Direct 与 NVMe_Direct，$\text{Host Touch Ratio}$ **必须严格为 $0\%$**。
 
-### 2.2 详细实验矩阵
-
-| 传输路径 | 数据块大小 | Queue Depth (QD) | 内存对齐方式 | 负载与故障注入 |
-|---|---|---|---|---|
-| **HBM ↔ HBM (Intra-node NVLink)** | 64KB ~ 1GB | 1, 8, 32, 128 | 4KB 对齐 / 64B 非对齐 | 正常负载 / PCIe 竞争 |
-| **HBM ↔ HBM (Remote URMA/RDMA)** | 64KB ~ 1GB | 1, 8, 32, 128 | 4KB Page 对齐 | 网络拥塞 / 丢包重传 / 断网 |
-| **HBM ↔ SSD (Direct Capacity Path)** | 1MB ~ 512MB | 1, 8, 32 | 4KB 扇区严格对齐 | 存储高 IOPS 混压 / 半写故障 |
-
----
-
-## 3. 测试 Harness 架构与量化数学模型
-
-### 3.1 测试 Harness 架构与计数器 Hook
-
-```mermaid
-flowchart TD
-    SubGraphHarness["Zero-Copy Probe Harness"] --> CQEngine["URMA / DMA Descriptor CQ Engine"]
-    CQEngine --> HardwarePath["Target Hardware Path (URMA / NVMe Direct)"]
-
-    subgraph Monitoring["Hardware Counter Monitor"]
-        KernelHook["Linux Kernel eBPF / perf (CPU memcpy & cache miss)"]
-        PCIeCounter["PCIe TLP Counter Probe (Host Touch Bytes)"]
-        NICCounter["NIC Direct DMA Packet Counter"]
-    end
-
-    HardwarePath --> Monitoring
-    Monitoring --> ReceiptGen["Generate ActualPathReceipt & CapabilityMatrix"]
-```
+### 7.3 Host CPU 开销节约比
+$$\text{CPU Saving Ratio} = \frac{\text{Host\_CPU\%}_{\text{memcpy}} - \text{Host\_CPU\%}_{\text{direct}}}{\text{Host\_CPU\%}_{\text{memcpy}}} \times 100\%$$
+- 预期直接降低 CPU 负载 $\ge 90\%$，彻底消除 Host CPU 拷贝瓶颈。
 
 ---
 
-## 4. 对照基线与因果消融设计
+## 8. 多维扩展与扫参矩阵
 
-1. **基线 A（CPU Memcpy Baseline）**：Host CPU `memcpy` 或经过 Host DDR Staging 拷贝中转路径。
-2. **基线 B（框架原生 Swap）**：vLLM / SGLang 框架原生的 CPU Thread Pool 换入换出。
-3. **消融控制**：显式拦截 Host CPU 编解码与全量 CPU CRC 校验，验证纯粹硬件零拷贝路径。
+| 维度 | 参数网格 |
+|---|---|
+| **介质通路** | NPU HBM ↔ NPU HBM (Remote URMA), NPU HBM ↔ NPU HBM (Remote UBMEM), NPU HBM ↔ NVMe SSD |
+| **数据包大小** | 64KB, 256KB, 1MB, 4MB, 16MB, 64MB, 256MB, 1GB |
+| **并发深度 (QD)** | 1 (Latency bound), 4, 16, 32, 64 (Throughput bound) |
+| **内存对齐** | 4KB Page 严格对齐、64B Cacheline 对齐、非对齐跨页 |
 
 ---
 
-## 5. 指标体系与 Go/No-Go 显式判定门槛
+## 9. Go / No-Go 判定规则与交付报告模板
 
+### 9.1 判定规则
 - **Go 门槛**：
-  1. 至少有一条热路径 (RDMA/URMA 有效带宽 $\ge$ 线速 $80\%$) 和一条 HBM↔SSD 直达/低 Host 参与容量路径 (顺序带宽 $\ge$ 设备峰值 $80\%$) 正确闭环；
-  2. 主路径 Host Payload Touch $= 0$；
-  3. CPU 编解码与全量 CPU CRC 调用 $= 0$；
-  4. 错误/半写 KV 消费数 $= 0$。
-- **No-Go 门槛**：无可用 HBM↔SSD 直达/低 Host 路径、Host 参与不可观测、Completion/Fence 异步确认失效，或发生错误 KV 渗入推理。
+  1. URMA / UBMEM 跨节点大包传输有效带宽 $\ge 80\%$ 物理线速；
+  2. NVMe SSD 直达读取带宽 $\ge 80\%$ 物理峰值；
+  3. 主路径 Host Payload Touch 字节数严格为 0；
+  4. CPU 节约比 $\ge 85\%$。
+- **No-Go 门槛**：
+  - 跨节点传输或 SSD 直达仍需 Host CPU 深度参与 memcpy；
+  - 传输有效带宽低于线速的 50%。
 
----
+### 9.2 开发者交付报告格式模板
+```markdown
+# PVT-01 提前验证交付报告
 
-## 6. 完整原型验证实施方案与具体步骤
+## 1. 核心传输与 CPU 触碰指标汇总
+| 传输路径 | 数据块大小 | 实测带宽(Gbps) | 线速达成率 | Host Touch字节数 | CPU占用率 | 判定 |
+|---|---|---|---|---|---|---|
+| URMA Direct | 64MB | 682.0 | 85.25% | 0 Bytes | 0.6% | PASS |
+| UBMEM Direct | 64MB | 745.0 | 93.12% | 0 Bytes | 0.4% | PASS |
+| NVMe Direct | 64MB | 112.5 (14GB/s)| 87.50% | 0 Bytes | 0.8% | PASS |
+| Host Memcpy (对照)| 64MB| 145.0 | 18.12% | 67108864 Bytes | 88.5% | BASELINE |
 
-### 6.1 验证环境准备与前置依赖
-
-1. **硬件环境**：Node-0 & Node-1 (NPU 8× HBM, 800G URMA 网卡, NVMe Direct SSD Array)。
-2. **驱动依赖**：UBMEM Driver, URMA Subsystem Kernel Module, `liburma`, eBPF (`bpftrace`, `bcc-tools`), Linux Kernel 6.6+ with `io_uring` support。
-3. **工作目录**：`/tmp/pvt01_harness/`。
-
-### 6.2 核心探针与 Hook 代码实现
-
-#### 代码 1：`host_touch_monitor.py` (bpftrace eBPF CPU 触碰监控脚本)
-
-```python
-#!/usr/bin/env python3
-import subprocess
-import sys
-import time
-
-BPF_TRACE_SCRIPT = """
-kprobe:memcpy, kprobe:memmove /pid == %d/ {
-    @copy_bytes = sum(arg2);
-    @copy_calls = count();
-}
-tracepoint:io_uring:io_uring_complete /pid == %d/ {
-    @cq_events = count();
-}
-"""
-
-class HostTouchMonitor:
-    def __init__(self, target_pid: int):
-        self.pid = target_pid
-        self.process = None
-
-    def start(self):
-        script = BPF_TRACE_SCRIPT % (self.pid, self.pid)
-        with open("/tmp/monitor.bt", "w") as f:
-            f.write(script)
-        self.process = subprocess.Popen(["bpftrace", "/tmp/monitor.bt"], 
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        time.sleep(1.0)  # 等待 bpftrace 挂载 probe
-
-    def stop_and_get_bytes(self) -> int:
-        if self.process:
-            self.process.terminate()
-            stdout, _ = self.process.communicate()
-            out_str = stdout.decode('utf-8')
-            # 解析 bpftrace 输出的 @copy_bytes
-            for line in out_str.splitlines():
-                if "@copy_bytes:" in line:
-                    try:
-                        return int(line.split()[-1])
-                    except ValueError:
-                        pass
-        return 0
-
-if __name__ == "__main__":
-    print("HostTouchMonitor bpftrace helper ready.")
-```
-
-#### 代码 2：`pvt01_urma_zero_copy_probe.cc` (C++ URMA / NVMe Direct 零拷贝微基准探针)
-
-```cpp
-#include <iostream>
-#include <vector>
-#include <chrono>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/mman.h>
-#include <cassert>
-
-// 模拟 URMA 描述符与 CQ
-struct UrmaDescriptor {
-    uint64_t src_addr;
-    uint64_t dst_addr;
-    uint32_t len;
-    uint32_t flags; // 0x01: Zero-Copy Direct DMA
-};
-
-struct ActualPathReceipt {
-    uint64_t task_id;
-    char path_name[32];
-    uint64_t payload_bytes;
-    uint64_t host_touch_bytes;
-    double duration_us;
-    bool ready_fenced;
-};
-
-class ZeroCopyProbe {
-public:
-    ActualPathReceipt execute_urma_direct_transfer(void* src_hbm, void* dst_hbm, size_t len) {
-        auto start = std::chrono::high_resolution_clock::now();
-
-        // 1. 构建 Batch Descriptor (Host 只组建轻量控制块)
-        UrmaDescriptor desc;
-        desc.src_addr = reinterpret_cast<uint64_t>(src_hbm);
-        desc.dst_addr = reinterpret_cast<uint64_t>(dst_hbm);
-        desc.len = static_cast<uint32_t>(len);
-        desc.flags = 0x01; // Direct DMA Bypass CPU
-
-        // 2. 模拟 Ring Doorbell 提交 CQ (Zero CPU memcpy of Payload)
-        asm volatile("" ::: "memory"); // Fence
-
-        // 3. 模拟等待 CQ Completion (Hardware Ring Hardware Event)
-        auto end = std::chrono::high_resolution_clock::now();
-        double dur_us = std::chrono::duration<double, std::micro>(end - start).count();
-
-        ActualPathReceipt receipt;
-        receipt.task_id = 1001;
-        snprintf(receipt.path_name, sizeof(receipt.path_name), "URMA_HBM2HBM_Direct");
-        receipt.payload_bytes = len;
-        receipt.host_touch_bytes = 0; // 严格为 0
-        receipt.duration_us = dur_us;
-        receipt.ready_fenced = true;
-        return receipt;
+## 2. 硬件 CapabilityMatrix 探针导出片段 (`capability_matrix.json`)
+```json
+{
+  "paths": {
+    "hbm_to_remote_hbm_ubmem": {
+      "bandwidth_gbps": 745.0,
+      "base_latency_us": 3.2,
+      "host_touch_bytes": 0
+    },
+    "hbm_to_local_ssd_direct": {
+      "bandwidth_gbps": 112.5,
+      "base_latency_us": 18.5,
+      "host_touch_bytes": 0
     }
-};
-
-int main() {
-    ZeroCopyProbe probe;
-    size_t test_size = 16 * 1024 * 1024; // 16MB KV Chunk
-    void* src = mmap(NULL, test_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-    void* dst = mmap(NULL, test_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-
-    auto receipt = probe.execute_urma_direct_transfer(src, dst, test_size);
-    std::cout << "[PVT-01] Executed Path: " << receipt.path_name 
-              << " | Bytes: " << receipt.payload_bytes 
-              << " | Host Touch Bytes: " << receipt.host_touch_bytes 
-              << " | Latency: " << receipt.duration_us << " us" << std::endl;
-    
-    assert(receipt.host_touch_bytes == 0);
-    std::cout << ">>> PVT-01 Zero Host Touch Assertion PASSED! <<<" << std::endl;
-    return 0;
+  }
 }
 ```
 
-### 6.3 步骤化具体操作流程
-
-```mermaid
-flowchart TD
-    Step1["Step 1: 挂载 eBPF 监控 & 编译探针"] --> Step2["Step 2: 运行 HBM↔HBM URMA 零拷贝带宽测试"]
-    Step2 --> Step3["Step 3: 运行 HBM↔SSD Direct I/O 容量路径压测"]
-    Step3 --> Step4["Step 4: 注入网络断连/半写故障，校验 Ready 屏障"]
-    Step4 --> Step5["Step 5: 输出 CapabilityMatrix 与 ActualPathReceipt 报告"]
+## 3. 最终结论
+【Go / Conditional / No-Go】: GO
 ```
-
-#### 步骤 1：挂载 eBPF 监控并编译微基准探针
-```bash
-mkdir -p /tmp/pvt01_harness && cd /tmp/pvt01_harness
-
-# 编译 C++ 零拷贝微基准探针
-g++ -O3 pvt01_urma_zero_copy_probe.cc -o pvt01_probe -lpthread
-```
-
-#### 步骤 2：运行 URMA / RDMA 跨节点传输测试并记录 Host Touch
-```bash
-# 启动探针进程并获取 PID
-./pvt01_probe &
-PROBE_PID=$!
-
-# 在后台同时运行 eBPF 跟踪
-python3 host_touch_monitor.py --pid $PROBE_PID > host_touch_res.txt
-
-# 验证有效带宽 (通过 iperf3 / ib_send_bw 工具比对线速 80%)
-ib_send_bw -d mlx5_0 -i 1 -s 65536 --qp=8 > pvt01_bw.log
-```
-
-#### 步骤 3：本地/远端 NVMe SSD Direct I/O 容量路径压测
-```bash
-# 使用 fio 验证 4KB 对齐 Direct I/O 顺序带宽
-fio --name=pvt01_ssd_test --filename=/dev/nvme0n1 --rw=read --bs=4k \
-    --direct=1 --numjobs=4 --time_based --runtime=10 --ioengine=libaio \
-    --group_reporting > pvt01_ssd_fio.log
-```
-
-#### 4 步骤 4：故障注入与 Ready 屏障测试
-```bash
-# 模拟网络半写中断，验证失败隔离
-python3 -c "
-# 注入失败场景，断言错误 KV 不得渗入推理
-err_consumed = 0
-assert err_consumed == 0, 'Error KV Leaked!'
-print('Fault Injection Assertion PASSED: 0 Error KV Consumed.')
-"
-```
-
-#### 步骤 5：导出 CapabilityMatrix 与 Evidence Package
-```bash
-python3 -c "
-import json
-cap_matrix = {
-    'URMA_HBM2HBM': {'effective_bw_gbps': 78.5, 'host_touch_bytes': 0, 'status': 'PASS'},
-    'NVMe_SSD_Direct': {'effective_bw_gbps': 6.8, 'host_touch_bytes': 0, 'status': 'PASS'}
-}
-with open('capability_matrix_v1.json', 'w') as f:
-    json.dump(cap_matrix, f, indent=2)
-print('CapabilityMatrix exported successfully.')
-"
-```
-
----
-
-## 7. 数据记录规范与立项证据包模板
-
-需导出并保存：
-- `capability_matrix_v1.json`：全路径性能能力矩阵 JSON。
-- `host_touch_ebpf_dump.log`：eBPF 导出的 Host CPU 触碰零记录审计日志。
-- `pvt01_path_receipts.csv`：传输链路凭证列表。
-
----
-
-## 8. 原型代码延续与正式架构迁入规划
-
-- `pvt01_urma_zero_copy_probe.cc` 原型探针直接迁入正式仓库 `SR23-01-06-01` (UBMEM/URMA 传输 Provider)；
-- `capability_matrix_v1.json` 格式固化为 `SR23-01-09-01` (CapabilityMatrix 探针服务)。

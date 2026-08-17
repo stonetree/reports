@@ -1,132 +1,72 @@
 # 统一异构 KVCache 存储池 关键技术原型验证总体实施方案设计
 
-> **文档版本**：V1.0  
+> **文档版本**：V2.0 (工程落地标准刷新版)  
 > **基线对齐**：  
 > - 交付基线：《统一异构KVCache存储池_关键技术原型验证清单_V1.6_V2.3.1需求树与竞争力对齐完善版.xlsx》  
 > - 分解基线：《统一异构KVCache存储池_全量需求树_V2.3.1_SR项目贡献补充版.xlsx》  
 > - 规范基线：《KVCache SRS需求列表 V2.2_传输底座视角_建议修订版.xlsx》  
 > - 总体导读：《统一异构KVCache存储池总体架构与SRS评审导读_V2.3.1评审稿.md》  
-> - 竞争力基线：《V3.2 竞争力分析报告》、《立项汇报大纲与页面调整说明》  
-> - 量化模型：《开源 LLM 推理框架 KV Cache 架构与量化建模分析》  
 
 ---
 
-## 1. 总体验证目标与设计原则
+## 1. 原型验证工程化刷新原则与标准范式
 
-统一异构 KVCache 存储池原型验证体系（Prototype Verification Task, PVT / Conditional Verification Task, CVT）是立项前**“购买事实”**的关键证据门禁。其核心宗旨是：**以可重复、可证伪、同条件公平对比的硬核工程证据，判定第一方 AI Infra 推理状态系统的核心假设是否成立**。
+统一异构 KVCache 存储池原型验证体系（PVT-00 ~ PVT-07 必做包，CVT-01 ~ CVT-03 条件证伪项）是立项前**“购买硬核工程事实”**的决定性门禁。
 
-### 1.1 总体验证目标
+为了彻底解决“方案设计过于偏向架构理论、描述抽象、开发人员不知道具体做什么和如何计算数据”的痛点，全套方案已**全面刷新为以 PVT-00 标准工程路线为基准的落地执行手册**。
 
-1. **确定收益上限（PVT-00）**：验证真实业务流量中 Saved-Prefill 的物理上限与正价值边界。
-2. **确认物理能力（PVT-01 ~ PVT-03）**：证明 UBMEM/URMA、RDMA、C2C、NVMe/SSD 硬件介质能否形成零主机正文触碰（Zero Host Payload Touch）的极速传输底座，且逻辑 Block/Page 能够高效编译为描述符 DAG。
-3. **确认决策优越性（PVT-04 ~ PVT-05）**：证明微秒级 QueryPlan 动态决策与 HBM↔SSD 直达容量主路径能够转化为业务 QPS 与单位 SLO 合格事务成本（TCO）的净收益。
-4. **确认正确性安全底线（PVT-06）**：证明 ConsumeEligibility 6 维判定与 RankConsensus 多 Rank 空间共识能够实现 **“0 错误消费、0 过期消费”**。
-5. **确认系统净收益与干扰包络（PVT-07）**：在真实前后台混压下完成纵向切片（Vertical Slice）总门禁，证明 TTFT 降低 ≥20%、TPOT 混流干扰 <3%。
-6. **条件证伪关键硬件依赖（CVT-01 ~ CVT-03）**：对硬件多播、硬件 Atomic Remap、DPU/硬件 Codec 卸载开展“条件证伪”，确保主路径在没有非成熟硬件依赖时完全独立成立。
+### 1.1 九大标准化工程模块
+每个 PVT/CVT 验证项均严格遵循以下 9 大工程化模块，开发人员无需了解整个项目全景，即可按步骤独立完成测试并输出量化结论：
 
-### 1.2 五大硬核工程设计原则
-
-```mermaid
-flowchart TD
-    A["同条件公平基线<br/>(Fair Baseline)"] --> E["证据链闭环<br/>(E0 ~ E3 Evidence Gates)"]
-    B["因果消融控制<br/>(Ablation Control)"] --> E
-    C["零主机正文触碰<br/>(Zero Host Payload Touch)"] --> E
-    D["资产可延续性<br/>(Prototype Continuation)"] --> E
-    E --> F["Go / Conditional / No-Go<br/>硬核退出决策"]
 ```
-
-1. **同条件公平基线（Fair Baseline）**：所有实验必须固定相同的模型权重、Tokenizer、Chat Template、并发到达分布、SLO 门槛、硬件拓扑与调优预算。对比对象必须包含：
-   - 框架原生基线（vLLM / SGLang 原生 Prefix Cache / Swap）；
-   - 最佳可行开源组合基线（Mooncake / LMCache 在目标硬件 Provider 下同等调优版本）。
-2. **因果消融控制（Ablation Control）**：关键验证必须包含：
-   - **关闭状态智能（State Intelligence）**：退化为简单静态规则或双水位策略；
-   - **移除非公开微架构信息**：退化为标准通用硬件接口。
-   防止将硬件禀赋或弱基线误写为第一方系统优势。
-3. **零主机正文触碰（Zero Host Payload Touch）**：Host CPU 仅承担控制面描述符提交与 CQ 完成轮询，严格禁止 CPU 深度参与 KV 正文的拷贝、编解码或全量 CRC 校验。
-4. **资产可延续性（Prototype Continuation）**：原型代码严禁写成一次性脚本。验证输出的 Descriptor Compiler、QueryPlan FastPath、DirectViewGuard、ConsumeEligibility Engine 等必须能够直接作为模块子系统迁入正式项目仓库（演进为 AR 认领任务）。
-5. **硬核退出决策（Go/No-Go Standard）**：每一项验证均明确定义 Go、Conditional（限定场景白名单）、No-Go（终止止损）与 Not Supported（显式写出支持矩阵）四类结果。
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 1. 验证目标与交付结论定义 (待验证核心命题、交付物清单与判定标准)       │
+├─────────────────────────────────────────────────────────────────────────┤
+│ 2. 基础/对照 Micro-Benchmark 构建方法 (裸机/单组件/底层协议基准搭建)    │
+├─────────────────────────────────────────────────────────────────────────┤
+│ 3. 业务 Benchmark 构造与流量特征编排 (请求构造、前缀重合度、时序时钟)   │
+├─────────────────────────────────────────────────────────────────────────┤
+│ 4. 软硬件环境与打点插桩方案 (环境拓扑、隔离策略、微秒级打点位置)        │
+├─────────────────────────────────────────────────────────────────────────┤
+│ 5. 分步执行测试操作规程 (Step 1 ~ Step 12 详细动作、命令与依赖)         │
+├─────────────────────────────────────────────────────────────────────────┤
+│ 6. 数据采集清单与记录格式 (原始数据表头、采样字段、CSV文件格式)          │
+├─────────────────────────────────────────────────────────────────────────┤
+│ 7. 数据交叉组合与运算推导逻辑 (原始数据如何组合推导预期收益、交叉比对) │
+├─────────────────────────────────────────────────────────────────────────┤
+│ 8. 多维扩展与扫参矩阵 (复用率 30%~98%、长上下文 8K~256K、多模型架构)     │
+├─────────────────────────────────────────────────────────────────────────┤
+│ 9. Go / Conditional / No-Go 判定规则与交付报告模板 (阈值公式与报告输出) │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 2. 8 个 PVT + 3 个 CVT 结构总览与证据门映射
+## 2. 8 个 PVT + 3 个 CVT 全量任务全景图
 
-原型验证清单包含 **8 个必做包（PVT-00 ~ PVT-07）** 与 **3 个条件/证伪项（CVT-01 ~ CVT-03）**，全量覆盖 24 条 IR 与 38 条 SR23 锚点。
-
-### 2.1 整体验证包追溯矩阵
-
-| 验证 ID | 验证包名称 | 对应证据门 | 主关联 IR | 核心 SR23 锚点 | 预估周期 | 证伪标记 |
-|---|---|---|---|---|---|---|
-| **PVT-00** | 业务流量 Saved-Prefill 收益上限评估 | **E0 立项充分性** | IR-02-11, IR-02-12 | SR23-02-11-01, SR23-02-12-01 | 4~6 人日 | 否 |
-| **PVT-01** | 零 Host Touch 传输底座与 CapabilityMatrix 探针 | **E1 能力路径** | IR-01-06, IR-01-08, IR-01-09, IR-01-12 | SR23-01-06-01, SR23-01-08-01, SR23-01-09-01 | 10~14 人日 | 否 |
-| **PVT-02** | 异构框架 Layout 描述符编译器与异步 DAG 流水 | **E1 能力路径** | IR-01-02, IR-01-04 | SR23-01-02-01, SR23-01-04-01, SR23-02-06-01 | 10~12 人日 | 否 |
-| **PVT-03** | Direct-View 与 Copy-to-HBM 边界及 ViewGuard 验证 | **E1/E2 路径与决策** | IR-01-07, IR-02-04, IR-02-05 | SR23-01-07-01, SR23-01-10-01, SR23-02-04-01 | 10~14 人日 | **是 (证伪 decode-active 默认 view)** |
-| **PVT-04** | QueryPlan 微秒级动态决策引擎与 Cost Evaluator | **E2 决策优越性** | IR-01-03, IR-01-05 | SR23-01-03-01, SR23-01-05-01, SR23-02-02-01 | 8~10 人日 | 否 |
-| **PVT-05** | HBM-SSD 直容量主路径与 DDR 条件角色 Tiering | **E2/E3 决策与净收益** | IR-01-01, IR-02-08, IR-02-09 | SR23-01-01-01, SR23-01-08-01, SR23-02-08-01 | 10~14 人日 | 否 |
-| **PVT-06** | ConsumeEligibility 与 RankConsensus 0 错误消费验证 | **E1 可消费正确性** | IR-01-10, IR-01-11, IR-02-01, IR-02-05 | SR23-01-10-01, SR23-01-11-01, SR23-02-01-01 | 10~12 人日 | 否 |
-| **PVT-07** | 前后台混压端到端薄闭环与 SemanticQoS 干扰包络 | **E3 系统净收益** | IR-01-04, IR-01-11, IR-02-06 | SR23-01-04-01, SR23-02-02-02, SR23-02-06-01 | 12~15 人日 | 否 |
-| **CVT-01** | 热点前缀 1-N 硬件多播与 Staging Fanout 对比证伪 | **条件证伪门** | IR-01-04, IR-01-10 | SR23-01-04-02, SR23-01-10-01 | 6~8 人日 (按触发) | **是 (证伪多播非必需)** |
-| **CVT-02** | Page Migration 软件 RCU 与硬件 Atomic Remap 证伪 | **条件证伪门** | IR-01-01, IR-01-11, IR-01-12 | SR23-01-01-03, SR23-01-11-01, SR23-01-12-02 | 8~12 人日 (按触发) | **是 (优先证伪硬件原语依赖)** |
-| **CVT-03** | DPU / Codec / CQ 卸载必要性与 Raw Direct 路径证伪 | **条件证伪门** | IR-01-08, IR-01-09 | SR23-01-08-01, SR23-01-08-02, SR23-01-09-01 | 5~8 人日 (按触发) | **是 (证伪 DPU/Codec 必需性)** |
+| 验证 ID | 验证包名称 | 验证核心命题 | 对应证据门 | 关联核心文档 |
+|---|---|---|---|---|
+| **PVT-00** | 业务流量 Saved-Prefill 收益上限评估 | 30%~98% 复用率下 TTFT 净收益与 UBMEM 加速实测 | **E0 立项充分性** | [01_PVT-00.md](./01_PVT-00_业务流量Saved-Prefill收益上限评估实施方案设计.md) |
+| **PVT-01** | 零 Host Touch 传输底座与 CapabilityMatrix | UBMEM/URMA 及 SSD 直达 Host CPU 触碰严格为 0，线速 $\ge 80\%$ | **E1 能力路径** | [02_PVT-01.md](./02_PVT-01_零HostTouch极速传输底座与CapabilityMatrix验证实施方案设计.md) |
+| **PVT-02** | 异构框架 Layout 编译器与异步 DAG 流水 | 描述符提交开销下降 $\ge 40\%$，计算-传输重叠率 $\ge 60\%$ | **E1 能力路径** | [03_PVT-02.md](./03_PVT-02_异构框架Layout描述符编译器与异步DAG流水验证实施方案设计.md) |
+| **PVT-03** | DirectView 与 Copy-to-HBM 边界及 ViewGuard | 实测 Crossover 临界点；**证伪 Decode 活跃 KV 适合 View**；ViewGuard 0 崩溃 | **E1/E2 路径决策** | [04_PVT-03.md](./04_PVT-03_DirectView与Copy-to-HBM适用边界与ViewGuard验证实施方案设计.md) |
+| **PVT-04** | QueryPlan 微秒级动态决策与 CostEvaluator | 决策耗时 $P99 < 5\mu s$，准确率 $\ge 90\%$，负收益发生率严格 $< 1\%$ | **E2 决策优越性** | [05_PVT-04.md](./05_PVT-04_QueryPlan微秒级动态决策引擎与CostEvaluator验证实施方案设计.md) |
+| **PVT-05** | HBM-SSD 直达容量主路径与 DDR 条件角色 | 150% 超载下服务容量提升 $\ge 30\%$，OOM 下降 $\ge 50\%$，Payload 绕过 DDR | **E2/E3 容量收益** | [06_PVT-05.md](./06_PVT-05_HBM-SSD直达容量主路径与DDR条件角色Tiering验证实施方案设计.md) |
+| **PVT-06** | ConsumeEligibility 与 RankConsensus 共识 | 8 类冲突下 0 错误消费、0 越界；$TP=8$ 共识时延 $P99 < 100\mu s$ | **E1 可消费正确性** | [07_PVT-06.md](./07_PVT-06_ConsumeEligibility与RankConsensus0错误消费验证实施方案设计.md) |
+| **PVT-07** | 前后台混压薄闭环与 SemanticQoS 干扰包络 | 全链路 P99 TTFT 降低 $\ge 20\%$，QPS 提升 $\ge 10\%$，TPOT 干扰 $< 3\%$ | **E3 系统总门禁** | [08_PVT-07.md](./08_PVT-07_前后台混压端到端薄闭环与SemanticQoS干扰包络验证实施方案设计.md) |
+| **CVT-01** | 热点前缀 1-N 硬件多播与 Staging Fanout 对比 | **证伪硬件多播必需性**；$N \le 8$ 规模下软件 Staging Fanout 时延差距 $< 10\%$ | **条件证伪门** | [09_CVT-01.md](./09_CVT-01_热点前缀1-N硬件多播与StagingFanout对比证伪实施方案设计.md) |
+| **CVT-02** | PageMigration 软件 RCU 与硬件 AtomicRemap | **证伪硬件 Remap 必需性**；软件 RCU 迁移停顿 $< 1\text{ms}$，TPOT 抖动 $< 5\%$ | **条件证伪门** | [10_CVT-02.md](./10_CVT-02_PageMigration软件RCU与硬件AtomicRemap必要性证伪实施方案设计.md) |
+| **CVT-03** | DPU-Codec-CQ 卸载与 RawDirect 无缝 Fallback | **证伪 DPU 必需性**；Raw Direct 主路径独立成立，DPU 故障 $< 1\text{ms}$ 降级 | **条件证伪门** | [11_CVT-03.md](./11_CVT-03_DPU-Codec-CQ卸载必要性与RawDirect无缝Fallback证伪实施方案设计.md) |
 
 ---
 
-## 3. 实验硬件环境、网络拓扑与通用 Test Harness 架构
+## 3. 实验硬件环境与公共 Harness 拓扑
 
-### 3.1 实验硬件集群拓扑
-
-验证集中在 **2 节点（Node-0, Node-1）** 标准集群环境开展，硬件配置如下：
-
-```mermaid
-flowchart TB
-    subgraph Node_0["Node-0 (推理 Worker / 存储源节点)"]
-        direction TB
-        NPU0_0["NPU-0 (8× HBM3, 96GB)"] --- NVLink0["NVLink 3.0 Interconnect (900 GB/s)"]
-        NPU0_1["NPU-1 (8× HBM3, 96GB)"] --- NVLink0
-        HostCPU0["Host CPU (64 Cores DDR5)"] --- PCIe0["PCIe Gen5 x16 Bus"]
-        PCIe0 --- NVMe0["NVMe SSD Array (4× 7.68TB Direct I/O)"]
-        PCIe0 --- NIC0["800G URMA / RDMA NIC"]
-    end
-
-    subgraph Node_1["Node-1 (推理 Worker / 远端消费节点)"]
-        direction TB
-        NPU1_0["NPU-0 (8× HBM3, 96GB)"] --- NVLink1["NVLink 3.0 Interconnect (900 GB/s)"]
-        NPU1_1["NPU-1 (8× HBM3, 96GB)"] --- NVLink1
-        HostCPU1["Host CPU (64 Cores DDR5)"] --- PCIe1["PCIe Gen5 x16 Bus"]
-        PCIe1 --- NVMe1["NVMe SSD Array (4× 7.68TB Direct I/O)"]
-        PCIe1 --- NIC1["800G URMA / RDMA NIC"]
-    end
-
-    NIC0 <== "URMA / RDMA 400G/800G Link" ==> NIC1
-```
-
-### 3.2 通用 Unified Prototype Test Harness 软件架构
-
-全量 PVT / CVT 共享同一套轻量级 Python/C++ **Test Harness** 框架：
-
-```mermaid
-flowchart LR
-    subgraph Workload_Engine["1. Workload Generator"]
-        TraceReplay["Trace Replayer<br/>(ShareGPT / Zipf / Production)"]
-        SyntheticGen["Synthetic Traffic Engine<br/>(4K~1M Context)"]
-    end
-
-    subgraph Core_Harness["2. Unified Test Harness"]
-        HookManager["Hardware Counter Hook<br/>(PCIe / NIC / CPU Cycles)"]
-        FaultInjector["Fault Injector Engine<br/>(Network/IO/Ready Delay)"]
-        TelemetryCollector["Telemetry & Trace Collector<br/>(P50/P95/P99, Latency, Touch)"]
-    end
-
-    subgraph Benchmark_Target["3. System Under Test (SUT)"]
-        SUT_Native["Framework Native Baseline"]
-        SUT_OSS["Best-Effort OSS (Mooncake/LMCache)"]
-        SUT_UnifiedPool["Unified KV Storage Pool (SUT)"]
-    end
-
-    Workload_Engine --> Core_Harness
-    Core_Harness --> Benchmark_Target
-    Benchmark_Target --> TelemetryCollector
-    TelemetryCollector --> OutputReport["A/B Benchmark Report & Decision Matrix"]
-```
+验证集中在 **2 节点（Node-0, Node-1）** 标准硬件环境上执行：
+- **算力与显存**：每节点 8× NPU (96GB HBM3)，单机显存总计 768GB；
+- **网络互联**：800G URMA / RDMA 双端口网卡，支持 UBMEM 共享内存协议；
+- **存储介质**：每节点 4× NVMe PCIe Gen5 SSD 阵列（顺序读标称 28GB/s）；
+- **宿主算力**：64 Cores Host CPU, 512GB DDR5（仅供控制面与元数据使用）。
 
 ---
 
@@ -155,79 +95,70 @@ gantt
     CVT-01/02/03 条件证伪项        :e1, 2026-09-08, 2026-09-13
 ```
 
-### 4.1 各波次进入与统一退出门禁
-
-1. **W0 事实与基线（第 1 周）**：
-   - **包**：PVT-00, PVT-01。
-   - **退出门**：E0 收益上限与 E1 CapabilityMatrix 可复现；错误 KV 消费 = 0；实际路径可严格对账。
-2. **W1 语义与执行链（第 2~3 周）**：
-   - **包**：PVT-02, PVT-03, PVT-04。
-   - **退出门**：E1 描述符/Direct-View 路径成立；E2 QueryPlan 相对静态规则与消融版本形成可判定结论。
-3. **W2 容量与消费（第 3~4 周）**：
-   - **包**：PVT-05, PVT-06。
-   - **退出门**：E2 容量/消费决策闭环；可寻址容量转为服务能力；错误消费 = 0；DDR 条件角色明确。
-4. **W3 薄闭环总门禁（第 4~5 周）**：
-   - **包**：PVT-07。
-   - **退出门**：**【E3 系统净收益】** 相对最佳开源替代形成 TTFT/TPOT/QPS/TCO 综合净收益。
-5. **WC 条件证伪波次（按触发条件）**：
-   - **包**：CVT-01, CVT-02, CVT-03。
-   - **退出门**：未达净收益或正确性门槛即旁路/关闭，并写回路线图。
+开发人员针对每个验证项：
+1. **构建 Benchmark**：按照方案第 2、3 节搭建底层微基准与业务请求流量；
+2. **执行测试**：按照方案第 5 节运行 Step 1 至 Step 12 操作规程；
+3. **记录与计算**：按照方案第 6、7 节导出原始数据表并进行公式交叉比对；
+4. **输出结论**：按照方案第 9 节交付标准 Markdown 报告与判定结论。
 
 ---
 
-## 5. 统一数据记录规范与立项证据包（Evidence Package）模板
+## 5. 原型验证代码库与工程脚本全量索引
 
-所有验证包在运行结束后，必须向技术主管、项目主管与架构师提交统一格式的**立项证据包（Evidence Package）**。证据包格式模板如下：
+所有验证项的可运行源码、Makefile 与测试脚本均存放在当前设计文档目录下的 `./原型验证代码/` 相对路径中：
 
-```markdown
-# [PVT/CVT ID] 原型验证立项证据包
-
-## 1. 验证基本信息
-- **验证 ID与名称**：PVT-XX / CVT-XX
-- **对应证据门**：E0 / E1 / E2 / E3 / 条件证伪门
-- **评审结论**：[ Go / Conditional / No-Go / Not Supported ]
-- **测试时间与环境**：2026-XX-XX, Node-0 & Node-1 (NPU 8× HBM, PCIe Gen5, 800G URMA)
-- **软件与模型版本**：vLLM v0.6.x / SGLang v0.3.x, DeepSeek-V3 / Qwen2.5-72B
-
-## 2. 公平基线与因果消融对账
-- **原生框架 Baseline**：[数据及说明]
-- **最佳可行开源组合 (Mooncake/LMCache)**：[数据及说明]
-- **关闭 State Intelligence 消融**：[数据及说明]
-- **移除非公开微架构信息消融**：[数据及说明]
-
-## 3. 关键测量指标与 Go 门槛对账
-| KPI 指标 | 测算基线 | 本项目实测 | 目标 Go 门槛 | 门槛达成判定 |
-|---|---|---|---|---|
-| P99 TTFT (ms) | ... | ... | 降低 ≥ 20% | PASS / FAIL |
-| Host Touch Payload (Bytes) | ... | 0 | 必须 = 0 | PASS |
-| 错误/过期 KV 消费数 | ... | 0 | 必须 = 0 | PASS |
-
-## 4. 路径凭证与硬件计数器对账
-- **计划路径 (Planned Path)**：HBM -> URMA -> Remote HBM
-- **实际路径凭证 (ActualPathReceipt)**：`Receipt#10923: URMA_Direct_ZeroCopy, Latency 18.2us`
-- **Host CPU Payload Counter**：`0 bytes read/written by CPU`
-
-## 5. 架构决策与资产迁移规划
-- **影响的 IR / SR23**：SR23-XX-XX
-- **延续的代码资产**：`src/transfer/descriptor_compiler.cc` -> 迁入 SR23-01-02-01
-- **评审签字**：架构师 [  ], 性能负责人 [  ], 研发主管 [  ]
+```
+原型验证代码/
+├── PVT-00/
+│   ├── proto_bench.cc              # 测量 URMA 与 UBMEM 底层通信协议带宽与时延的 C++ 微基准压测工具
+│   ├── Makefile                   # 编译 proto_bench 的工程构建文件 (make -j16)
+│   ├── make_workload.py           # 构造具备 50%~98% 前缀复用率的受控 R1/R2 请求数据集生成脚本
+│   └── traffic_generator.py       # 受控发包与 TTFT/首 Token 时延采集的客户端驱动脚本
+├── PVT-01/
+│   ├── raw_trans_bench.cc         # 测量 URMA/UBMEM/NVMe Direct 零拷贝 vs CPU memcpy 性能的 C++ 压测工具
+│   ├── Makefile                   # 编译 raw_trans_bench 的工程构建文件
+│   ├── host_touch_monitor.py      # 基于 Linux eBPF (bpftrace) 监控 Host CPU 内存拷贝事件的内核探针脚本
+│   └── export_capability_matrix.py# 自动解析实测吞吐并导出 capability_matrix.json 的工具脚本
+├── PVT-02/
+│   ├── descriptor_compiler.h      # 跨框架离散物理 Block 连续性合并与 Scatter-Gather 描述符编译器头文件
+│   ├── descriptor_compiler.cc     # 描述符贪心合并与硬件描述符生成的核心算法实现
+│   ├── async_dag_bench.cc         # NPU 计算流与 DMA 传输流异步 DAG 重叠流水压测工具
+│   ├── Makefile                   # 编译 async_dag_bench 的工程构建文件
+│   └── make_manifests.py          # 生成不同碎片离散度 (10%~100%) Block Table Manifest 的脚本
+├── PVT-03/
+│   ├── view_vs_copy_bench.cc      # 测量不同重读次数下 Direct-View 与 Copy-to-HBM 累积耗时的 C++ 压测工具
+│   ├── view_guard.h               # ViewGuard 租约管理、时效校验与异常捕获头文件
+│   ├── view_guard.cc              # ViewGuard 租约校验与故障安全回滚的核心实现
+│   ├── Makefile                   # 编译 view_vs_copy_bench 的工程构建文件
+│   └── benchmark_serving_view.py  # 在推理服务中测试并证伪 Decode 阶段 View 模式的压测脚本
+├── PVT-04/
+│   ├── query_plan_fastpath.h      # 微秒级动态决策引擎与 CostEvaluator 成本预估头文件
+│   ├── query_plan_fastpath.cc     # 实时链路感知、5 维成本预估与微秒级剪枝决策算法实现
+│   ├── query_plan_bench.cc        # 决策引擎 100K QPS 吞吐压测与反事实决策对账 Harness
+│   └── Makefile                   # 编译 query_plan_bench 的工程构建文件
+├── PVT-05/
+│   ├── tier_storage_bench.cc      # NVMe SSD Direct I/O (Bypass DDR) 与 DDR 中转吞吐对比的 C++ 压测工具
+│   ├── Makefile                   # 编译 tier_storage_bench 的工程构建文件
+│   └── benchmark_tiering.py       # 150%~200% HBM 显存超载下分层扩容与 OOM 统计驱动脚本
+├── PVT-06/
+│   ├── consume_eligibility.h      # 6 维语义强校验引擎与部分前缀拼接计划头文件
+│   ├── consume_eligibility.cc     # 模型/Tokenizer/模板/LoRA/Ready/Lease 6 维匹配算法实现
+│   ├── rank_consensus_bench.cc    # TP=8 多卡空间共识耗时测量与协同 Fallback 压测工具
+│   ├── Makefile                   # 编译 rank_consensus_bench 的工程构建文件
+│   └── test_correctness.py        # 注入 8 类语义冲突与验证输出 Token 100% 正确性的测试脚本
+├── PVT-07/
+│   ├── mixed_workload_bench.py    # 前台在线 Decode 流与后台高吞吐 I/O 混压驱动脚本
+│   ├── semantic_qos_controller.py # 前台高优先级保证与后台微秒级自适应退避流控器
+│   └── run_mixed_bench.py         # 自动化执行全套混流薄闭环并计算 TPOT 干扰率与 TTFT 降幅的脚本
+├── CVT-01/
+│   ├── multicast_fanout_bench.cc  # N 次单播 vs 软件 Staging Fanout vs 硬件多播完成时延对比工具
+│   └── Makefile                   # 编译 multicast_fanout_bench 的工程构建文件
+├── CVT-02/
+│   ├── rcu_migration_bench.cc     # 32 并发 Reader 下 Stop-the-world 锁表 vs 软件 RCU 迁移停顿对比工具
+│   └── Makefile                   # 编译 rcu_migration_bench 的工程构建文件
+└── CVT-03/
+    ├── offload_fallback_bench.cc  # Raw Direct 直达 vs DPU 硬件卸载 vs CPU 软件压缩对比工具
+    ├── Makefile                   # 编译 offload_fallback_bench 的工程构建文件
+    └── inject_fault.py            # DPU 控制通道与硬件超时故障注入脚本
 ```
 
----
-
-## 6. 总体总结与后续子文档导航
-
-本总体实施方案设计为后续 11 个专项 PVT/CVT 实施方案确立了统一的理论基础、硬件拓扑、Harness 架构、消融规范与证据门决策逻辑。
-
-后文 11 份 Markdown 将针对每一项原型验证任务给出深度详尽的实施方案：
-- [`01_PVT-00_业务流量Saved-Prefill收益上限评估实施方案设计.md`](file:///d:/codes/reports/kvcache/unified_kv_memory/验证计划方案设计/01_PVT-00_业务流量Saved-Prefill收益上限评估实施方案设计.md)
-- [`02_PVT-01_零HostTouch极速传输底座与CapabilityMatrix验证实施方案设计.md`](file:///d:/codes/reports/kvcache/unified_kv_memory/验证计划方案设计/02_PVT-01_零HostTouch极速传输底座与CapabilityMatrix验证实施方案设计.md)
-- [`03_PVT-02_异构框架Layout描述符编译器与异步DAG流水验证实施方案设计.md`](file:///d:/codes/reports/kvcache/unified_kv_memory/验证计划方案设计/03_PVT-02_异构框架Layout描述符编译器与异步DAG流水验证实施方案设计.md)
-- [`04_PVT-03_DirectView与Copy-to-HBM适用边界与ViewGuard验证实施方案设计.md`](file:///d:/codes/reports/kvcache/unified_kv_memory/验证计划方案设计/04_PVT-03_DirectView与Copy-to-HBM适用边界与ViewGuard验证实施方案设计.md)
-- [`05_PVT-04_QueryPlan微秒级动态决策引擎与CostEvaluator验证实施方案设计.md`](file:///d:/codes/reports/kvcache/unified_kv_memory/验证计划方案设计/05_PVT-04_QueryPlan微秒级动态决策引擎与CostEvaluator验证实施方案设计.md)
-- [`06_PVT-05_HBM-SSD直达容量主路径与DDR条件角色Tiering验证实施方案设计.md`](file:///d:/codes/reports/kvcache/unified_kv_memory/验证计划方案设计/06_PVT-05_HBM-SSD直达容量主路径与DDR条件角色Tiering验证实施方案设计.md)
-- [`07_PVT-06_ConsumeEligibility与RankConsensus0错误消费验证实施方案设计.md`](file:///d:/codes/reports/kvcache/unified_kv_memory/验证计划方案设计/07_PVT-06_ConsumeEligibility与RankConsensus0错误消费验证实施方案设计.md)
-- [`08_PVT-07_前后台混压端到端薄闭环与SemanticQoS干扰包络验证实施方案设计.md`](file:///d:/codes/reports/kvcache/unified_kv_memory/验证计划方案设计/08_PVT-07_前后台混压端到端薄闭环与SemanticQoS干扰包络验证实施方案设计.md)
-- [`09_CVT-01_热点前缀1-N硬件多播与StagingFanout对比证伪实施方案设计.md`](file:///d:/codes/reports/kvcache/unified_kv_memory/验证计划方案设计/09_CVT-01_热点前缀1-N硬件多播与StagingFanout对比证伪实施方案设计.md)
-- [`10_CVT-02_PageMigration软件RCU与硬件AtomicRemap必要性证伪实施方案设计.md`](file:///d:/codes/reports/kvcache/unified_kv_memory/验证计划方案设计/10_CVT-02_PageMigration软件RCU与硬件AtomicRemap必要性证伪实施方案设计.md)
-- [`11_CVT-03_DPU-Codec-CQ卸载必要性与RawDirect无缝Fallback证伪实施方案设计.md`](file:///d:/codes/reports/kvcache/unified_kv_memory/验证计划方案设计/11_CVT-03_DPU-Codec-CQ卸载必要性与RawDirect无缝Fallback证伪实施方案设计.md)
