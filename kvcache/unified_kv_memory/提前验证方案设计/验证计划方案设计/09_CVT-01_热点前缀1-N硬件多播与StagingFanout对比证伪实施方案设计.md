@@ -9,6 +9,7 @@
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L4-RDMA-MUL-FABRIC-002`  
 > - SR23: `SR23-01-04-02`, `SR23-01-10-01`  
+> **研发对齐状态**：已闭环研发评估报告 14 项与硬件多播双轨制规范（明确真实硬件多播与软件 Staging 树状分层双轨评测规程）  
 
 ---
 
@@ -28,11 +29,19 @@
 
 ---
 
-## 2. 核心数据结构与算法原型详细设计
+## 2. 核心数据结构与双轨制证伪设计
 
-### 2.1 核心数据结构定义
+### 2.1 硬件多播与软件 Staging 双轨制实施标准
+根据研发团队反馈的物理网络环境异构性，本验证采用**灵活的双轨制实施准则**：
+- **轨道 1（物理交换机支持 RDMA IP Multicast）**：在物理多播组（`ibv_attach_mcast`）下实测硬件广播时延；
+- **轨道 2（物理交换机未开启多播）**：运行软件 Staging Fanout 树状拓扑对账 $N$ 次独立单播，结合物理网卡线速理论上限（$T_{\text{ideal\_mcast}} = \text{Payload} / \text{BW}_{\text{line}}$）完成严密数学与工程交叉证伪。
 
 ```cpp
+#include <stdint.h>
+#include <vector>
+#include <string>
+#include <atomic>
+
 // 1. 树状扇出拓扑节点描述
 struct FanoutTreeNode {
     uint32_t node_id;             // 节点 ID
@@ -72,7 +81,7 @@ flowchart TD
     Note3["慢节点 C8 仅自身延迟到 12.2ms, 0 阻塞其余 7 个节点!"]
 ```
 
-#### 慢节点容错与解耦状态机：
+#### 慢节点容错与解耦状态机实现：
 ```cpp
 void StagingRelayNode::forward_to_children(const BroadcastTask& task) {
     // 自身已收到数据，立即通知本地推理引擎开始 Prefill (零等待!)
@@ -96,7 +105,7 @@ void StagingRelayNode::forward_to_children(const BroadcastTask& task) {
 ## 3. 基础/对照 Micro-Benchmark 构建方法
 
 ### 3.1 测试工具与源码结构
-本项验证涉及的全部广播对比压测源码均存放在 `./原型验证代码/CVT-01/` 目录下：
+本项验证涉及的全部广播对比压测源码存放在 `./原型验证代码/CVT-01/` 目录下：
 
 ```
 原型验证代码/CVT-01/
@@ -153,14 +162,17 @@ cd ./原型验证代码/CVT-01 && make clean && make
 ### 步骤 2：测试正常网络下 16MB 数据块 3 种方案时延
 执行微基准测试：
 ```bash
-./multicast_fanout_bench
+./multicast_fanout_bench --size 16M --nodes 8
 ```
 
 ### 步骤 3：计算软件 Fanout 与硬件多播的性能差距
 计算时延差距百分比：$\frac{T_{\text{fanout}} - T_{\text{mcast}}}{T_{\text{mcast}}} \times 100\%$。
 
 ### 步骤 4：在节点 $C_8$ 注入慢节点扰动
-利用 `tc netem` 增加 10ms 延迟。
+利用 `tc netem` 增加 10ms 延迟：
+```bash
+sudo tc qdisc add dev eth0 root netem delay 10ms loss 5%
+```
 
 ### 步骤 5：在扰动下测试硬件多播时延
 观察硬件多播因等待 $C_8$ ACK 导致的整体广播挂起时间。

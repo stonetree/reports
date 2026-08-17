@@ -9,6 +9,7 @@
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L3-OB-PerPathTelemetry-047`, `L1-OB-SemanticMetrics-016`, `SE-MONITOR-001`, `SE-PERF-001`  
 > - SR23: `SR23-02-11-01`, `SR23-02-11-02`, `SR23-02-12-01`, `SR23-02-12-05`  
+> **研发对齐状态**：已闭环研发评估报告 1, 12, 13 项（明确驱动 SDK、模型基准与行级源码插桩位置）  
 
 ---
 
@@ -22,7 +23,7 @@
 ### 1.2 最终交付数据与结论产出
 开发人员执行完本方案后，必须输出以下交付件：
 1. **《URMA vs UBMEM 协议传输性能基准表》**（覆盖 4KB~64MB 包大小、1~64 并发）；
-2. **《vLLM + Mooncake 前缀复用实测打点时延表》**（各阶段打点耗时）；
+2. **《vLLM + Mooncake 前缀复用实测打点时延表》**（包含源码插桩微秒级打点）；
 3. **《不同复用率与上下文长度下的 TTFT 收益交叉对账表与对比图》**；
 4. **《Go / No-Go 判定结论》**：依据净收益公式计算是否满足 $\text{Saved-Prefill 净收益} \ge 2.0\times \text{总开销}$ 门槛。
 
@@ -30,11 +31,23 @@
 
 ## 2. 底层协议 Micro-Benchmark 构建方法
 
-### 2.1 测试目标与工具
+### 2.1 测试目标与底层 SDK 依赖规范
 在物理裸机环境上，脱离推理框架，测量 **URMA** 与 **UBMEM** 两种通信协议在不同数据包大小与线程并发数下的单向/双向传输带宽与延迟基线。
 
+#### 核心 C/C++ 驱动头文件与链接库规范：
+```cpp
+// 引入第一方标准通信驱动 SDK
+#include <urma.h>        // URMA 用户态 Verbs API 头文件
+#include <ubmem.h>       // UBMEM 统一总线内存直通 API 头文件
+#include <infiniband/verbs.h>
+#include <pthread.h>
+#include <time.h>
+```
+- **库文件路径**：`/usr/lib64/liburma.so`, `/usr/lib64/libubmem.so`
+- **GCC/Clang 编译链接参数**：`-lurma -lubmem -lpthread -O3 -march=native`
+
 ### 2.2 压测工具构建与源码结构
-本项验证涉及的全部底层测试与数据生成源码均存放在 `./原型验证代码/PVT-00/` 目录下：
+本项验证涉及的全部底层测试与数据生成源码存放在 `./原型验证代码/PVT-00/` 目录下：
 
 ```
 原型验证代码/PVT-00/
@@ -99,32 +112,55 @@ python3 ./原型验证代码/PVT-00/traffic_generator.py --workload workload_50p
 
 ---
 
-## 4. 系统环境配置与插桩打点方案
+## 4. 系统环境配置与源码行级插桩打点方案
 
-### 4.1 隔离与控制变量配置
-为了精确测量外接存储池的收益，**必须在 vLLM 上屏蔽本地 HBM KVCache 复用**，强制请求只能从外接 Mooncake 存储池中获取：
+### 4.1 实验环境、测试模型基线与源码版本锁定
+- **模型权重基线路径**：
+  - 主测模型：`/models/Qwen/Qwen2.5-72B-Instruct`（FP16，80 层，GQA $H_{kv}=8$, $D_{head}=128$，单 Token KV 大小为 $320\text{ KB/Token}$，TP=8 单卡 $40\text{ KB/Token}$）；
+  - 备选长文模型：`/models/meta-llama/Llama-3.1-70B-Instruct`（FP16/FP8）；
+  - MLA 压缩态模型：`/models/deepseek-ai/DeepSeek-V3`（FP8 MLA，$D_{latent}=512$，单 Token 仅 $512\text{ Bytes}$）。
+- **推理引擎与存储组件版本锁定**：
+  - `vLLM`：锁定 Commit Tag `v0.6.3.post1`；
+  - `Mooncake`：锁定 Release Tag `v0.2.0-rc1`。
+
+### 4.2 隔离与控制变量启动参数
 ```bash
 # vLLM 启动参数配置（禁用本地 Prefix Caching，启用外接存储池扩展插件）
 python3 -m vllm.entrypoints.openai.api_server \
-    --model /models/Qwen2.5-72B \
+    --model /models/Qwen/Qwen2.5-72B-Instruct \
     --tensor-parallel-size 8 \
     --no-enable-prefix-caching \
     --kv-transfer-config '{"kv_connector": "MooncakeConnector", "kv_role": "kv_both"}' \
     --port 8000
 ```
 
-### 4.2 关键路径插桩打点位置
-在 vLLM 与 Mooncake 源码中植入高精度时钟打点（微秒级 `clock_gettime(CLOCK_MONOTONIC)`）：
+### 4.3 关键路径行级插桩打点位置 (C/C++ & Python)
 
-| 打点标识 | 插桩组件与代码位置 | 测量含义 |
-|---|---|---|
-| `T_req_in` | vLLM API Server 入口 | 请求到达时间戳 |
-| `T_lookup_start` | Mooncake Client 发起前缀查询 | 开始前缀元数据检索 |
-| `T_lookup_end` | Mooncake Client 收到前缀匹配结果 | 前缀匹配建表与元数据返回 |
-| `T_xfer_start` | 发起底层 KV 数据传输 | 开始拉取远程 KVCache |
-| `T_xfer_end` | 远程 KV 数据拉取完成并落入显存 | 传输完成并 Ready |
-| `T_prefill_start` | NPU Prefill Kernel 启动 | 开始计算未命中部分 (后 50K) |
-| `T_first_token` | 生成第一个输出 Token | 首 Token 产出时间戳 |
+在源码中植入微秒级时钟打点（`clock_gettime(CLOCK_MONOTONIC)`）：
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        源码行级时钟打点与时序拆解全景图                                │
+├───────────────────┬───────────────────────────────────┬────────────────────────────────┤
+│ 打点标识          │ 插桩文件与具体函数位置            │ 测量物理含义                   │
+├───────────────────┼───────────────────────────────────┼────────────────────────────────┤
+│ T_req_in          │ vllm/entrypoints/openai/api_server│ HTTP 接口层接收到请求时间戳    │
+│ T_lookup_start    │ vllm/core/scheduler.py:schedule() │ 调度器发起前缀元数据查询       │
+│ T_lookup_end      │ mooncake/src/connector.cc:get_kv()│ Mooncake 匹配返回命中 Block 链 │
+│ T_xfer_start      │ mooncake/src/connector.cc:xfer()  │ 发起底层 URMA/UBMEM DMA 传输   │
+│ T_xfer_end        │ mooncake/src/connector.cc:wait()  │ 数据到达 NPU HBM 并完成 Fence  │
+│ T_prefill_start   │ vllm/worker/worker.py:execute()   │ NPU 启动未命中部分 Prefill 算子│
+│ T_first_token     │ vllm/worker/worker.py:sample()    │ 产出第一个 Token 并准备流式回包│
+└───────────────────┴───────────────────────────────────┴────────────────────────────────┘
+```
+
+#### C++ 探针宏定义实现（可直接植入 `connector.cc`）：
+```cpp
+#define PVT_TRACE_POINT(name) \
+    struct timespec ts_##name; \
+    clock_gettime(CLOCK_MONOTONIC, &ts_##name); \
+    double name = ts_##name.tv_sec * 1000.0 + ts_##name.tv_nsec / 1000000.0;
+```
 
 ---
 
@@ -178,8 +214,8 @@ $$S_{kv\_bytes} = 2 \times N_{layers} \times H_{kv\_heads} \times D_{head} \time
 
 ### 步骤 9：对 Mooncake 前缀元数据进行 UBMEM 共享内存改造并复测
 将 Mooncake 默认基于 RPC/TCP 的元数据交互改造为基于 UBMEM 的共享内存/单边 Direct 映射：
-1. 替换元数据通道为 `UBMEM_Trie_Client`；
-2. 重新运行步骤 4，测得改造后的元数据查询耗时 $T_{meta\_ubmem}$。
+1. 替换元数据通道为 `UBMEM_Trie_Client`（基于 `/dev/shm` 与 UBMEM 原子单边读取 Radix Tree 拓扑）；
+2. 重新运行步骤 4，测得改造后的元数据查询耗时 $T_{meta\_ubmem}$；
 3. 计算元数据优化提升量：$\Delta T_{meta} = T_{meta\_lookup} - T_{meta\_ubmem}$。
 
 ### 步骤 10：测量完全不复用 KVCache 的纯算力重算 TTFT 基线

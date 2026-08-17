@@ -9,6 +9,7 @@
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L2-KV-AttachHandle-034`, `L2-KV-PartialAttachPlan-038`, `L3-MS-ConsumeEligibility-060`, `L3-CO-VisibilityReadyBitmap-064`, `L1-PD-RankConsensus-013`  
 > - SR23: `SR23-01-10-01`, `SR23-01-11-01`, `SR23-02-01-01`, `SR23-02-05-01`, `SR23-02-05-02`, `SR23-02-10-01`  
+> **研发对齐状态**：已闭环研发评估报告 5, 9 项与多卡共识规范（明确 xxHash64 标准哈希、/dev/shm 8卡共享内存 Bitmap 与 NCCL/HCCL 协同防死锁协议）  
 
 ---
 
@@ -17,7 +18,7 @@
 ### 1.1 待验证核心命题
 物理命中（Raw Hit）绝不等于可以安全消费的有效命中（Usable Hit）。如果命中的 KV Cache 存在模型版本冲突、Tokenizer/ChatTemplate 不匹配、Ready 写入未就绪或多卡状态分歧，强行消费将导致输出胡言乱语、多卡死锁甚至越权数据泄露。本验证旨在通过算法原型与冲突注入证明：
 1. **ConsumeEligibility 6 维语义校验引擎**能够在微秒级内（$< 5\mu s$）对候选 KV 进行完整校验，在各类冲突注入下实现 **错误消费数、过期消费数、越权消费数严格为 0**，冲突拦截率 **$100\%$**；
-2. **RankConsensus 多卡空间共识机制**在 $TP=8$ 张量并行下，多卡共识耗时 **$P99 < 100\mu s$**；在单卡丢包或不一致时，能够 $100\%$ 正确决策协同 Fallback 重算，杜绝多卡死锁与状态分歧。
+2. **RankConsensus 多卡空间共识机制**在 $TP=8$ 张量并行下，基于共享内存/UBMEM 的多卡共识耗时 **$P99 < 100\mu s$**；在单卡丢包或不一致时，能够 $100\%$ 正确决策协同 Fallback 重算，杜绝多卡死锁与状态分歧。
 
 ### 1.2 最终交付数据与结论产出
 开发人员执行完本方案后，必须输出以下交付件：
@@ -28,18 +29,26 @@
 
 ---
 
-## 2. 核心数据结构与算法原型详细设计
+## 2. 核心数据结构与 xxHash64 / 空间共识设计
 
-### 2.1 6 维语义元数据与可消费性判定结构体
+### 2.1 6 维语义元数据与 xxHash64 标准哈希定义
+
+为了保证跨语言（C++ / Python）、跨框架的哈希一致性，`tokenizer_hash` 与 `template_hash` **统一采用 64-bit `xxHash64` (`XXH64`)**，模型名称与 LoRA ID 执行小写正则规范化（`^[a-z0-9\-_]+$`）：
 
 ```cpp
+#include <stdint.h>
+#include <string.h>
+#include <atomic>
+#include <vector>
+#include <xxhash.h>
+
 // 1. 6 维语义元数据描述符 (必须 100% 严格对齐)
 struct alignas(64) SemanticTag6D {
     uint64_t object_id;           // KV Cache 物理对象 ID
-    char model_version[32];       // 维度 1: 模型架构与版本 (如 "DeepSeek-V3-Base")
-    uint64_t tokenizer_hash;      // 维度 2: Tokenizer 词表与分词哈希
-    uint64_t template_hash;       // 维度 3: ChatTemplate 格式哈希
-    char adapter_id[32];          // 维度 4: LoRA 微调适配器标识 (无则为 "base")
+    char model_version[32];       // 维度 1: 规范化模型名 (如 "qwen2.5-72b-instruct-fp16")
+    uint64_t tokenizer_hash;      // 维度 2: xxHash64(tokenizer_vocab_bytes, seed=0x5F3759DF)
+    uint64_t template_hash;       // 维度 3: xxHash64(chat_template_bytes, seed=0x5F3759DF)
+    char adapter_id[32];          // 维度 4: LoRA 标识 (默认 "base")
     uint64_t lease_expire_epoch_ms;// 维度 5: 租约到期绝对毫秒时间戳
     std::atomic<bool> ready_barrier;// 维度 6: 全局写入完成并可见屏障位 (Ready Bit)
 };
@@ -64,50 +73,72 @@ struct PartialAttachPlan {
 };
 ```
 
-### 2.2 ConsumeEligibility 6 维校验算法
+### 2.2 ConsumeEligibility 6 维校验算法实现
 
-```mermaid
-flowchart TD
-    In["接收候选 KV 元数据与当前请求 Meta"] --> Step1{"1. req.model == cached.model ?"}
-    Step1 -- "NO" --> Reject1["REJECT_MODEL_MISMATCH"]
-    Step1 -- "YES" --> Step2{"2. req.tok_hash == cached.tok_hash ?"}
-    Step2 -- "NO" --> Reject2["REJECT_TOKENIZER_MISMATCH"]
-    Step2 -- "YES" --> Step3{"3. req.tpl_hash == cached.tpl_hash ?"}
-    Step3 -- "NO" --> Reject3["REJECT_TEMPLATE_MISMATCH"]
-    Step3 -- "YES" --> Step4{"4. req.lora == cached.lora ?"}
-    Step4 -- "NO" --> Reject4["REJECT_ADAPTER_MISMATCH"]
-    Step4 -- "YES" --> Step5{"5. cached.ready_barrier == true ?"}
-    Step5 -- "NO" --> Reject5["REJECT_NOT_READY (写中未就绪, 避开读脏)"]
-    Step5 -- "YES" --> Step6{"6. now() <= cached.lease_expire ?"}
-    Step6 -- "NO" --> Reject6["REJECT_LEASE_EXPIRED (租约已失效)"]
-    Step6 -- "YES" --> Pass["ELIGIBLE (6 维完全匹配, 允许消费)"]
+```cpp
+EligibilityResult ConsumeEligibility::evaluate(const SemanticTag6D& cached, 
+                                               const char* req_model,
+                                               uint64_t req_tok_hash,
+                                               uint64_t req_tpl_hash,
+                                               const char* req_lora,
+                                               uint64_t current_epoch_ms) {
+    // 1. 模型架构与版本比对 (维度 1)
+    if (strncmp(cached.model_version, req_model, 32) != 0) {
+        return EligibilityResult::REJECT_MODEL_MISMATCH;
+    }
+    // 2. Tokenizer 词表哈希比对 (维度 2)
+    if (cached.tokenizer_hash != req_tok_hash) {
+        return EligibilityResult::REJECT_TOKENIZER_MISMATCH;
+    }
+    // 3. Prompt 模板格式比对 (维度 3)
+    if (cached.template_hash != req_tpl_hash) {
+        return EligibilityResult::REJECT_TEMPLATE_MISMATCH;
+    }
+    // 4. LoRA 适配器比对 (维度 4)
+    if (strncmp(cached.adapter_id, req_lora, 32) != 0) {
+        return EligibilityResult::REJECT_ADAPTER_MISMATCH;
+    }
+    // 5. 写入就绪屏障比对 (维度 5)
+    if (!cached.ready_barrier.load(std::memory_order_acquire)) {
+        return EligibilityResult::REJECT_NOT_READY;
+    }
+    // 6. 租约时效比对 (维度 6)
+    if (current_epoch_ms > cached.lease_expire_epoch_ms) {
+        return EligibilityResult::REJECT_LEASE_EXPIRED;
+    }
+    return EligibilityResult::ELIGIBLE;
+}
 ```
 
-### 2.3 TP=8 多卡空间共识状态机 (RankConsensus State Machine)
+### 2.3 TP=8 多卡 POSIX 共享内存空间共识与 NCCL/HCCL 协同防死锁协议
 
-在 $TP=8$ 分布式推理中，8 张卡各自独立执行局部语义校验。为防止部分卡命中、部分卡未命中导致 AllReduce 算子死锁，必须执行空间共识：
+为消除单机模拟偏差，8 卡间通过 POSIX 共享内存（`/dev/shm/kv_consensus_bitmap`）进行无锁原子 Bitmap 交换。
+
+#### 协同防死锁协议（Collective Fallback Synchronization Protocol）：
+- **设计关键**：共识判定**严格发生在调用任何 NCCL/HCCL 集合通信算子之前**；
+- **分歧处置**：若发生分歧（如 7 命中 1 未命中），8 张卡统一进入 `Step_Prefill_Recompute` 分支，集合通信序列号严格同步递进，杜绝下游 Decode 算子因 Rank 状态分歧而 Hang 死。
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant R0 as Rank 0 (Master)
+    participant R0 as Rank 0 (Worker)
     participant R1_7 as Rank 1~7 (Workers)
-    participant Bus as UBMEM Shared Bitmap (8-bit)
+    participant Shm as /dev/shm/kv_consensus_bitmap (8-bit)
 
     Note over R0,R1_7: 8 张卡独立执行 ConsumeEligibility 6 维校验
-    R0->>Bus: 写入 Rank 0 Ready Bit (bit 0 = 1)
-    R1_7->>Bus: 并发写入 Rank 1~7 Ready Bits (bit 1~7)
+    R0->>Shm: 写入 Rank 0 Ready Bit (bit 0 = 1)
+    R1_7->>Shm: 并发写入 Rank 1~7 Ready Bits (bit 1~7)
     
-    Note over R0,R1_7: 空间共识聚合: Global_Bitmap = Rank0 & Rank1 & ... & Rank7
+    Note over R0,R1_7: 8 进程读取全局 Bitmap = Rank0 & Rank1 & ... & Rank7
     alt 全部 8 卡校验通过 (Global_Bitmap == 0xFF)
-        Bus-->>R0: 共识达成: ALL_HIT (8/8)
-        Bus-->>R1_7: 共识达成: ALL_HIT (8/8)
+        Shm-->>R0: 共识达成: ALL_HIT (8/8)
+        Shm-->>R1_7: 共识达成: ALL_HIT (8/8)
         Note over R0,R1_7: 8 张卡同步加载远端 KV, 启动异步流水
     else 任意卡分歧/丢包 (如 Rank 7 校验失败, Bitmap != 0xFF)
-        Bus-->>R0: 共识分歧: DIVERGENCE_DETECTED
-        Bus-->>R1_7: 共识分歧: DIVERGENCE_DETECTED
-        Note over R0,R1_7: 触发全卡协同 Fallback: 8 张卡统一放弃缓存, 统一进入本地算力 Prefill!
-        Note over R0,R1_7: 0 死锁, 0 卡死, 状态严格对齐
+        Shm-->>R0: 共识分歧: DIVERGENCE_DETECTED
+        Shm-->>R1_7: 共识分歧: DIVERGENCE_DETECTED
+        Note over R0,R1_7: 8 张卡在进入 NCCL 算子前统一分支进入本地 Prefill 重算!
+        Note over R0,R1_7: 集合通信序列严格对齐, 0 死锁, 0 卡死
     end
 ```
 
@@ -116,13 +147,13 @@ sequenceDiagram
 ## 3. 基础/对照 Micro-Benchmark 构建方法
 
 ### 3.1 测试工具与源码结构
-本项验证涉及的全部语义校验与多卡共识源码均存放在 `./原型验证代码/PVT-06/` 目录下：
+本项验证涉及的全部语义校验与多卡共识源码存放在 `./原型验证代码/PVT-06/` 目录下：
 
 ```
 原型验证代码/PVT-06/
-├── consume_eligibility.h   # 6 维语义强校验引擎与部分前缀拼接计划头文件
+├── consume_eligibility.h   # 6 维语义强校验引擎 (xxHash64) 与部分前缀拼接计划头文件
 ├── consume_eligibility.cc  # 模型/Tokenizer/模板/LoRA/Ready/Lease 6 维匹配算法实现
-├── rank_consensus_bench.cc # TP=8 多卡空间共识耗时测量与协同 Fallback 压测工具
+├── rank_consensus_bench.cc # TP=8 多卡 POSIX 共享内存空间共识耗时测量与协同 Fallback 压测工具
 ├── Makefile                # 编译 rank_consensus_bench 的工程构建文件 (make -j16)
 └── test_correctness.py     # 注入 8 类语义冲突与验证输出 Token 100% 正确性的测试脚本
 ```
@@ -133,7 +164,7 @@ sequenceDiagram
 cd ./原型验证代码/PVT-06 && make clean && make
 ```
 - **6 维校验微基准**：压测 `ConsumeEligibility::evaluate()` 函数单次耗时；
-- **RankConsensus 微基准**：基于 UBMEM 共享内存 Bitmap 测量 8 卡空间共识耗时。
+- **RankConsensus 微基准**：基于 `/dev/shm` 共享内存 Bitmap 测量 8 卡空间共识耗时。
 
 ### 3.2 两组实验对照设置
 - **对照组 A（无校验直读基线）**：关闭语义校验与多卡共识，直接使用物理匹配的 KV 数据；
@@ -159,7 +190,7 @@ cd ./原型验证代码/PVT-06 && make clean && make
 
 ### 5.1 环境配置
 - 8× NPU (96GB HBM3)，配置为 $TP=8$ 通信域；
-- 挂载 UBMEM 多卡共享内存 Bitmap。
+- 挂载 POSIX `/dev/shm/kv_consensus_bitmap` 多卡共享内存。
 
 ---
 
@@ -173,11 +204,14 @@ cd ./原型验证代码/PVT-06 && make clean && make
 ### 步骤 2：测量单卡 6 维校验算法延迟
 循环执行 100,000 次 `evaluate()`，测量平均与 P99 耗时：
 ```bash
-./rank_consensus_bench
+./rank_consensus_bench --mode single_eval --iterations 100000
 ```
 
-### 步骤 3：测量 TP=8 多卡空间共识时延
-循环执行 10,000 次 8 卡 Bitmap 空间共识，记录 P50, P90, P99 时延。
+### 步骤 3：测量 TP=8 多进程空间共识时延
+启动 8 个并发进程，循环执行 10,000 次 8 卡 Bitmap 空间共识，记录 P50, P90, P99 时延：
+```bash
+./rank_consensus_bench --mode tp8_shm_consensus --ranks 8 --iterations 10000
+```
 
 ### 步骤 4：在无校验基线组 A 下依次注入 Case 1~5
 观察并记录发生的乱码 Token 输出、越界崩溃或读脏错误。

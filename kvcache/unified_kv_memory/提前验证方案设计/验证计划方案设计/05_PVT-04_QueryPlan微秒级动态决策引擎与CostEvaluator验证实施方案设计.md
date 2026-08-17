@@ -9,6 +9,7 @@
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L1-RT-Admission-007`, `L3-SE-QueryPlanFastPath-072`, `L3-TRANS-TOPO-SENSE-004`, `L4-FABRIC-ROUTER-001`  
 > - SR23: `SR23-01-03-01`, `SR23-01-05-01`, `SR23-01-09-01`, `SR23-02-02-01`, `SR23-02-02-02`  
+> **研发对齐状态**：已闭环研发评估报告 6 项与 Telemetry 采集规范（明确 100Hz EWMA Daemon、alignas(64) 缓存行隔离防 False Sharing）  
 
 ---
 
@@ -16,7 +17,7 @@
 
 ### 1.1 待验证核心命题
 物理命中（Raw Hit）并不等于一定带来性能收益。当网络拥塞、前缀过短或请求 Deadline 极其苛刻时，强行远端 Load KV Cache 反而可能比本地 NPU 重新计算（Recompute）更慢。本验证旨在通过算法原型与微基准证明：
-1. **QueryPlan 动态决策引擎**能够在 **$P99 < 5\mu s$** 内，基于实时 Telemetry 链路状态（EWMA 带宽、队列深度）与 NPU 算力吞吐，在 `Load(Local)`, `Load(Remote)`, `SSD Restore`, `Recompute` 之间输出全局最优计划；
+1. **QueryPlan 动态决策引擎**能够在 **$P99 < 5\mu s$** 内，基于实时 Telemetry 链路状态（EWMA 带宽、队列深度）与 NPU 算力吞吐，在 `Local_HBM_Attach`, `Remote_URMA_Load`, `Local_SSD_Restore`, `Recompute` 之间输出全局最优计划；
 2. **CostEvaluator 成本预估模型**的预测误差 **$\text{MAPE} < 20\%$**，决策准确率 **$\ge 90\%$**，且**负收益命中率（选了 Load 但实际慢于 Recompute）严格 $< 1\%$**。
 
 ### 1.2 最终交付数据与结论产出
@@ -28,11 +29,18 @@
 
 ---
 
-## 2. 核心数据结构与算法原型详细设计
+## 2. 核心数据结构与 Telemetry 防 Cacheline 乒乓设计
 
-### 2.1 核心数据结构定义
+### 2.1 核心数据结构与缓存行隔离 (`alignas(64)`)
+
+为了防止高频采集守护线程（Updater）与高并发推理调度线程（Readers）在多核 CPU 下引发 **False Sharing（伪共享）** 导致的 CPU Cacheline 乒乓与时延抖动，遥测结构体各变量显式采用 64 字节独立对齐：
 
 ```cpp
+#include <stdint.h>
+#include <atomic>
+#include <thread>
+#include <chrono>
+
 // 1. 计划决策动作枚举
 enum class PlanAction : uint8_t {
     Local_HBM_Attach = 0, // 本地 HBM 直接复用 (开销 ~0.05ms)
@@ -52,13 +60,13 @@ struct alignas(64) KVAccessIntent {
     bool is_cached_ssd;           // SSD 是否归档
 };
 
-// 3. 实时遥测快照 (无锁原子更新)
+// 3. 实时遥测快照 (各原子成员独立 64B 隔离，彻底杜绝 False Sharing)
 struct alignas(64) LinkTelemetrySnapshot {
-    std::atomic<double> ewma_remote_bw_gbps{750.0}; // 指数平滑可用带宽
-    std::atomic<double> remote_queue_delay_ms{0.2}; // 远端队列等待
-    std::atomic<double> ssd_read_bw_gbps{190.0};    // SSD 直达带宽
-    std::atomic<double> npu_prefill_tps{8500.0};    // NPU Prefill 算力吞吐 (Tokens/s)
-    std::atomic<double> meta_overhead_ms{0.08};     // 元数据交互时延 (80us)
+    alignas(64) std::atomic<double> ewma_remote_bw_gbps{750.0}; // 指数平滑可用带宽 (Gbps)
+    alignas(64) std::atomic<double> remote_queue_delay_ms{0.2}; // 远端传输排队延迟 (ms)
+    alignas(64) std::atomic<double> ssd_read_bw_gbps{190.0};    // SSD 直达读带宽 (Gbps)
+    alignas(64) std::atomic<double> npu_prefill_tps{8500.0};    // NPU Prefill 算力吞吐 (Tokens/s)
+    alignas(64) std::atomic<double> meta_overhead_ms{0.08};     // 元数据交互时延 (80us)
 };
 
 // 4. 决策输出结果
@@ -70,21 +78,53 @@ struct ExecutionPlan {
 };
 ```
 
-### 2.2 CostEvaluator 五维成本评估模型
+### 2.2 Telemetry 采集守护线程与 EWMA 平滑算法
+
+系统通过独立的后台轻量级守护线程 `TelemetryCollectorDaemon` 以 **100Hz 频率（10ms 周期）** 采集系统与网卡状态，并使用指数加权移动平均（EWMA, $\alpha = 0.2$）平滑抖动：
+
+```cpp
+class TelemetryCollectorDaemon {
+public:
+    static void start_collector(LinkTelemetrySnapshot& snapshot, std::atomic<bool>& running) {
+        std::thread([&snapshot, &running]() {
+            const double alpha = 0.2; // EWMA 平滑系数
+            while (running.load(std::memory_order_relaxed)) {
+                // 1. 从网卡驱动获取瞬时带宽与队列深度 (如 RDMA stats)
+                double raw_bw = sample_nic_available_bw();
+                double raw_queue = sample_remote_queue_latency();
+
+                // 2. EWMA 平滑更新
+                double old_bw = snapshot.ewma_remote_bw_gbps.load(std::memory_order_relaxed);
+                snapshot.ewma_remote_bw_gbps.store(alpha * raw_bw + (1.0 - alpha) * old_bw, std::memory_order_relaxed);
+
+                double old_queue = snapshot.remote_queue_delay_ms.load(std::memory_order_relaxed);
+                snapshot.remote_queue_delay_ms.store(alpha * raw_queue + (1.0 - alpha) * old_queue, std::memory_order_relaxed);
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // 100Hz
+            }
+        }).detach();
+    }
+};
+```
+
+### 2.3 CostEvaluator 五维成本评估模型与迟滞防抖规则
 
 ```
 1. 算力重算耗时预估：
    T_recompute = (prefix_tokens / npu_prefill_tps) * 1000.0  [ms]
 
 2. 远端 URMA 加载耗时预估：
-   KV_bytes = prefix_tokens * bytes_per_token (例: 72B模型为 327.68 KB/token)
+   KV_bytes = prefix_tokens * bytes_per_token (例: Qwen2.5-72B 为 320 KB/token)
    T_remote = meta_overhead + queue_delay + (KV_bytes * 8 / (ewma_remote_bw * 1e6))  [ms]
 
 3. SSD 直达恢复耗时预估：
    T_ssd = meta_overhead + (KV_bytes * 8 / (ssd_read_bw * 1e6)) + t_nvme_driver_setup  [ms]
+
+4. 迟滞防抖规则 (Anti-Flapping Hysteresis):
+   仅当 (T_recompute - T_remote) / T_recompute >= 5% 时才决策 Remote_Load，避免临界点抖动。
 ```
 
-### 2.3 微秒级 FastPath 决策树状态机与剪枝算法
+### 2.4 微秒级 FastPath 决策树状态机与剪枝算法
 
 ```mermaid
 flowchart TD
@@ -104,14 +144,14 @@ flowchart TD
     CheckSSD -- "NO" --> Intercept["Plan: Recompute<br/>(负收益强制拦截: 加载耗时慢于算力重算)"]
 ```
 
-#### 极速 C++ 决策核心代码实现：
+#### 决策核心代码实现：
 ```cpp
 ExecutionPlan QueryPlanFastPath::generate_plan(const KVAccessIntent& intent, const LinkTelemetrySnapshot& tele) {
     ExecutionPlan plan;
     double t_recomp = (intent.prefix_tokens / tele.npu_prefill_tps.load(std::memory_order_relaxed)) * 1000.0;
     plan.recompute_baseline_ms = t_recomp;
 
-    // 1. 本地命中分支 (极速返回)
+    // 1. 本地命中分支 (极速返回 < 0.1us)
     if (intent.is_cached_locally) {
         plan.action = PlanAction::Local_HBM_Attach;
         plan.estimated_cost_ms = 0.05;
@@ -133,8 +173,8 @@ ExecutionPlan QueryPlanFastPath::generate_plan(const KVAccessIntent& intent, con
         return plan;
     }
 
-    // 4. 正负收益严格裁决 (负收益拦截)
-    if (intent.is_cached_remotely && t_remote < t_recomp) {
+    // 4. 正负收益严格裁决 (含 5% 迟滞阈值)
+    if (intent.is_cached_remotely && (t_remote < t_recomp * 0.95)) {
         plan.action = PlanAction::Remote_URMA_Load;
         plan.estimated_cost_ms = t_remote;
         plan.decision_reason = "POSITIVE_BENEFIT_REMOTE_LOAD";
@@ -153,11 +193,11 @@ ExecutionPlan QueryPlanFastPath::generate_plan(const KVAccessIntent& intent, con
 ## 3. 基础/对照 Micro-Benchmark 构建方法
 
 ### 3.1 测试工具与源码结构
-本项验证涉及的全部决策引擎与压测 Harness 源码均存放在 `./原型验证代码/PVT-04/` 目录下：
+本项验证涉及的全部决策引擎与压测 Harness 源码存放在 `./原型验证代码/PVT-04/` 目录下：
 
 ```
 原型验证代码/PVT-04/
-├── query_plan_fastpath.h  # 微秒级动态决策引擎与 CostEvaluator 成本预估头文件
+├── query_plan_fastpath.h  # 微秒级动态决策引擎与 CostEvaluator 成本预估头文件 (alignas(64))
 ├── query_plan_fastpath.cc # 实时链路感知、5 维成本预估与微秒级剪枝决策算法实现
 ├── query_plan_bench.cc    # 决策引擎 100K QPS 吞吐压测与反事实决策对账 Harness
 └── Makefile               # 编译 query_plan_bench 的工程构建文件 (make -j16)
@@ -212,9 +252,9 @@ cd ./原型验证代码/PVT-04 && make clean && make
 编译 `query_plan_bench`。
 
 ### 步骤 2：执行极限并发单核决策延迟压测
-循环调用 500,000 次 `generate_plan()`，记录 QPS 与延迟分位值（P50, P90, P99, P99.9）：
+启动后台 `TelemetryCollectorDaemon`（100Hz 刷新），同时循环调用 500,000 次 `generate_plan()`，记录 QPS 与延迟分位值（P50, P90, P99, P99.9）：
 ```bash
-./query_plan_bench
+./query_plan_bench --benchmark-mode latency --iterations 500000
 ```
 
 ### 步骤 3：验证场景 1（空闲长前缀）
@@ -242,7 +282,7 @@ cd ./原型验证代码/PVT-04 && make clean && make
 计算两组在混流下的平均 TTFT 差距。
 
 ### 步骤 11：压力测试 Telemetry 遥测并发更新
-以 1000 Hz 频率在后台持续刷新链路快照，验证决策引擎无锁读取的线程安全性与低延迟。
+以 1000 Hz 极端频率在后台持续刷新链路快照，验证决策引擎无锁读取的线程安全性与低延迟。
 
 ### 步骤 12：输出判定结论与立项证据包。
 

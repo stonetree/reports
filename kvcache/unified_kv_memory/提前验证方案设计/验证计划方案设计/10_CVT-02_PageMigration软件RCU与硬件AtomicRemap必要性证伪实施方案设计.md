@@ -9,6 +9,7 @@
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L4-CO-AtomicRemapPrimitive-065`, `L3-CO-MigrationRCULock-090`  
 > - SR23: `SR23-01-01-03`, `SR23-01-11-01`, `SR23-01-12-02`  
+> **研发对齐状态**：已闭环研发评估报告 10 项与 RCU 宽限期检测机制（明确 Host Epoch 计数与 NPU Stream 硬件事件双层同步屏障）  
 
 ---
 
@@ -28,28 +29,39 @@
 
 ---
 
-## 2. 核心数据结构与算法原型详细设计
+## 2. 核心数据结构与 RCU 宽限期双层屏障设计
 
 ### 2.1 核心数据结构定义
 
 ```cpp
+#include <stdint.h>
+#include <atomic>
+#include <vector>
+#include <acl/acl.h>
+#include <acl/acl_rt.h>
+
 // 1. RCU 内存 Extent 节点
 struct alignas(64) RCUExtentNode {
     uint64_t extent_id;
-    uint64_t phys_base_addr;      // 物理基址
+    uint64_t phys_base_addr;      // 物理显存基址
     uint32_t size_bytes;
-    uint32_t checksum;            // 数据块内容校验哈希
+    uint32_t checksum;            // 数据块内容校验哈希 (xxHash32)
 };
 
-// 2. 无锁页表引用结构
+// 2. 无锁页表引用结构与 Epoch 宽限期
 struct alignas(64) AtomicPageTableEntry {
-    std::atomic<RCUExtentNode*> active_ptr{nullptr}; // 当前活跃指针 (原子翻转)
+    std::atomic<RCUExtentNode*> active_ptr{nullptr}; // 当前活跃指针 (原子 CAS 翻转)
     std::atomic<uint64_t> current_epoch{0};          // RCU Epoch 宽限期轮次
-    std::atomic<uint32_t> active_readers{0};         // 活跃 Reader 计数
+    std::atomic<uint32_t> active_readers{0};         // 活跃 Host Reader 计数
+    aclrtEvent npu_quiescent_event{nullptr};         // NPU 侧静默点硬件事件屏障
 };
 ```
 
-### 2.2 软件 RCU Copy-on-Migrate 无锁迁移算法
+### 2.2 RCU 宽限期双层同步屏障 (Host Epoch + NPU Stream Barrier)
+
+针对 NPU 异步流执行模式，后台 Defrag 迁移器通过**双层宽限期（Two-tier Grace Period）**判定旧物理页何时可被安全释放：
+1. **Host 侧 Quiescent State 检测**：等待旧指针上的 `active_readers == 0`；
+2. **NPU 侧硬件 Stream 屏障**：在全部活跃 Compute Stream 上插入 `aclrtRecordEvent(ev)`，释放前执行 `aclrtEventSynchronize(ev)`，确保所有正在读取旧地址的 NPU Attention Kernel 完全下卡。
 
 ```mermaid
 sequenceDiagram
@@ -76,19 +88,20 @@ sequenceDiagram
     Reader->>Entry: 取得 NewExt 指针
     Reader->>NewExt: 读取新 Extent 数据
     
-    Note over Defrag,OldExt: 阶段 5: 推进 Epoch 宽限期 (Grace Period), 释放旧内存
-    Defrag->>Defrag: 等待挂在 OldExt 上的历史 Reader 全部退出 (active_readers == 0)
-    Defrag->>OldExt: 安全释放 OldExt 物理页 (0 读脏, 0 悬垂指针)
+    Note over Defrag,OldExt: 阶段 5: 双层宽限期检测 (Host Epoch + NPU Stream 同步)
+    Defrag->>Defrag: 等待 Host 侧 active_readers == 0
+    Defrag->>Defrag: aclrtEventSynchronize(npu_event) 硬件流水完全清空
+    Defrag->>OldExt: 安全释放 OldExt 物理显存 (0 读脏, 0 悬垂指针)
 ```
 
 #### RCU 迁移算法核心实现：
 ```cpp
-bool RCUMigrationEngine::migrate_extent(AtomicPageTableEntry& pte, uint64_t new_phys_addr, uint32_t size) {
+bool RCUMigrationEngine::migrate_extent(AtomicPageTableEntry& pte, uint64_t new_phys_addr, uint32_t size, aclrtStream compute_stream) {
     RCUExtentNode* old_node = pte.active_ptr.load(std::memory_order_relaxed);
     
     // 1. 分配并拷贝新节点
     RCUExtentNode* new_node = new RCUExtentNode{old_node->extent_id, new_phys_addr, size, old_node->checksum};
-    dma_copy_sync(old_node->phys_base_addr, new_node->phys_base_addr, size);
+    dma_copy_hbm_to_hbm(old_node->phys_base_addr, new_node->phys_base_addr, size);
 
     // 2. 原子 CAS 指针切换 (< 1us, 零停顿)
     if (!pte.active_ptr.compare_exchange_strong(old_node, new_node, std::memory_order_release)) {
@@ -96,10 +109,16 @@ bool RCUMigrationEngine::migrate_extent(AtomicPageTableEntry& pte, uint64_t new_
         return false; // 并发修改冲突，安全回滚
     }
 
-    // 3. 进入 Grace Period 宽限期等待
-    synchronize_rcu_grace_period(pte);
+    // 3. 双层 Grace Period 宽限期等待
+    // a. Host 侧等待活跃 Reader 退出
+    while (pte.active_readers.load(std::memory_order_acquire) > 0) {
+        std::this_thread::yield();
+    }
+    // b. NPU 侧硬件 Stream 事件屏障同步
+    aclrtRecordEvent(pte.npu_quiescent_event, compute_stream);
+    aclrtEventSynchronize(pte.npu_quiescent_event);
 
-    // 4. 释放旧节点物理显存
+    // 4. 安全释放旧节点物理显存
     free_hbm_block(old_node->phys_base_addr);
     delete old_node;
     return true;
@@ -111,7 +130,7 @@ bool RCUMigrationEngine::migrate_extent(AtomicPageTableEntry& pte, uint64_t new_
 ## 3. 基础/对照 Micro-Benchmark 构建方法
 
 ### 3.1 测试工具与源码结构
-本项验证涉及的全部无锁内存迁移压测源码均存放在 `./原型验证代码/CVT-02/` 目录下：
+本项验证涉及的全部无锁内存迁移压测源码存放在 `./原型验证代码/CVT-02/` 目录下：
 
 ```
 原型验证代码/CVT-02/
@@ -131,7 +150,7 @@ cd ./原型验证代码/CVT-02 && make clean && make
 - **方案 A（Stop-the-world 全局写锁基线）**：
   - 迁移开始时对全表加互斥排他写锁，阻塞所有 Reader；待数据拷贝完成并更新指针后释放写锁。
 - **方案 B（软件 RCU + Copy-on-Migrate 方案）**：
-  - Reader 无锁读取旧 Extent；后台异步将数据拷贝至新 Extent；通过原子 CAS 指针切换（耗时 $< 1\mu s$）；等待宽限期（Grace Period）后释放旧 Extent。
+  - Reader 无锁读取旧 Extent；后台异步将数据拷贝至新 Extent；通过原子 CAS 指针切换（耗时 $< 1\mu s$）；双层宽限期后释放旧 Extent。
 - **方案 C（硬件 Atomic Remap 原语模拟）**：
   - 调用底层驱动指令直接修改 MMU 页表映射。
 
@@ -169,11 +188,14 @@ cd ./原型验证代码/CVT-02 && make clean && make
 ### 步骤 2：测试方案 A（Stop-the-world 锁表）
 启动 32 个 Reader 线程并发读取，同时触发 16MB Extent 迁移，记录最大停顿时间与 TPOT 劣化倍数：
 ```bash
-./rcu_migration_bench
+./rcu_migration_bench --mode stop_the_world --size 16M --readers 32
 ```
 
 ### 步骤 3：测试方案 B（软件 RCU Copy-on-Migrate）
-在相同 100,000 QPS 读压力下触发 RCU 迁移，记录 CAS 切换耗时、最大停顿与 TPOT 抖动。
+在相同 100,000 QPS 读压力下触发 RCU 迁移，记录 CAS 切换耗时、双层宽限期同步耗时与 TPOT 抖动：
+```bash
+./rcu_migration_bench --mode rcu_migrate --size 16M --readers 32
+```
 
 ### 步骤 4：测试方案 C（硬件 Atomic Remap 模拟）
 调用硬件原语修改页表，记录硬件切换耗时与停顿。

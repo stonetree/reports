@@ -1,11 +1,12 @@
 # 统一异构 KVCache 存储池 关键技术原型验证总体实施方案设计
 
-> **文档版本**：V2.0 (工程落地标准刷新版)  
+> **文档版本**：V2.1 (研发可实施性评估闭环版)  
 > **基线对齐**：  
 > - 交付基线：《统一异构KVCache存储池_关键技术原型验证清单_V1.6_V2.3.1需求树与竞争力对齐完善版.xlsx》  
 > - 分解基线：《统一异构KVCache存储池_全量需求树_V2.3.1_SR项目贡献补充版.xlsx》  
 > - 规范基线：《KVCache SRS需求列表 V2.2_传输底座视角_建议修订版.xlsx》  
 > - 总体导读：《统一异构KVCache存储池总体架构与SRS评审导读_V2.3.1评审稿.md》  
+> - 研发反馈基线：《统一异构KVCache存储池_提前验证方案可实施性评估报告.md》  
 
 ---
 
@@ -13,7 +14,7 @@
 
 统一异构 KVCache 存储池原型验证体系（PVT-00 ~ PVT-07 必做包，CVT-01 ~ CVT-03 条件证伪项）是立项前**“购买硬核工程事实”**的决定性门禁。
 
-为了彻底解决“方案设计过于偏向架构理论、描述抽象、开发人员不知道具体做什么和如何计算数据”的痛点，全套方案已**全面刷新为以 PVT-00 标准工程路线为基准的落地执行手册**。
+为了彻底解决“方案设计过于偏向架构理论、描述抽象、底层驱动接口与异常状态机定义不清晰”的痛点，全套方案**全面对齐研发评估报告反馈，系统性闭环 4 大维度 18 项工程约束**。
 
 ### 1.1 九大标准化工程模块
 每个 PVT/CVT 验证项均严格遵循以下 9 大工程化模块，开发人员无需了解整个项目全景，即可按步骤独立完成测试并输出量化结论：
@@ -22,13 +23,13 @@
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 1. 验证目标与交付结论定义 (待验证核心命题、交付物清单与判定标准)       │
 ├─────────────────────────────────────────────────────────────────────────┤
-│ 2. 基础/对照 Micro-Benchmark 构建方法 (裸机/单组件/底层协议基准搭建)    │
+│ 2. 基础/对照 Micro-Benchmark 构建方法 (底层驱动、SDK 依赖与基准搭建)   │
 ├─────────────────────────────────────────────────────────────────────────┤
 │ 3. 业务 Benchmark 构造与流量特征编排 (请求构造、前缀重合度、时序时钟)   │
 ├─────────────────────────────────────────────────────────────────────────┤
-│ 4. 软硬件环境与打点插桩方案 (环境拓扑、隔离策略、微秒级打点位置)        │
+│ 4. 软硬件环境与打点插桩方案 (环境拓扑、隔离策略、行级 C/C++ 打点位置)   │
 ├─────────────────────────────────────────────────────────────────────────┤
-│ 5. 分步执行测试操作规程 (Step 1 ~ Step 12 详细动作、命令与依赖)         │
+│ 5. 分步执行测试操作规程 (Step 1 ~ Step 12 详细动作、命令与容错处置)     │
 ├─────────────────────────────────────────────────────────────────────────┤
 │ 6. 数据采集清单与记录格式 (原始数据表头、采样字段、CSV文件格式)          │
 ├─────────────────────────────────────────────────────────────────────────┤
@@ -38,6 +39,34 @@
 ├─────────────────────────────────────────────────────────────────────────┤
 │ 9. Go / Conditional / No-Go 判定规则与交付报告模板 (阈值公式与报告输出) │
 └─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 1.2 研发落地工程化对齐与 4 大维度 18 项约束总则
+
+根据核心研发团队的评估反馈，本方案在全套 12 份文档中统一确立并落地以下 **4 大维度、18 项核心技术对齐标准**：
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                            研发反馈 18 项核心对齐标准与落地规范全景图                            │
+├─────────────────────┬────────────────────────────────────────────────────────────────────────────┤
+│ 维度一：硬件与底层  │ 1. URMA/UBMEM: 统一包含 <urma.h>, <ubmem.h>，链接 -lurma -lubmem -lpthread │
+│ 驱动 API 标准化     │ 2. NPU P2P Pinning: CANN aclrtMalloc(..., ACL_MEM_MALLOC_HUGE_FIRST_P2P)   │
+│                     │ 3. NVMe Direct: 主路径采用 Linux 6.6+ io_uring FIXED I/O + O_DIRECT 绕过 DDR│
+├─────────────────────┼────────────────────────────────────────────────────────────────────────────┤
+│ 维度二：数据结构与  │ 4. ExtentManifest: 64B POD 头 + 共享内存 (/dev/shm) 零拷贝传递, 零 Protobuf│
+│ 协议格式标准化      │ 5. 6维语义 Tag: 统一采用 xxHash64 (XXH64) 算法，模型命名小写下划线正则化  │
+│                     │ 6. Telemetry 遥测: 后台 100Hz EWMA 守护线程采集，原子结构加 alignas(64) 隔离│
+│                     │ 7. QoS 队列: 网络层映射 RoCE TC0(CoS 3 无丢包)/TC1(CoS 0)，应用层自适应退避│
+├─────────────────────┼────────────────────────────────────────────────────────────────────────────┤
+│ 维度三：异常处理与  │ 8. Direct-View SIGBUS: 信号捕获 + aclrtStreamAbort + siglongjmp 恢复重算   │
+│ 容错状态机闭环      │ 9. TP=8 共识分歧: Bitmap 共享内存预判，分歧时 8 卡全部分支进入 Recompute   │
+│                     │ 10. RCU Grace Period: Host 侧 Epoch 计数 + NPU Stream 事件屏障双重确认     │
+│                     │ 11. DPU 熔断: 硬件看门狗 500us 超时熔断降级至 Raw Direct，异步上报告警     │
+├─────────────────────┼────────────────────────────────────────────────────────────────────────────┤
+│ 维度四：测试基线、  │ 12. 模型权重: Qwen2.5-72B (FP16, 320KB/tok) 与 DeepSeek-V3 (FP8 MLA, 512B)│
+│ 分支与环境标准      │ 13. vLLM/Mooncake: 锁定 vLLM v0.6.3+ 与 Mooncake v0.2.0-rc1，行级时钟打点 │
+│                     │ 14. 硬件多播: 支持交换机 RDMA 多播与软件 Staging 树状分层双轨制验证与证伪  │
+└─────────────────────┴────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -63,95 +92,113 @@
 ## 3. 实验硬件环境与公共 Harness 拓扑
 
 验证集中在 **2 节点（Node-0, Node-1）** 标准硬件环境上执行：
-- **算力与显存**：每节点 8× NPU (96GB HBM3)，单机显存总计 768GB；
-- **网络互联**：800G URMA / RDMA 双端口网卡，支持 UBMEM 共享内存协议；
-- **存储介质**：每节点 4× NVMe PCIe Gen5 SSD 阵列（顺序读标称 28GB/s）；
-- **宿主算力**：64 Cores Host CPU, 512GB DDR5（仅供控制面与元数据使用）。
+- **算力与显存**：每节点 8× NPU (96GB HBM3)，单机显存总计 768GB；支持 CANN 驱动与 P2P 显存锁定；
+- **网络互联**：800G URMA / RDMA 双端口网卡，支持 UBMEM 共享内存协议，驱动库为 `/usr/lib64/liburma.so` 与 `/usr/lib64/libubmem.so`；
+- **存储介质**：每节点 4× NVMe PCIe Gen5 SSD 阵列（顺序读标称 28GB/s），挂载支持 `io_uring` + `O_DIRECT`；
+- **宿主算力**：64 Cores Host CPU, 512GB DDR5（仅供控制面、元数据与 Telemetry 线程使用，严禁介入 Payload 拷贝）。
 
 ---
 
-## 4. 实施波次 (W0 ~ W3) 编排与退出逻辑
+## 4. 软件研发实施演进路线图（三阶段递进规划）
 
-测试验证总历时建议为 **4~5 周**，划分为 4 个主递进波次与 1 个条件证伪波次。
+测试验证总历时建议为 **4~5 周**，划分为 3 个递进阶段：
 
 ```mermaid
 gantt
-    title 统一异构 KVCache 存储池原型验证波次甘特图 (W0 - W3 / WC)
+    title 统一异构 KVCache 存储池 原型验证三阶段实施演进路线图
     dateFormat  YYYY-MM-DD
     axisFormat  %m/%d
-    section W0 事实与基线 (第1周)
-    PVT-00 收益上限评估           :a1, 2026-08-10, 2026-08-15
-    PVT-01 零HostTouch传输底座     :a2, 2026-08-10, 2026-08-16
-    section W1 语义与执行链 (第2-3周)
-    PVT-02 Layout描述符编译器      :b1, 2026-08-17, 2026-08-23
-    PVT-03 DirectView边界与ViewGuard:b2, 2026-08-17, 2026-08-23
-    PVT-04 QueryPlan微秒级决策引擎 :b3, 2026-08-20, 2026-08-25
-    section W2 容量与消费 (第3-4周)
-    PVT-05 HBM-SSD容量主路径      :c1, 2026-08-24, 2026-08-30
-    PVT-06 ConsumeEligibility 0错误:c2, 2026-08-24, 2026-08-30
-    section W3 薄闭环总门禁 (第4-5周)
-    PVT-07 前后台混压薄闭环总门禁  :d1, 2026-08-31, 2026-09-07
-    section WC 条件证伪 (按触发)
-    CVT-01/02/03 条件证伪项        :e1, 2026-09-08, 2026-09-13
+    section 阶段一：纯软算法与控制面单机压测 (W0-W1)
+    PVT-04 动态决策引擎 100K QPS 压测       :p1, 2026-08-17, 2026-08-21
+    PVT-02 描述符贪心合并算法单测与压测     :p2, 2026-08-18, 2026-08-22
+    PVT-06 6维语义校验与冲突拦截测试        :p3, 2026-08-19, 2026-08-23
+    CVT-02 软件 RCU 无锁迁移与 Jitter 压测  :p4, 2026-08-20, 2026-08-24
+    section 阶段二：底层驱动对接与单项路径打通 (W1-W3)
+    PVT-01 链接 liburma/io_uring 零 HostTouch:q1, 2026-08-24, 2026-08-30
+    PVT-00 vLLM+Mooncake 源码插桩与净收益测定:q2, 2026-08-25, 2026-08-31
+    PVT-03 Direct-View 边界与 ViewGuard 容错:q3, 2026-08-28, 2026-09-03
+    PVT-05 NVMe 裸盘直达与 150% 显存超载压测 :q4, 2026-08-30, 2026-09-05
+    CVT-01/03 软件 Fanout 与 DPU 降级证伪     :q5, 2026-09-01, 2026-09-06
+    section 阶段三：集群端到端薄闭环总门禁 (W3-W4)
+    PVT-07 2节点全链路串联与混流 QoS 压测   :r1, 2026-09-07, 2026-09-14
+    立项证据包打包与 Go/No-Go 终审报告产出   :r2, 2026-09-13, 2026-09-15
 ```
 
-开发人员针对每个验证项：
-1. **构建 Benchmark**：按照方案第 2、3 节搭建底层微基准与业务请求流量；
-2. **执行测试**：按照方案第 5 节运行 Step 1 至 Step 12 操作规程；
-3. **记录与计算**：按照方案第 6、7 节导出原始数据表并进行公式交叉比对；
-4. **输出结论**：按照方案第 9 节交付标准 Markdown 报告与判定结论。
+### 阶段一：纯软算法与控制面单机压测（第 1 周，无需真实物理集群）
+- **目标**：在标准 Linux 开发机上完成纯软逻辑验证，确保算法无 Bug、吞吐与时延满足微秒级指标。
+- **核心任务**：
+  1. 编译并运行 `PVT-04`，验证 `QueryPlanFastPath` 在 100K QPS 下决策耗时 $P99 < 5\mu s$ 及负收益拦截率；
+  2. 编译并运行 `PVT-02`，验证 `DescriptorCompiler` 连续块贪心合并压缩率 $\ge 50\%$；
+  3. 编译并运行 `PVT-06`，针对 8 大语义冲突注入运行单测，验证 100% 拦截率；
+  4. 编译并运行 `CVT-02`，在 32 线程高并发 Reader 下验证软件 RCU 停顿 $< 1\text{ms}$。
+
+### 阶段二：底层驱动对接与单项路径实测（第 2~3 周，2 节点环境）
+- **目标**：链接第一方硬件 SDK 与驱动库（`liburma.so`, `libubmem.so`, Linux 6.6+ `io_uring`），替换单机 Mock 代码，获取真实的物理硬件基准数据。
+- **核心任务**：
+  1. 对接 `liburma`/`libubmem`，在 `PVT-01` 中实测 800G 线速达成率与 eBPF 零 CPU 触碰；
+  2. 在 vLLM + Mooncake 源码中植入微秒打点，执行 `PVT-00` 测量 Saved-Prefill 净收益；
+  3. 接入 `io_uring` Direct I/O，在 `PVT-05` 中运行 150% 显存超载压测，证明容量提升 $\ge 30\%$；
+  4. 执行 `PVT-03`，测定 View vs Copy 的 Crossover 临界点，证伪 Decode 阶段 View 模式；
+  5. 执行 `CVT-01` 与 `CVT-03`，完成条件证伪项证据采集。
+
+### 阶段三：集群端到端薄闭环总门禁（第 4~5 周，系统级验收）
+- **目标**：串联全链路流程，执行前后台混压，产出立项终审交付件。
+- **核心任务**：
+  1. 部署 2 节点真实推理集群，全链路串联 `Prefix Lookup -> QueryPlan -> Descriptor -> UBMEM Transfer -> Attach`；
+  2. 执行 `PVT-07`，在前台 32 并发在线流与后台 400G 满载 I/O 下，验证 P99 TTFT 降低 $\ge 20\%$、QPS 提升 $\ge 10\%$ 且 TPOT 干扰率 $< 3\%$；
+  3. 汇总全部 11 份标准交付 Markdown 报告与原始 CSV 数据表，打包立项证据包（Evidence Pack）。
 
 ---
 
-## 5. 原型验证代码库与工程脚本全量索引
+## 5. 原型验证代码库与工程构建规范全量索引
 
-所有验证项的可运行源码、Makefile 与测试脚本均存放在当前设计文档目录下的 `./原型验证代码/` 相对路径中：
+所有验证项的可运行源码、Makefile 与测试脚本存放在 `./原型验证代码/` 目录下，构建与运行遵循标准工业级 C++17 规范：
 
 ```
 原型验证代码/
 ├── PVT-00/
-│   ├── proto_bench.cc              # 测量 URMA 与 UBMEM 底层通信协议带宽与时延的 C++ 微基准压测工具
+│   ├── proto_bench.cc              # URMA 与 UBMEM 底层通信协议微基准压测工具 (链接 -lurma -lubmem)
 │   ├── Makefile                   # 编译 proto_bench 的工程构建文件 (make -j16)
 │   ├── make_workload.py           # 构造具备 50%~98% 前缀复用率的受控 R1/R2 请求数据集生成脚本
 │   └── traffic_generator.py       # 受控发包与 TTFT/首 Token 时延采集的客户端驱动脚本
 ├── PVT-01/
-│   ├── raw_trans_bench.cc         # 测量 URMA/UBMEM/NVMe Direct 零拷贝 vs CPU memcpy 性能的 C++ 压测工具
+│   ├── raw_trans_bench.cc         # URMA/UBMEM/io_uring Direct 零拷贝 vs CPU memcpy 性能压测工具
 │   ├── Makefile                   # 编译 raw_trans_bench 的工程构建文件
-│   ├── host_touch_monitor.py      # 基于 Linux eBPF (bpftrace) 监控 Host CPU 内存拷贝事件的内核探针脚本
+│   ├── host_touch_monitor.py      # eBPF (内核 kprobe/tracepoint + glibc uprobe) CPU 触碰全量监控脚本
 │   └── export_capability_matrix.py# 自动解析实测吞吐并导出 capability_matrix.json 的工具脚本
 ├── PVT-02/
 │   ├── descriptor_compiler.h      # 跨框架离散物理 Block 连续性合并与 Scatter-Gather 描述符编译器头文件
 │   ├── descriptor_compiler.cc     # 描述符贪心合并与硬件描述符生成的核心算法实现
-│   ├── async_dag_bench.cc         # NPU 计算流与 DMA 传输流异步 DAG 重叠流水压测工具
+│   ├── async_dag_bench.cc         # NPU 计算流与 DMA 传输流异步 DAG 重叠流水压测工具 (支持 CANN/CUDA Stream)
 │   ├── Makefile                   # 编译 async_dag_bench 的工程构建文件
 │   └── make_manifests.py          # 生成不同碎片离散度 (10%~100%) Block Table Manifest 的脚本
 ├── PVT-03/
 │   ├── view_vs_copy_bench.cc      # 测量不同重读次数下 Direct-View 与 Copy-to-HBM 累积耗时的 C++ 压测工具
-│   ├── view_guard.h               # ViewGuard 租约管理、时效校验与异常捕获头文件
-│   ├── view_guard.cc              # ViewGuard 租约校验与故障安全回滚的核心实现
+│   ├── view_guard.h               # ViewGuard 租约管理、时效校验与 SIGBUS 恢复状态机头文件
+│   ├── view_guard.cc              # ViewGuard 租约校验、siglongjmp 恢复与故障安全回滚的核心实现
 │   ├── Makefile                   # 编译 view_vs_copy_bench 的工程构建文件
 │   └── benchmark_serving_view.py  # 在推理服务中测试并证伪 Decode 阶段 View 模式的压测脚本
 ├── PVT-04/
-│   ├── query_plan_fastpath.h      # 微秒级动态决策引擎与 CostEvaluator 成本预估头文件
+│   ├── query_plan_fastpath.h      # 微秒级动态决策引擎与 CostEvaluator 成本预估头文件 (alignas(64) 隔离)
 │   ├── query_plan_fastpath.cc     # 实时链路感知、5 维成本预估与微秒级剪枝决策算法实现
 │   ├── query_plan_bench.cc        # 决策引擎 100K QPS 吞吐压测与反事实决策对账 Harness
 │   └── Makefile                   # 编译 query_plan_bench 的工程构建文件
 ├── PVT-05/
-│   ├── tier_storage_bench.cc      # NVMe SSD Direct I/O (Bypass DDR) 与 DDR 中转吞吐对比的 C++ 压测工具
+│   ├── tier_storage_bench.cc      # NVMe SSD io_uring Direct I/O 与 DDR 中转吞吐对比压测工具
 │   ├── Makefile                   # 编译 tier_storage_bench 的工程构建文件
 │   └── benchmark_tiering.py       # 150%~200% HBM 显存超载下分层扩容与 OOM 统计驱动脚本
 ├── PVT-06/
-│   ├── consume_eligibility.h      # 6 维语义强校验引擎与部分前缀拼接计划头文件
+│   ├── consume_eligibility.h      # 6 维语义强校验 (xxHash64) 与部分前缀拼接计划头文件
 │   ├── consume_eligibility.cc     # 模型/Tokenizer/模板/LoRA/Ready/Lease 6 维匹配算法实现
-│   ├── rank_consensus_bench.cc    # TP=8 多卡空间共识耗时测量与协同 Fallback 压测工具
+│   ├── rank_consensus_bench.cc    # TP=8 多卡 POSIX 共享内存空间共识耗时测量与协同 Fallback 压测工具
 │   ├── Makefile                   # 编译 rank_consensus_bench 的工程构建文件
 │   └── test_correctness.py        # 注入 8 类语义冲突与验证输出 Token 100% 正确性的测试脚本
 ├── PVT-07/
 │   ├── mixed_workload_bench.py    # 前台在线 Decode 流与后台高吞吐 I/O 混压驱动脚本
-│   ├── semantic_qos_controller.py # 前台高优先级保证与后台微秒级自适应退避流控器
+│   ├── semantic_qos_controller.py # 前台高优先级保证 (RoCE TC0) 与后台微秒级自适应退避流控器
 │   └── run_mixed_bench.py         # 自动化执行全套混流薄闭环并计算 TPOT 干扰率与 TTFT 降幅的脚本
 ├── CVT-01/
-│   ├── multicast_fanout_bench.cc  # N 次单播 vs 软件 Staging Fanout vs 硬件多播完成时延对比工具
+│   ├── multicast_fanout_bench.cc  # N 次单播 vs 软件 Staging 树状 Fanout vs 硬件多播完成时延对比工具
 │   └── Makefile                   # 编译 multicast_fanout_bench 的工程构建文件
 ├── CVT-02/
 │   ├── rcu_migration_bench.cc     # 32 并发 Reader 下 Stop-the-world 锁表 vs 软件 RCU 迁移停顿对比工具
@@ -159,6 +206,5 @@ gantt
 └── CVT-03/
     ├── offload_fallback_bench.cc  # Raw Direct 直达 vs DPU 硬件卸载 vs CPU 软件压缩对比工具
     ├── Makefile                   # 编译 offload_fallback_bench 的工程构建文件
-    └── inject_fault.py            # DPU 控制通道与硬件超时故障注入脚本
+    └── inject_fault.py            # DPU 控制通道断连与 500us 超时故障注入脚本
 ```
-

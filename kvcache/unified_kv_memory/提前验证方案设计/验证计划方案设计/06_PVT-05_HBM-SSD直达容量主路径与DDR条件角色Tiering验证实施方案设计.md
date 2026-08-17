@@ -9,6 +9,7 @@
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L3-MS-Tiering-038`, `L3-MC-HIER-STORE-002`, `L3-MS-DDRRolePolicy-092`, `L3-SE-TierBypassPolicy-091`  
 > - SR23: `SR23-01-01-01`, `SR23-01-01-02`, `SR23-01-01-03`, `SR23-01-08-01`, `SR23-02-08-01`, `SR23-02-09-01`  
+> **研发对齐状态**：已闭环研发评估报告 3 项与 TierBlockAllocator 规范（明确 io_uring 裸盘直达、4KB LBA 扇区分配器与 DDR 严格 Bypass）  
 
 ---
 
@@ -29,11 +30,18 @@ HBM 显存容量有限且昂贵，必须扩展 NVMe SSD 作为二级大容量介
 
 ---
 
-## 2. 核心数据结构与算法原型详细设计
+## 2. 核心数据结构与 TierBlockAllocator 映射设计
 
 ### 2.1 核心数据结构定义
 
 ```cpp
+#include <stdint.h>
+#include <atomic>
+#include <vector>
+#include <unordered_map>
+#include <mutex>
+#include <liburing.h>
+
 // 1. 分层存储块位置枚举
 enum class TierLocation : uint8_t {
     HBM_ACTIVE = 0,    // 驻留在一级 NPU HBM
@@ -46,22 +54,41 @@ struct alignas(64) TierBlockDescriptor {
     uint64_t block_id;
     uint32_t token_count;
     TierLocation location;
-    uint64_t hbm_phys_addr;       // HBM 物理地址
-    uint64_t ssd_lba_offset;      // NVMe 块设备物理 LBA 扇区偏移 (4KB 对齐)
-    uint32_t size_bytes;          // 块字节大小 (如 64KB 或 2MB Extent)
+    uint64_t hbm_phys_addr;       // HBM 物理基址
+    uint64_t ssd_lba_offset;      // NVMe 块设备物理 LBA 扇区偏移 (4KB 严格对齐)
+    uint32_t size_bytes;          // 块字节大小 (如 2MB Extent)
     std::atomic<uint64_t> last_access_epoch; // LRU 访问热度时间戳
     std::atomic<uint16_t> pin_count;         // 活跃推理 Pin 计数 (禁止驱逐)
 };
 
-// 3. 水位线控制配置
+// 3. 裸盘物理扇区分配器 (TierBlockAllocator)
+class TierBlockAllocator {
+private:
+    uint64_t total_lba_sectors_;
+    std::atomic<uint64_t> free_sector_head_{0};
+    const uint32_t sector_size_bytes_ = 4096; // 4KB 扇区
+
+public:
+    TierBlockAllocator(uint64_t disk_size_bytes) 
+        : total_lba_sectors_(disk_size_bytes / sector_size_bytes_) {}
+
+    // 分配连续 4KB 对齐的磁盘扇区偏移
+    uint64_t allocate_lba_extent(uint32_t bytes) {
+        uint64_t sectors_needed = (bytes + sector_size_bytes_ - 1) / sector_size_bytes_;
+        uint64_t start_sector = free_sector_head_.fetch_add(sectors_needed, std::memory_order_relaxed);
+        return start_sector * sector_size_bytes_;
+    }
+};
+
+// 4. 水位线控制配置
 struct WatermarkConfig {
     double high_watermark_pct = 0.85; // 85% 显存占用触发异步换出
     double low_watermark_pct = 0.65;  // 降至 65% 停止换出
-    uint32_t max_concurrent_ios = 32; // io_uring / SPDK 最大并发 QD
+    uint32_t max_concurrent_ios = 32; // io_uring 最大并发 QD
 };
 ```
 
-### 2.2 水位线驱动的冷 KV 异步换出与热 KV 回源算法
+### 2.2 水位线驱动的冷 KV 异步换出与 io_uring Direct I/O 驱动实现
 
 ```mermaid
 flowchart TD
@@ -69,42 +96,37 @@ flowchart TD
     CheckHigh -- "NO" --> Idle["保持监控 (无换出开销)"]
     CheckHigh -- "YES" --> ScanLRU["LRU 扫描器: 遍历查找未被 Pin 且最冷 TierBlock"]
     ScanLRU --> FormBatch["聚合为 16MB/64MB 连续 I/O Batch (Direct I/O)"]
-    FormBatch --> SubmitDirect["通过 io_uring / SPDK Direct I/O 发起写盘 (Payload Bypass DDR)"]
-    SubmitDirect --> UpdateMeta["写盘完成: 更新元数据 location=SSD_EVICTED, 释放 HBM 物理页"]
+    ScanLRU --> AllocLBA["TierBlockAllocator: 分配 4KB 对齐 LBA 扇区"]
+    AllocLBA --> SubmitDirect["io_uring 提交 IORING_OP_WRITE_FIXED (Payload Bypass DDR)"]
+    SubmitDirect --> UpdateMeta["写盘完成 CQE: location=SSD_EVICTED, 释放 HBM 物理页"]
     UpdateMeta --> CheckLow{"Current_HBM_Usage <= LowWatermark (65%) ?"}
     CheckLow -- "NO" --> ScanLRU
     CheckLow -- "YES" --> Idle
 ```
 
-#### 换出核心算法伪代码：
+#### 异步换出核心驱动代码（基于 `io_uring` + `O_DIRECT`）：
 ```cpp
-void TierManager::trigger_eviction_if_needed(const WatermarkConfig& cfg) {
-    double usage = get_current_hbm_usage_ratio();
-    if (usage < cfg.high_watermark_pct) return;
+void TierManager::async_nvme_direct_write_io_uring(
+    struct io_uring* ring, int nvme_fd, uint64_t hbm_addr, 
+    uint64_t ssd_lba_offset, uint32_t size_bytes, TierBlockDescriptor* blk) {
+    
+    struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
+    // 采用注册固定缓冲区的 Direct I/O 操作 (严格 Bypass DDR)
+    io_uring_prep_write_fixed(sqe, nvme_fd, reinterpret_cast<void*>(hbm_addr), size_bytes, ssd_lba_offset, 0);
+    io_uring_sqe_set_data(sqe, blk);
+    io_uring_submit(ring);
+}
 
-    std::vector<TierBlockDescriptor*> evict_candidates;
-    {
-        std::lock_guard<std::mutex> lk(manifest_lock_);
-        for (auto& [id, blk] : block_map_) {
-            if (blk.location == TierLocation::HBM_ACTIVE && blk.pin_count.load() == 0) {
-                evict_candidates.push_back(&blk);
-            }
+void TierManager::poll_io_completions(struct io_uring* ring) {
+    struct io_uring_cqe* cqe;
+    while (io_uring_peek_cqe(ring, &cqe) == 0) {
+        TierBlockDescriptor* blk = reinterpret_cast<TierBlockDescriptor*>(io_uring_cqe_get_data(cqe));
+        if (cqe->res >= 0) {
+            // 写入完成，安全释放 HBM 物理页
+            free_hbm_block(blk->hbm_phys_addr);
+            blk->location = TierLocation::SSD_EVICTED;
         }
-        // 按最后访问时间升序排序 (最冷优先)
-        std::sort(evict_candidates.begin(), evict_candidates.end(), 
-                  [](auto* a, auto* b){ return a->last_access_epoch < b->last_access_epoch; });
-    }
-
-    for (auto* blk : evict_candidates) {
-        blk->location = TierLocation::MIGRATING;
-        // Direct I/O 写入 SSD: 严禁将数据拷贝至 Host DDR
-        async_nvme_direct_write(blk->hbm_phys_addr, blk->ssd_lba_offset, blk->size_bytes, 
-            [blk, this]() {
-                free_hbm_block(blk->hbm_phys_addr);
-                blk->location = TierLocation::SSD_EVICTED;
-            });
-
-        if (get_current_hbm_usage_ratio() <= cfg.low_watermark_pct) break;
+        io_uring_cqe_seen(ring, cqe);
     }
 }
 ```
@@ -135,11 +157,11 @@ stateDiagram-v2
 ## 3. 基础/对照 Micro-Benchmark 构建方法
 
 ### 3.1 测试工具与源码结构
-本项验证涉及的全部存储分层与超载压测源码均存放在 `./原型验证代码/PVT-05/` 目录下：
+本项验证涉及的全部存储分层与超载压测源码存放在 `./原型验证代码/PVT-05/` 目录下：
 
 ```
 原型验证代码/PVT-05/
-├── tier_storage_bench.cc # NVMe SSD Direct I/O (Bypass DDR) 与 DDR 中转吞吐对比的 C++ 压测工具
+├── tier_storage_bench.cc # NVMe SSD io_uring Direct I/O (Bypass DDR) vs DDR 中转压测工具
 ├── Makefile             # 编译 tier_storage_bench 的工程构建文件 (make -j16)
 └── benchmark_tiering.py # 150%~200% HBM 显存超载下分层扩容与 OOM 统计驱动脚本
 ```
@@ -149,7 +171,7 @@ stateDiagram-v2
 # 编译存储分层压测 Harness
 cd ./原型验证代码/PVT-05 && make clean && make
 ```
-- 支持配置直接 I/O 驱动（SPDK / `io_uring` + `O_DIRECT`）；
+- 支持配置直接 I/O 驱动（Linux 6.6+ `io_uring` + `O_DIRECT`）；
 - 支持设置 DDR 内存中间缓冲（Buffer Mode）或完全旁路（Bypass Mode）。
 
 ### 3.2 三组实验对照设计
@@ -188,13 +210,16 @@ cd ./原型验证代码/PVT-05 && make clean && make
 编译 `tier_storage_bench`。
 
 ### 步骤 2：测试 NVMe Direct 裸 I/O 读写带宽
-运行基准测量 SPDK/io_uring 直达读写带宽与 CPU 开销：
+运行基准测量 `io_uring` 直达读写带宽与 CPU 开销：
 ```bash
-./tier_storage_bench
+./tier_storage_bench --mode direct_io --device /dev/nvme0n1 --qd 32 --size 64M
 ```
 
 ### 步骤 3：测试传统 DDR 软中转读写带宽与 CPU 占用
-开启 DDR 中转模式，记录此时带宽与 CPU 消耗。
+开启 DDR 中转模式，记录此时带宽与 CPU 消耗：
+```bash
+./tier_storage_bench --mode ddr_staging --device /dev/nvme0n1 --qd 32 --size 64M
+```
 
 ### 步骤 4：计算直达主路径带宽达成率与 CPU 节省率
 计算 $\text{Bandwidth}_{\text{direct}} / \text{Bandwidth}_{\text{raw}}$。

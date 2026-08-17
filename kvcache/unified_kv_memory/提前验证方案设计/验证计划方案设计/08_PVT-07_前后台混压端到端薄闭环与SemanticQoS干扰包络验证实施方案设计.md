@@ -9,6 +9,7 @@
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L3-QO-SemanticQoS-045`, `L3-MS-StateAwarePrefetch-081`, `L3-OB-PerPathTelemetry-047`, `L4-FT-PathIntegrityPolicy-077`  
 > - SR23: `SR23-01-04-01`, `SR23-01-11-02`, `SR23-02-02-01`, `SR23-02-02-02`, `SR23-02-06-01`, `SR23-02-11-01`, `SR23-02-12-03`, `SR23-02-12-05`  
+> **研发对齐状态**：已闭环研发评估报告 7, 13 项与 QoS 映射规范（明确 RoCE TC0/TC1 硬件队列映射、vLLM Worker.step() 行级事件感知回调）  
 
 ---
 
@@ -28,15 +29,26 @@
 
 ---
 
-## 2. 核心数据结构与算法原型详细设计
+## 2. 核心数据结构与 QoS 软硬双层映射设计
 
-### 2.1 核心数据结构定义
+### 2.1 QoS 流量类别与硬件队列映射标准
+
+为了杜绝软件限速抖动，QoS 采用**底层硬件网络队列 + 应用层微秒级自适应退避**双层协同机制：
+- **硬件网络层映射**：
+  - **TC0（前台在线交互流）**：映射至 RoCE Lossless 无丢包高优先级队列（CoS 3 / DSCP 26 - AF31）；
+  - **TC1（后台换出/预取流）**：映射至 Best-Effort 尽力而为队列（CoS 0 / DSCP 0）。
+- **应用层调度流控**：
+  - 在 vLLM `Worker.step()` 调度循环中植入微秒级 C++ 回调，实时感知前台 Decode Step 启停。
 
 ```cpp
-// 1. 流量优先级分类
+#include <stdint.h>
+#include <atomic>
+#include <chrono>
+
+// 1. 流量优先级分类与 RoCE DSCP 映射
 enum class TrafficClass : uint8_t {
-    TC0_FOREGROUND_ONLINE = 0, // 前台在线 Decode/Prefill 会话 (严格 SLO, 最高优先级)
-    TC1_BACKGROUND_TIERING = 1 // 后台异步换入换出/预取/Defrag (尽力而为, 低优先级)
+    TC0_FOREGROUND_ONLINE = 0, // CoS 3 / DSCP 26 (严格 SLO, 最高优先级)
+    TC1_BACKGROUND_TIERING = 1 // CoS 0 / DSCP 0  (尽力而为, 低优先级)
 };
 
 // 2. QoS 调度队列描述符
@@ -56,14 +68,27 @@ struct DynamicThrottleBudget {
 };
 ```
 
-### 2.2 微秒级自适应退避与动态限速调度算法 (Adaptive Backoff)
+### 2.2 vLLM Worker.step() 行级事件感知与自适应退避算法
+
+```cpp
+// 植入 vLLM Worker.step() 调度循环的微秒级回调
+void on_foreground_step_begin(uint64_t step_seq) {
+    // 1. 通知 QoS 控制器暂停后台大流量 DMA 占用总线
+    SemanticQoSController::instance().pause_background_traffic();
+}
+
+void on_foreground_step_end(uint64_t step_seq, double step_tpot_ms) {
+    // 2. 测量本次 TPOT 并驱动动态限速状态机
+    SemanticQoSController::instance().update_tpot_and_resume(step_tpot_ms);
+}
+```
 
 ```mermaid
 flowchart TD
-    FgEvent["前台 Decode Step 开始 (算子触发)"] --> NotifyQoS["通知 QoSController: on_foreground_step_begin()"]
+    FgEvent["前台 Decode Step 开始 (Worker.step 入口)"] --> NotifyQoS["触发 on_foreground_step_begin()"]
     NotifyQoS --> ThrottleBG["后台队列置位 is_throttled=true<br/>(暂停后台大流量 DMA 占用 PCIe/网卡总线)"]
     ThrottleBG --> NpuCompute["NPU 独占高速 HBM / 总线执行 Attention 计算"]
-    NpuCompute --> FgDone["Decode Step 结束, 测量本次 TPOT"]
+    NpuCompute --> FgDone["Decode Step 结束, 触发 on_foreground_step_end(tpot)"]
     FgDone --> CheckSLA{"TPOT > SLA 目标 (20ms) ?"}
     CheckSLA -- "YES" --> Penalize["激进化限流: 缩小后台带宽预算 (BW *= 0.5)"]
     CheckSLA -- "NO" --> Restore["平缓恢复: 后台带宽预算 (BW += 10Gbps)"]
@@ -84,14 +109,14 @@ sequenceDiagram
 
     Client->>Router: 提交 100K 请求 (携带 50K 公共前缀)
     Router->>Router: 6维语义校验 + CostEvaluator (< 5us)
-    Router->>Comp: 生成 Remote_Load 计划
+    Router->>Comp: 生成 Remote_URMA_Load 计划
     Comp->>Comp: 跨框架 Manifest 连续块合并 (< 20us)
-    Comp->>Fabric: 批量推送 Scatter-Gather 描述符
+    Comp->>Fabric: 批量推送 Scatter-Gather 描述符 (TC0 队列)
     Fabric->>Engine: DMA 直接写入 NPU HBM (零 CPU 触碰)
     Engine->>Engine: 挂载前缀 KV, 执行后 50K Tail Prefill
     Engine-->>Client: 输出首 Token (P99 TTFT 显著降低)
     loop Decode 逐 Token 生成
-        Engine->>Engine: 本地高速 HBM 读取历史 KV, 持续流式输出
+        Engine->>Engine: 本地高速 HBM 读取历史 KV, 持续流式输出 (QoS 保护)
     end
 ```
 
@@ -100,12 +125,12 @@ sequenceDiagram
 ## 3. 基础/对照 Micro-Benchmark 构建方法
 
 ### 3.1 测试工具与源码结构
-本项验证涉及的全部混流压测与 QoS 控制源码均存放在 `./原型验证代码/PVT-07/` 目录下：
+本项验证涉及的全部混流压测与 QoS 控制源码存放在 `./原型验证代码/PVT-07/` 目录下：
 
 ```
 原型验证代码/PVT-07/
 ├── mixed_workload_bench.py    # 前台在线 Decode 流与后台高吞吐 I/O 混压驱动脚本
-├── semantic_qos_controller.py # 前台高优先级保证与后台微秒级自适应退避流控器
+├── semantic_qos_controller.py # 前台高优先级保证 (RoCE TC0) 与后台微秒级自适应退避流控器
 └── run_mixed_bench.py         # 自动化执行全套混流薄闭环并计算 TPOT 干扰率与 TTFT 降幅的脚本
 ```
 

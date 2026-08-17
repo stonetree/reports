@@ -9,6 +9,7 @@
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L4-MC-HIER-STORE-002`, `L4-MC-HIER-STORE-003`, `L4-NET-OFFLOAD-DPU-001`, `L4-FT-PathIntegrityPolicy-077`  
 > - SR23: `SR23-01-08-01`, `SR23-01-08-02`, `SR23-01-09-01`, `SR23-01-12-01`  
+> **研发对齐状态**：已闭环研发评估报告 11 项与 DPU 熔断降级规范（明确 500us 硬件看门狗超时、告警上报与 Raw Direct 零丢包接管）  
 
 ---
 
@@ -28,11 +29,15 @@
 
 ---
 
-## 2. 核心数据结构与算法原型详细设计
+## 2. 核心数据结构与看门狗熔断降级算法设计
 
 ### 2.1 核心数据结构定义
 
 ```cpp
+#include <stdint.h>
+#include <atomic>
+#include <chrono>
+
 // 1. 传输通道类型枚举
 enum class ChannelType : uint8_t {
     RAW_DIRECT_BYPASS = 0,    // 纯 UBMEM/URMA 直达主路径 (核心基础, 零依赖)
@@ -45,21 +50,22 @@ struct alignas(64) ChannelRouterState {
     std::atomic<bool> dpu_channel_healthy{true};  // DPU 心跳与通道健康位
     std::atomic<uint64_t> dpu_timeout_count{0};
     std::atomic<uint64_t> fallback_trigger_count{0};
+    std::atomic<uint64_t> last_failure_epoch_ms{0}; // 熔断发生时间戳
     double raw_direct_bw_gbps = 685.0;            // 裸直达带宽
 };
 ```
 
-### 2.2 Raw Direct 分派与 DPU 故障微秒级无缝降级算法
+### 2.2 DPU 500us 硬件看门狗与微秒级熔断降级算法
 
 ```mermaid
 flowchart TD
     Req["发起 KVCache 数据块传输任务 (64MB)"] --> CheckDPU{"DPU 硬件通道是否开启且健康?"}
-    CheckDPU -- "NO (未安装 DPU 或已标记故障)" --> SendRaw["走 Raw Direct 路径: 直接调用 liburma / libubmem DMA<br/>(带宽 685 Gbps, CPU 0.5%)"]
+    CheckDPU -- "NO (未安装 DPU 或已处于熔断隔离期)" --> SendRaw["走 Raw Direct 路径: 直接调用 liburma / libubmem DMA<br/>(带宽 685 Gbps, CPU 0.5%)"]
     CheckDPU -- "YES" --> TryDPU["向 DPU 硬件协处理器提交 Offload 请求"]
     
-    TryDPU --> Watchdog{"DPU 在 500us 内是否响应?"}
+    TryDPU --> Watchdog{"DPU 在 500us 门限内是否返回 CQE?"}
     Watchdog -- "YES" --> DPU_Done["DPU 硬件线速完成传输 (720 Gbps, CPU 0.2%)"]
-    Watchdog -- "NO (故障注入: 驱动超时 / PCIe 断连)" --> TripCircuit["触发熔断保护: dpu_channel_healthy = false"]
+    Watchdog -- "NO (超时挂死 / 驱动无响应)" --> TripCircuit["触发熔断保护: dpu_channel_healthy = false<br/>上报 Telemetry 告警事件 E_DPU_TIMEOUT"]
     TripCircuit --> Fallback["微秒级无缝降级 (< 1ms): 立即重定向至 Raw Direct 路径完成传输"]
     Fallback --> Log["记录 Fallback 统计, 业务 0 丢包 0 报错!"]
 ```
@@ -67,16 +73,27 @@ flowchart TD
 #### 降级调度器核心代码实现：
 ```cpp
 bool ChannelRouter::submit_transfer(uint64_t src_phys, uint64_t dst_phys, uint32_t bytes) {
+    // 1. 检查 DPU 通道健康状态
     if (state_.dpu_channel_healthy.load(std::memory_order_relaxed)) {
-        bool dpu_ok = try_dpu_hardware_transfer(src_phys, dst_phys, bytes, /*timeout_us=*/500);
-        if (dpu_ok) return true;
+        auto t_start = std::chrono::steady_clock::now();
+        bool dpu_ok = try_dpu_hardware_transfer_async(src_phys, dst_phys, bytes);
+        
+        // 500us 硬件看门狗轮询检测
+        if (dpu_ok && poll_dpu_completion_timeout(500 /* microseconds */)) {
+            return true; // DPU 成功完成
+        }
 
-        // 故障发生，微秒级熔断并切换
+        // 2. 超时故障发生，微秒级熔断并记录告警
         state_.dpu_channel_healthy.store(false, std::memory_order_release);
+        state_.dpu_timeout_count.fetch_add(1, std::memory_order_relaxed);
         state_.fallback_trigger_count.fetch_add(1, std::memory_order_relaxed);
+        state_.last_failure_epoch_ms.store(get_current_epoch_ms(), std::memory_order_relaxed);
+        
+        // 异步向 Telemetry 守护线程上报告警
+        report_telemetry_event("E_DPU_TIMEOUT", "DPU failed to respond in 500us, tripping circuit breaker");
     }
 
-    // 无缝 Fallback 到 Raw Direct 主路径
+    // 3. 无缝 Fallback 到 Raw Direct 主路径 (零丢包重放)
     return execute_raw_direct_urma_dma(src_phys, dst_phys, bytes);
 }
 ```
@@ -86,7 +103,7 @@ bool ChannelRouter::submit_transfer(uint64_t src_phys, uint64_t dst_phys, uint32
 ## 3. 基础/对照 Micro-Benchmark 构建方法
 
 ### 3.1 测试工具与源码结构
-本项验证涉及的全部通道压测与故障注入源码均存放在 `./原型验证代码/CVT-03/` 目录下：
+本项验证涉及的全部通道压测与故障注入源码存放在 `./原型验证代码/CVT-03/` 目录下：
 
 ```
 原型验证代码/CVT-03/
@@ -145,14 +162,20 @@ cd ./原型验证代码/CVT-03 && make clean && make
 ### 步骤 2：测试通道 1（Raw Direct 裸直达）
 测试在 64MB 大包下的传输带宽与 Host CPU 占用：
 ```bash
-./offload_fallback_bench
+./offload_fallback_bench --channel raw_direct --size 64M
 ```
 
 ### 步骤 3：测试通道 2（DPU 硬件卸载）
-记录 DPU 硬件在线速压缩下的带宽与 CPU 占用。
+记录 DPU 硬件在线速压缩下的带宽与 CPU 占用：
+```bash
+./offload_fallback_bench --channel dpu_offload --size 64M
+```
 
 ### 步骤 4：测试通道 3（Host CPU 软件 zstd 压缩）
-测试 CPU 软件压缩下的实际吞吐与 CPU 打满程度（负收益证据）。
+测试 CPU 软件压缩下的实际吞吐与 CPU 打满程度（负收益证据）：
+```bash
+./offload_fallback_bench --channel cpu_zstd --size 64M
+```
 
 ### 步骤 5：注入 DPU 故障进行 Fallback 测试
 执行注入脚本模拟 DPU 超时中断：
@@ -161,7 +184,7 @@ python3 ./原型验证代码/CVT-03/inject_fault.py --target dpu --fault disconn
 ```
 
 ### 步骤 6：记录 Fallback 切换时延
-测量从 DPU 超时判定到 Raw Direct 路径成功接管并完成数据传输的总耗时。
+测量从 DPU 500us 超时判定到 Raw Direct 路径成功接管并完成数据传输的总耗时。
 
 ### 步骤 7：验证数据完整性与零丢包
 校验 Fallback 传输后的 KV 数据哈希，确认请求成功率 $100\%$。

@@ -9,6 +9,7 @@
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L1-OL-ViewVsCopy-011`, `L2-MM-ViewLease-028`, `L3-SE-ViewCopyCostModel-034`, `L3-MS-UBC2CTier-055`  
 > - SR23: `SR23-01-07-01`, `SR23-01-10-01`, `SR23-02-04-01`, `SR23-02-05-02`  
+> **研发对齐状态**：已闭环研发评估报告 8 项与 SIGBUS 异常恢复机制（明确 NPU SVM 映射、siglongjmp 恢复与 aclrtStreamAbort 驱动队列重置）  
 
 ---
 
@@ -29,7 +30,7 @@
 
 ---
 
-## 2. 核心数据结构与算法原型详细设计
+## 2. 核心数据结构与 SIGBUS 恢复状态机设计
 
 ### 2.1 View-vs-Copy 成本数学交叉模型与判决算法
 
@@ -61,57 +62,90 @@ flowchart TD
 ### 2.2 ViewGuard 租约生命周期与隔离数据结构
 
 ```cpp
+#include <stdint.h>
+#include <atomic>
+#include <chrono>
+#include <unordered_map>
+#include <mutex>
+#include <setjmp.h>
+#include <signal.h>
+#include <acl/acl.h>
+#include <acl/acl_rt.h>
+
+// 线程级恢复上下文缓冲
+thread_local sigjmp_buf g_view_recovery_jmp_buf;
+thread_local bool g_in_direct_view_section = false;
+
 // 1. View 租约描述符 (微秒级生命周期管理)
 struct alignas(64) ViewLeaseDescriptor {
     uint64_t lease_id;            // 唯一租约 ID
     uint64_t object_id;           // KV 目标对象标识
-    uint64_t remote_va;           // 远端 UBMEM 虚拟地址映射
+    uint64_t remote_va;           // 远端 UBMEM 虚拟地址映射 (SVM 地址)
     uint32_t payload_bytes;       // 映射显存大小
     std::atomic<uint32_t> ref_cnt;// 当前使用该租约的 Attention 算子引用计数
     std::chrono::time_point<std::chrono::steady_clock> expire_timestamp;
     std::atomic<bool> is_valid;   // 有效性屏障 (源节点 Crash 或驱逐时置 false)
 };
-
-// 2. ViewGuard 保护上下文
-class DirectViewGuard {
-private:
-    std::unordered_map<uint64_t, ViewLeaseDescriptor> active_leases_;
-    std::mutex lease_lock_;
-
-public:
-    // 分配租约 (默认授予 50ms 超时保护)
-    ViewLeaseDescriptor* acquire_view_lease(uint64_t object_id, uint64_t remote_va, uint32_t bytes, uint32_t timeout_ms = 50);
-
-    // 算子访问前执行微秒级门禁校验 (< 1us)
-    inline bool validate_lease_fast(const ViewLeaseDescriptor* lease) {
-        if (!lease->is_valid.load(std::memory_order_relaxed)) return false;
-        if (std::chrono::steady_clock::now() > lease->expire_timestamp) return false;
-        return true;
-    }
-
-    // 释放租约
-    void release_view_lease(ViewLeaseDescriptor* lease);
-
-    // 注册全局信号捕获器 (拦截 SIGBUS / 远端宕机断连)
-    static void setup_crash_signal_handler();
-    static bool handle_sigbus_fallback(int sig, siginfo_t* info, void* ucontext);
-};
 ```
 
-### 2.3 异常捕获与安全 Fallback 状态机
+### 2.3 SIGBUS 信号捕获、NPU 队列重置与 4 步安全恢复闭环
+
+当远端节点 Crash 触发本地 NPU 跨总线直读异常时，系统执行严密的 4 步无死锁恢复：
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Active_Viewing: 算子获取 View 租约并跨总线读取
-    Active_Viewing --> Normal_Complete: 正常读取完毕 (Prefill 结束)
-    Normal_Complete --> [*]: 释放租约 (ref_cnt -> 0)
+sequenceDiagram
+    autonumber
+    participant Host as Host CPU Thread
+    participant NPU as NPU Compute Engine
+    participant Guard as DirectViewGuard (SIGBUS Handler)
+    participant Engine as Inference Engine (Recompute)
 
-    Active_Viewing --> Remote_Crash: 远端节点崩溃 / 掉电 / 驱动超时
-    Remote_Crash --> Sigbus_Trapped: 触发内核 SIGBUS 信号
-    Sigbus_Trapped --> ViewGuard_Handler: DirectViewGuard 信号探针拦截 (非崩溃挂起)
-    ViewGuard_Handler --> Fallback_Local_Recompute: 隔离故障通道, 触发 NPU 本地重新计算 Prefill
-    Fallback_Local_Recompute --> Request_Success: 请求输出正确 Token (业务零感知)
-    Request_Success --> [*]
+    Host->>NPU: 启动 Direct-View Attention Kernel (SVM 远端显存映射)
+    Note over NPU: 远端节点发生 Crash / 掉电 / 驱动超时!
+    NPU-->>Host: 触发硬件 MMU 缺页总线中断 -> 内核发送 SIGBUS 信号
+    Guard->>Guard: Step 1: 捕获 SIGBUS, 校验 fault_addr 属于 ViewGuard 租约区间
+    Guard->>NPU: Step 2: 调用 aclrtStreamAbort(stream) 强制清空硬件挂起队列 (防驱动死锁)
+    Guard->>Host: Step 3: 执行 siglongjmp(g_view_recovery_jmp_buf, 1) 恢复 CPU 栈帧
+    Host->>Host: Step 4: 标记租约无效 (is_valid=false), 释放 SVM 映射
+    Host->>Engine: 无缝切换到 PlanAction::Recompute, 启动本地 HBM Prefill
+    Engine-->>Host: 本地重算成功, 输出正确 Token (业务零感知)
+```
+
+#### 信号处理与安全恢复核心代码实现：
+```cpp
+void DirectViewGuard::sigbus_signal_handler(int sig, siginfo_t* info, void* ucontext) {
+    if (sig == SIGBUS && g_in_direct_view_section) {
+        uint64_t fault_addr = reinterpret_cast<uint64_t>(info->si_addr);
+        
+        // 1. 强制终止 NPU 异常 Stream 队列 (防止驱动死锁挂起)
+        aclrtStreamAbort(g_current_npu_stream);
+
+        // 2. 标记当前故障区段已捕获
+        g_in_direct_view_section = false;
+
+        // 3. 跳回检查点恢复执行栈
+        siglongjmp(g_view_recovery_jmp_buf, 1);
+    }
+    // 非 ViewGuard 预期内的异常直接交还默认处理
+    signal(SIGBUS, SIG_DFL);
+    raise(SIGBUS);
+}
+
+bool execute_safe_direct_view_prefill(ViewLeaseDescriptor* lease, aclrtStream stream) {
+    if (sigsetjmp(g_view_recovery_jmp_buf, 1) != 0) {
+        // 从 SIGBUS 异常中成功恢复！
+        lease->is_valid.store(false, std::memory_order_release);
+        // 执行安全 Fallback: 切换为本地重算
+        execute_local_recompute_prefill(lease->object_id);
+        return false;
+    }
+
+    g_in_direct_view_section = true;
+    launch_npu_direct_view_kernel(lease->remote_va, lease->payload_bytes, stream);
+    aclrtSynchronizeStream(stream);
+    g_in_direct_view_section = false;
+    return true;
+}
 ```
 
 ---
@@ -119,13 +153,13 @@ stateDiagram-v2
 ## 3. 基础/对照 Micro-Benchmark 构建方法
 
 ### 3.1 测试工具与源码结构
-本项验证涉及的全部微基准与 ViewGuard 源码均存放在 `./原型验证代码/PVT-03/` 目录下：
+本项验证涉及的全部微基准与 ViewGuard 源码存放在 `./原型验证代码/PVT-03/` 目录下：
 
 ```
 原型验证代码/PVT-03/
 ├── view_vs_copy_bench.cc     # 测量不同重读次数下 Direct-View 与 Copy-to-HBM 累积耗时的 C++ 压测工具
-├── view_guard.h              # ViewGuard 租约管理、时效校验与异常捕获头文件
-├── view_guard.cc             # ViewGuard 租约校验与故障安全回滚的核心实现
+├── view_guard.h              # ViewGuard 租约管理、时效校验与 SIGBUS 恢复头文件
+├── view_guard.cc             # ViewGuard 租约校验、siglongjmp 恢复与故障安全回滚的核心实现
 ├── Makefile                  # 编译 view_vs_copy_bench 的工程构建文件 (make -j16)
 └── benchmark_serving_view.py # 在推理服务中测试并证伪 Decode 阶段 View 模式的压测脚本
 ```
@@ -138,13 +172,13 @@ cd ./原型验证代码/PVT-03 && make clean && make
 
 ### 3.2 三组对照模式设置
 - **模式 1（纯 Direct-View 模式）**：
-  - NPU 算子直接通过 UBMEM / C2C 虚拟地址映射，跨总线直接读取远端内存中的 KV 数据；
+  - NPU 算子直接通过 UBMEM / C2C SVM 虚拟地址映射，跨总线直接读取远端内存中的 KV 数据；
   - 优点：省去初始 DMA 拷贝时间；缺点：每次读取均产生远端总线访问延迟。
 - **模式 2（纯 Copy-to-HBM 模式）**：
   - 初始时发起一次 URMA/UBMEM DMA 拷贝，将远端 KV 完整搬移至本地 HBM；
   - 随后 NPU 算子均以本地超高带宽读取本地 HBM。
 - **模式 3（ViewGuard 保护模式）**：
-  - 在模式 1 的基础上挂载 `DirectViewGuard` 租约管理与内存异常信号拦截器。
+  - 在模式 1 的基础上挂载 `DirectViewGuard` 租约管理与 `SIGBUS` 恢复状态机。
 
 ---
 
@@ -166,7 +200,7 @@ cd ./原型验证代码/PVT-03 && make clean && make
 
 ### 5.1 环境拓扑
 - **硬件配置**：Node-0（源节点）与 Node-1（推理节点），每节点 8× NPU (96GB HBM3)，800G 双端口互联；
-- **总线协议**：UBMEM 硬件虚拟地址直通映射。
+- **总线协议**：UBMEM 硬件 SVM 虚拟地址直通映射。
 
 ### 5.2 打点插桩位置
 - `T_init_copy`：初始 DMA 搬运耗时；
@@ -205,8 +239,8 @@ python3 ./原型验证代码/PVT-03/benchmark_serving_view.py --mode copy --deco
 ### 步骤 6：统计 Decode 阶段 TPOT 劣化倍数
 计算 $\text{TPOT}_{\text{view}} / \text{TPOT}_{\text{copy}}$，记录 Decode 阶段算力 Stall 的实测证据。
 
-### 步骤 7：启动 ViewGuard 保护模式
-在 Node-1 启用 `DirectViewGuard` 租约管理器。
+### 步骤 7：启动 ViewGuard 保护模式与 SIGBUS 注册
+在 Node-1 启用 `DirectViewGuard` 租约管理器与信号注册。
 
 ### 步骤 8：执行故障 1（租约超时注入）
 在读取中途触发租约过期，观察 ViewGuard 是否在微秒级拦截越界读取并返回错误码。
@@ -218,7 +252,7 @@ ssh node-0 "killall -9 vllm_worker"
 ```
 
 ### 步骤 10：验证异常捕获与 Fallback 机制
-检查 Node-1 是否捕获到 SIGBUS/超时信号，并平滑回退到本地重新计算（Recompute），验证无进程 Crash 与挂死。
+检查 Node-1 是否由 `DirectViewGuard` 捕获 SIGBUS、成功调用 `aclrtStreamAbort` 清理 NPU 硬件队列，并通过 `siglongjmp` 安全回退到本地重算，验证 0 进程挂死。
 
 ### 步骤 11：对账 Token 答案一致性
 比对 Fallback 之后生成的 Token 序列与未发生故障时的标准序列是否 100% 逐字一致。

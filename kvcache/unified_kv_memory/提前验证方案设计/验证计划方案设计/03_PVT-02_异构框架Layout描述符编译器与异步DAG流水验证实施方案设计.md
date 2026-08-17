@@ -9,6 +9,7 @@
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L3-SE-DescriptorFromManifest-079`, `L3-MC-LayoutTransformPlan-078`, `L2-OL-BulkDescriptor-025`, `L2-OL-LayoutNegotiation-024`  
 > - SR23: `SR23-01-02-01`, `SR23-01-04-01`, `SR23-02-06-01`  
+> **研发对齐状态**：已闭环研发评估报告 4 项与 NPU Stream 异步流水规范（明确共享内存 64B POD 协议、vLLM/SGLang 适配器与 CANN Stream 驱动）  
 
 ---
 
@@ -32,29 +33,36 @@
 
 ---
 
-## 2. 核心数据结构与算法原型详细设计
+## 2. 核心数据结构与跨框架 ExtentManifest 序列化协议
 
-为了让开发人员准确理解并实现 Layout 描述符编译器与异步 DAG 流水调度器，本节给出完整的数据结构定义、核心编译算法与流水状态机设计。
-
-### 2.1 核心数据结构定义
+### 2.1 跨进程零拷贝 ExtentManifest 协议标准 (POD 结构体)
+为了杜绝 Protobuf/FlatBuffers 序列化引发的微秒级 CPU 开销，跨框架与控制面传递统一采用 **64B 对齐的纯 C POD 共享内存结构体**（挂载于 `/dev/shm/kv_manifest_<req_id>` 或 UBMEM 共享环形队列）：
 
 ```cpp
-// 1. 跨框架逻辑 Block 描述 (由 vLLM BlockTable 或 SGLang Span 解析得出)
-struct LogicalBlockExtent {
+#include <stdint.h>
+#include <stddef.h>
+#include <vector>
+#include <string>
+
+// 1. 单个连续物理 Block Extent 描述 (POD 32 字节)
+struct alignas(32) LogicalBlockExtent {
     uint64_t logical_token_start; // 逻辑起始 Token 偏移 (如 0, 16, 32...)
     uint32_t token_count;         // 本段 Token 数量 (如 16 或 128)
+    uint32_t stride_bytes;        // 层间或 Head 间跨步 (Stride)
     uint64_t phys_base_addr;      // NPU HBM 或 UBMEM 物理起始地址 (需 64B 对齐)
-    uint32_t stride_bytes;        // 层间或 Head 间跨步 (Stride)，用于多维张量映射
     uint32_t block_bytes;         // 本块总字节数 = 2 * N_layer * N_head * Head_dim * token_count * 2B
+    uint32_t reserved;            // 8B 对齐填充
 };
 
-// 2. 统一框架清单 (ExtentManifest)
-struct ExtentManifest {
+// 2. 统一框架清单 Header (固定 64 字节)
+struct alignas(64) ExtentManifestHeader {
     uint64_t request_id;
-    std::string framework_type;   // "vllm_paged" 或 "sglang_radix"
+    uint32_t framework_type_id;   // 0: vLLM Paged, 1: SGLang Radix, 2: Standard Extent
     uint32_t total_tokens;
     uint32_t layer_count;
-    std::vector<LogicalBlockExtent> block_extents;
+    uint32_t extent_count;        // block_extents 数组长度
+    uint64_t total_payload_bytes;
+    uint8_t  padding[24];         // 填满 64 字节
 };
 
 // 3. 硬件 Scatter-Gather 描述符条目 (直接映射至 URMA / DMA 硬件队列)
@@ -76,7 +84,41 @@ struct alignas(64) BatchDescriptorHeader {
 };
 ```
 
-### 2.2 物理连续块贪心合并算法 (Greedy SG Extent Merger)
+### 2.2 vLLM 与 SGLang 格式向 ExtentManifest 的极速转换适配器
+
+```cpp
+// 1. vLLM BlockTable 适配器 (固定 16/32 Token 槽位)
+void adapt_vllm_block_table(const std::vector<uint64_t>& block_ids, uint32_t tokens_per_block, 
+                            uint32_t bytes_per_block, std::vector<LogicalBlockExtent>& out) {
+    out.reserve(block_ids.size());
+    for (size_t i = 0; i < block_ids.size(); ++i) {
+        LogicalBlockExtent ext;
+        ext.logical_token_start = i * tokens_per_block;
+        ext.token_count = tokens_per_block;
+        ext.phys_base_addr = block_ids[i] * bytes_per_block; // 物理基址
+        ext.stride_bytes = 0;
+        ext.block_bytes = bytes_per_block;
+        out.push_back(ext);
+    }
+}
+
+// 2. SGLang RadixTree Span 适配器 (动态连续长度)
+struct SGLangSpan { uint64_t token_start; uint32_t len; uint64_t phys_addr; uint32_t bytes; };
+void adapt_sglang_spans(const std::vector<SGLangSpan>& spans, std::vector<LogicalBlockExtent>& out) {
+    out.reserve(spans.size());
+    for (const auto& sp : spans) {
+        LogicalBlockExtent ext;
+        ext.logical_token_start = sp.token_start;
+        ext.token_count = sp.len;
+        ext.phys_base_addr = sp.phys_addr;
+        ext.stride_bytes = 0;
+        ext.block_bytes = sp.bytes;
+        out.push_back(ext);
+    }
+}
+```
+
+### 2.3 物理连续块贪心合并算法 (Greedy SG Extent Merger)
 
 编译器核心算法必须在 $O(N)$ 时间复杂度与 $O(1)$ 额外空间开销下，一次性完成离散 Block 的连续性探测与合并：
 
@@ -95,21 +137,22 @@ flowchart TD
     Loop -- "遍历结束" --> FinalEmit["推入末尾 Entry; 生成 BatchHeader; 输出 SG 链表"]
 ```
 
-#### 算法伪代码实现：
+#### 算法实现核心代码：
 ```cpp
-BatchDescriptorHeader DescriptorCompiler::compile_and_merge(const ExtentManifest& src_manifest, 
-                                                            const ExtentManifest& dst_manifest) {
-    BatchDescriptorHeader batch;
-    batch.batch_id = src_manifest.request_id;
-    const auto& src = src_manifest.block_extents;
-    const auto& dst = dst_manifest.block_extents;
+BatchDescriptorHeader DescriptorCompiler::compile_and_merge(
+    const std::vector<LogicalBlockExtent>& src, 
+    const std::vector<LogicalBlockExtent>& dst, 
+    uint64_t req_id) {
     
+    BatchDescriptorHeader batch;
+    batch.batch_id = req_id;
     if (src.empty() || src.size() != dst.size()) return batch;
 
     HardwareSGEntry cur;
     cur.src_phys_addr = src[0].phys_base_addr;
     cur.dst_phys_addr = dst[0].phys_base_addr;
     cur.len_bytes = src[0].block_bytes;
+    cur.stream_id = 0;
     cur.flags = 0;
 
     for (size_t i = 1; i < src.size(); ++i) {
@@ -133,11 +176,49 @@ BatchDescriptorHeader DescriptorCompiler::compile_and_merge(const ExtentManifest
 }
 ```
 
-### 2.3 异步 DAG 流水线编排与 Event 屏障状态机
+### 2.4 NPU Stream 与 Event 异步 DAG 运行时流水驱动实现
 
-针对长前缀 Prefill 请求，系统将其划分为 $K$ 个 Chunk（如每个 Chunk 16K Tokens）。调度引擎基于双 Stream 构建异步 DAG：
-- **Stream 0 (Compute Stream)**：执行 NPU Attention 与 Prefill Kernel 计算；
-- **Stream 1 (DMA Transfer Stream)**：执行 URMA / DMA 跨节点 KVCache 拉取。
+针对长前缀 Prefill 请求，系统将其划分为 $K$ 个 Chunk（如每个 Chunk 16K Tokens）。调度引擎基于 CANN/CUDA 运行时接口构建真正的多 Stream 事件重叠：
+
+```cpp
+#include <acl/acl.h>
+#include <acl/acl_rt.h>
+
+void run_async_dag_stream_pipeline(int chunks_count) {
+    aclrtStream compute_stream, transfer_stream;
+    aclrtCreateStream(&compute_stream);
+    aclrtCreateStream(&transfer_stream);
+
+    std::vector<aclrtEvent> transfer_ready_events(chunks_count);
+    for (int i = 0; i < chunks_count; ++i) {
+        aclrtCreateEvent(&transfer_ready_events[i]);
+    }
+
+    // 1. 首个分块 Chunk 0 启动传输
+    submit_dma_transfer_chunk(transfer_stream, 0);
+    aclrtRecordEvent(transfer_ready_events[0], transfer_stream);
+
+    for (int i = 0; i < chunks_count; ++i) {
+        // Compute Stream 等待当前 Chunk i 传输就绪
+        aclrtStreamWaitEvent(compute_stream, transfer_ready_events[i]);
+        
+        // 并发流水: 在 Compute Stream 计算 Chunk i 的同时，Transfer Stream 拉取 Chunk i+1
+        launch_prefill_gemm_kernel(compute_stream, i);
+        
+        if (i + 1 < chunks_count) {
+            submit_dma_transfer_chunk(transfer_stream, i + 1);
+            aclrtRecordEvent(transfer_ready_events[i + 1], transfer_stream);
+        }
+    }
+
+    aclrtSynchronizeStream(compute_stream);
+    
+    // 清理资源
+    for (int i = 0; i < chunks_count; ++i) aclrtDestroyEvent(transfer_ready_events[i]);
+    aclrtDestroyStream(compute_stream);
+    aclrtDestroyStream(transfer_stream);
+}
+```
 
 ```mermaid
 sequenceDiagram
@@ -170,13 +251,13 @@ sequenceDiagram
 ## 3. 基础/对照 Micro-Benchmark 构建方法
 
 ### 3.1 测试工具与源码结构
-本项验证涉及的全部编译器与异步流水压测源码均存放在 `./原型验证代码/PVT-02/` 目录下：
+本项验证涉及的全部编译器与异步流水压测源码存放在 `./原型验证代码/PVT-02/` 目录下：
 
 ```
 原型验证代码/PVT-02/
 ├── descriptor_compiler.h  # 跨框架离散物理 Block 连续性合并与 Scatter-Gather 描述符编译器头文件
 ├── descriptor_compiler.cc # 描述符贪心合并与硬件描述符生成的核心算法实现
-├── async_dag_bench.cc     # NPU 计算流与 DMA 传输流异步 DAG 重叠流水压测工具
+├── async_dag_bench.cc     # NPU 计算流与 DMA 传输流异步 DAG 重叠流水压测工具 (链接 CANN/CUDA)
 ├── Makefile               # 编译 async_dag_bench 的工程构建文件 (make -j16)
 └── make_manifests.py      # 生成不同碎片离散度 (10%~100%) Block Table Manifest 的脚本
 ```
@@ -186,9 +267,6 @@ sequenceDiagram
 # 编译压测 Harness
 cd ./原型验证代码/PVT-02 && make clean && make
 ```
-- **Manifest 生成器**：生成脚本为 `./原型验证代码/PVT-02/make_manifests.py`，模拟具有不同离散度的物理 Block 描述（`ExtentManifest`）；
-- **Descriptor 编译器**：执行内存地址连续性合并与 Scatter-Gather 硬件描述符生成；
-- **异步 DAG 执行器**：基于 NPU Stream / Event 与 URMA DMA Queue 构建异步执行流水。
 
 ### 3.2 三组实验对照设置
 - **对照组 A（逐 Block 同步提交基线）**：
@@ -224,7 +302,7 @@ Transfer Stream: [ Transfer Chunk 1 ] [ Transfer Chunk 2 ] [ Transfer Chunk 3 ] 
 
 ### 5.1 环境与 Profiler 工具
 - **硬件**：8× NPU (96GB HBM3), 800G URMA 网卡；
-- **性能分析工具**：PyTorch Profiler / NPU Profiler（抓取 Stream Timeline 与 Kernel 耗时）。
+- **性能分析工具**：PyTorch Profiler / CANN Profiler（抓取 Stream Timeline 与 Kernel 耗时）。
 
 ### 5.2 关键路径插桩打点位置
 在 `async_dag_bench` 中植入高精度打点：
@@ -256,7 +334,7 @@ python3 ./原型验证代码/PVT-02/make_manifests.py \
 ### 步骤 3：运行 Descriptor Compiler 编译测试
 测试编译器将 1024 个 Block 编译为 Scatter-Gather 描述符的耗时与生成的描述符数量：
 ```bash
-./async_dag_bench
+./async_dag_bench --mode compile_bench --manifest ./manifest_1024_frag0.5.json
 ```
 
 ### 步骤 4：运行实验组批量提交测试
@@ -271,7 +349,10 @@ python3 ./原型验证代码/PVT-02/make_manifests.py \
 执行纯串行流水（先完整传输，再完整计算）。
 
 ### 步骤 7：运行实验组 C（异步 DAG 流水）
-执行异步重叠流水（Chunked 计算与传输重叠）。
+执行基于 CANN/CUDA Stream 的异步重叠流水（Chunked 计算与传输重叠）：
+```bash
+./async_dag_bench --mode async_dag --chunks 4 --tokens 65536
+```
 
 ### 步骤 8：抓取 Profiler Trace 并提取重叠区间
 在时间轴上提取：
