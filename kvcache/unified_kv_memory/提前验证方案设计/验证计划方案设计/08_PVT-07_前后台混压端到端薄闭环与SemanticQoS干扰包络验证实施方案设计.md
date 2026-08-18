@@ -1,9 +1,9 @@
-# PVT-07：前后台混压端到端薄闭环与 SemanticQoS 干扰包络验证实施方案设计
+# PVT-07：前后台混压端到端最小闭环与 SemanticQoS 服务质量保障验证实施方案设计
 
 > **验证 ID**：PVT-07  
-> **验证名称**：前后台混压端到端薄闭环 (Vertical Slice) 与 SemanticQoS 干扰包络验证  
-> **对应证据门**：**E3 系统净收益**  
-> **证伪标记**：否（立项系统总门禁）  
+> **验证名称**：前后台混压端到端最小闭环 (Vertical Slice) 与 SemanticQoS 服务质量保障验证  
+> **对应验证阶段**：**E3 全链路前后台混压总门禁**  
+> **证伪标记**：否（全链路系统总门禁）  
 > **建议周期**：6~8 人日  
 > **主关联 IR**：`IR-01-04`, `IR-01-11`, `IR-02-06`  
 > **核心 SRS / SR23 锚点**：  
@@ -16,15 +16,15 @@
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 待验证核心命题
-局部单项指标达标不代表在线系统的最终成功。在真实在线推理中，前台 Decode 算力对显存与总线延迟极其敏感；后台若无节制地进行跨节点拉取、SSD 回源或预取，将严重干扰前台 TPOT 尾部延迟。作为立项前最后一个“纵向切片（Vertical Slice）”总门禁，本验证旨在通过端到端全链路原型证明：
+局部单项指标达标不代表在线系统的最终成功。在真实在线推理中，前台 Decode（逐 Token 自回归生成）对显存与总线延迟极其敏感；后台若无节制地进行跨节点拉取、SSD 换出或预取，将严重干扰前台 TPOT（Time Per Output Token，单字生成延迟）尾部延迟。作为系统落地前最后一个“纵向切片（Vertical Slice，端到端最小闭环验证）”总门禁，本验证旨在通过全链路原型证明：
 1. **端到端全链路净收益**：在真实 2 节点集群、50%~70% 复用率业务流量下，串联 `Prefix Lookup -> QueryPlan -> Descriptor -> UBMEM/URMA Transfer -> Attach` 全流程，实现**端到端 P99 TTFT 降低 $\ge 20\%$**，**系统吞吐 QPS 提升 $\ge 10\%$**；
-2. **SemanticQoS 干扰包络**：在前后台混压下，SemanticQoS 优先级队列与自适应限速能够将后台对前台 **P99 TPOT 的尾部抖动干扰严格控制在 $< 3\%$**，同时保持后台传输带宽利用率 $\ge 70\%$。
+2. **前后台服务质量保障策略 (SemanticQoS)**：在前后台混压下，SemanticQoS 优先级队列与自适应限速能够将后台对前台 **P99 TPOT 的尾部抖动干扰严格控制在 $< 3\%$**（确保后台换出与拉取时不影响前台在线推理的请求时延），同时保持后台传输带宽利用率 $\ge 70\%$。
 
 ### 1.2 最终交付数据与结论产出
 开发人员执行完本方案后，必须输出以下交付件：
 1. **《前台独立 vs 混压无隔离 vs 混压开启 QoS 的端到端性能对比表》**（TTFT, TPOT P50/P90/P99, QPS）；
-2. **《前后台混压下 TPOT 尾部抖动分布与干扰包络分析曲线》**；
-3. **《全链路薄闭环各阶段耗时拆解与收益对账表》**；
+2. **《前后台混压下 TPOT 尾部抖动分布与服务质量保障 (QoS)分析曲线》**；
+3. **《全链路最小闭环各阶段耗时拆解与收益对账表》**；
 4. **《Go / No-Go 判定结论》**：依据 P99 TTFT 降幅 $\ge 20\%$ 与 TPOT 干扰 $< 3\%$ 门槛判定。
 
 ---
@@ -96,7 +96,7 @@ flowchart TD
     Restore --> ResumeBG
 ```
 
-### 2.3 Vertical Slice 全链路薄闭环端到端编排状态机
+### 2.3 Vertical Slice 全链路最小闭环端到端编排状态机
 
 ```mermaid
 sequenceDiagram
@@ -131,10 +131,10 @@ sequenceDiagram
 原型验证代码/PVT-07/
 ├── mixed_workload_bench.py    # 前台在线 Decode 流与后台高吞吐 I/O 混压驱动脚本
 ├── semantic_qos_controller.py # 前台高优先级保证 (RoCE TC0) 与后台微秒级自适应退避流控器
-└── run_mixed_bench.py         # 自动化执行全套混流薄闭环并计算 TPOT 干扰率与 TTFT 降幅的脚本
+└── run_mixed_bench.py         # 自动化执行全套混流最小闭环并计算 TPOT 干扰率与 TTFT 降幅的脚本
 ```
 
-一键执行全套薄闭环评估：
+一键执行全套最小闭环评估：
 ```bash
 python3 ./原型验证代码/PVT-07/run_mixed_bench.py --out res_pvt07_summary.json
 ```
@@ -196,7 +196,7 @@ python3 ./原型验证代码/PVT-07/mixed_workload_bench.py --fg-clients 32 --bg
 python3 ./原型验证代码/PVT-07/mixed_workload_bench.py --fg-clients 32 --bg-workers 4 --qos --duration 180
 ```
 
-### 步骤 5：运行自动化全套薄闭环评估
+### 步骤 5：运行自动化全套最小闭环评估
 执行自动化综合套件：
 ```bash
 python3 ./原型验证代码/PVT-07/run_mixed_bench.py --out res_pvt07_summary.json
@@ -209,7 +209,7 @@ python3 ./原型验证代码/PVT-07/run_mixed_bench.py --out res_pvt07_summary.j
 验证在保护前台 TPOT 的同时，后台带宽是否仍保持在 $\ge 300\text{Gbps}$。
 
 ### 步骤 8：运行 50% 复用率端到端全链路切片
-注入 50% 公共前缀复用流量，串联执行全链路薄闭环。
+注入 50% 公共前缀复用流量，串联执行全链路最小闭环。
 
 ### 步骤 9：计算端到端 P99 TTFT 降幅
 比对 50% 复用下与纯算力重算下的 P99 TTFT，验证降幅是否 $\ge 20\%$。
@@ -268,7 +268,7 @@ $$\text{QPS Gain} = \frac{\text{QPS}_{\text{vertical\_slice}} - \text{QPS}_{\tex
 ### 10.1 判定规则
 - **Go 门槛（立项系统总门禁）**：
   1. 开启 SemanticQoS 后，混压对前台 P99 TPOT 干扰率 $< 3.0\%$；
-  2. 全链路薄闭环在 50% 复用下，P99 TTFT 降低 $\ge 20.0\%$；
+  2. 全链路最小闭环在 50% 复用下，P99 TTFT 降低 $\ge 20.0\%$；
   3. 系统端到端处理吞吐 QPS 提升 $\ge 10.0\%$；
   4. 后台传输带宽利用率 $\ge 70\%$（$\ge 280\text{Gbps}$）。
 - **No-Go 门槛**：
@@ -286,7 +286,7 @@ $$\text{QPS Gain} = \frac{\text{QPS}_{\text{vertical\_slice}} - \text{QPS}_{\tex
 - 实测 TPOT 干扰率: +1.81% (PASS, 门槛 < 3.0%)
 - 后台有效利用带宽: 312.0 Gbps (达成率 78.0%, PASS)
 
-## 2. 端到端薄闭环 (Vertical Slice) 净收益实测 (50% 复用)
+## 2. 端到端最小闭环 (Vertical Slice) 净收益实测 (50% 复用)
 - P99 TTFT 从 1250.0 ms 降至 810.0 ms (净降幅 35.20%, PASS, 门槛 >= 20%)
 - 系统 QPS 从 22.5 提升至 28.6 (提升 27.11%, PASS, 门槛 >= 10%)
 - 全链路错误消费数: 0

@@ -1,9 +1,9 @@
-# PVT-01：零 Host Touch 极速传输底座与 CapabilityMatrix 验证实施方案设计
+# PVT-01：Host CPU 零数据拷贝传输底座与硬件能力矩阵验证实施方案设计
 
 > **验证 ID**：PVT-01  
-> **验证名称**：零 Host Touch 极速传输底座与 CapabilityMatrix 探针验证  
-> **对应证据门**：**E1 能力路径**  
-> **证伪标记**：否（底座能力确认）  
+> **验证名称**：Host CPU 零数据拷贝极速传输底座与硬件能力矩阵 (CapabilityMatrix) 验证  
+> **对应验证阶段**：**E1 核心数据路径打通**  
+> **证伪标记**：否（底层传输能力确认）  
 > **建议周期**：6~8 人日  
 > **主关联 IR**：`IR-01-06`, `IR-01-08`, `IR-01-09`, `IR-01-12`  
 > **核心 SRS / SR23 锚点**：  
@@ -16,17 +16,17 @@
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 待验证核心命题
-统一异构存储池的数据平面必须建立在零/极低 Host CPU 参与的高性能硬件通路上。本验证旨在通过受控传输 Benchmark 与内核/用户态 eBPF 插桩，证明：
-1. **跨节点 URMA / UBMEM 传输**与**本地 NVMe SSD 直达读写**过程中，Host CPU 正文触碰字节数（Host Payload Touch Bytes）**严格为 0**（Host CPU 仅负责提交与轮询 CQ 描述符，严禁参与正文 `memcpy`、编解码或全量 CRC）；
+统一异构存储池的数据平面必须建立在 Host CPU 零数据拷贝的高性能硬件通路上。本验证旨在通过受控传输基准测试与内核/用户态 eBPF 插桩，证明：
+1. **跨节点 URMA / UBMEM 传输**与**本地 NVMe SSD 直达读写**过程中，Host CPU 零数据拷贝（CPU 仅负责下发控制指令与轮询完成队列 CQ，不参与正文搬运，Host Payload Touch Bytes 严格为 0）；
 2. 跨节点有效传输带宽达到物理网络线速的 **$\ge 80\%$**（800G 网卡 $\ge 640\text{ Gbps}$），本地 NVMe SSD 直达顺序读带宽达到设备物理峰值的 **$\ge 80\%$**；
-3. 输出系统级的**《硬件 CapabilityMatrix 探针能力表》**，为上层 QueryPlan 决策引擎提供真实的硬件拓扑时延与带宽参数。
+3. 输出系统级的**《硬件能力矩阵文件 (CapabilityMatrix)》**（即在运行时自动探测各通信链路的带宽、时延等物理参数表，供调度算法使用），为上层 QueryPlan 决策引擎提供真实的硬件拓扑时延与带宽参数。
 
 ### 1.2 最终交付数据与结论产出
 开发人员执行完本方案后，必须输出以下交付件：
-1. **《eBPF CPU 触碰与内存拷贝检测日志表》**（证明 memcpy 调用次数与字节数严格为 0）；
+1. **《eBPF CPU 数据拷贝检测日志表》**（证明 memcpy 调用次数与搬运字节数严格为 0）；
 2. **《各介质路径裸传输带宽与时延曲线表》**（涵盖 URMA, UBMEM, NVMe Direct, Host Memcpy, TCP/IP 对照）；
-3. **《硬件 CapabilityMatrix 探针矩阵文件》**（JSON/CSV 格式，包含介质对、带宽、时延、CPU 触碰开销）；
-4. **《Go / No-Go 判定结论》**：依据线速达成率 $\ge 80\%$ 与 Host Touch = 0 门槛判定。
+3. **《硬件能力矩阵探针文件》**（JSON/CSV 格式，包含介质对、带宽、时延、CPU 拷贝开销）；
+4. **《Go / No-Go 判定结论》**：依据线速达成率 $\ge 80\%$ 与 Host CPU 零数据拷贝门槛判定。
 
 ---
 
@@ -88,7 +88,7 @@ cd ./原型验证代码/PVT-01 && make clean && make
   - Host CPU 仅执行描述符提交与 CQ Polling。
 - **路径 B（NVMe Direct SSD 直达模式）**：
   - 采用 `io_uring` + `O_DIRECT` + Peer-to-Peer DMA；
-  - 数据直接在 NVMe SSD 与 NPU HBM 之间流转，Payload 严禁进入 Host DDR。
+  - 数据直接在 NVMe SSD 与 NPU HBM 之间流转，数据直接在 NVMe SSD 与 NPU HBM 之间流转，绕过 Host DDR。
 - **对照组 C（CPU Memcpy 软中转基准）**：
   - 模拟传统两阶段中转：网卡/SSD $\to$ Host DDR $\to$ Host CPU `memcpy` $\to$ NPU HBM。
 - **对照组 D（标准 TCP/IP Socket 基准）**：
@@ -233,9 +233,9 @@ $$\text{LineRate Efficiency} = \frac{\text{Measured Bandwidth (Gbps)}}{\text{Har
 - 目标：800G URMA 网卡实测有效带宽 $\ge 640\text{ Gbps}$（达成率 $\ge 80\%$）；
 - 目标：NVMe SSD 阵列实测顺序读带宽 $\ge 80\%$ 物理标称值。
 
-### 7.2 Host Payload Touch 判定
+### 7.2 Host CPU 零数据拷贝判定 (Host Payload Touch Ratio)
 $$\text{Host Touch Ratio} = \frac{\text{Host Copied Bytes}}{\text{Total Transferred Payload Bytes}} \times 100\%$$
-- **判定硬指标**：对于 URMA_Direct 与 NVMe_Direct，$\text{Host Touch Ratio}$ **必须严格为 $0\%$**。
+- **判定硬指标**：对于 URMA_Direct 与 NVMe_Direct，$\text{Host Touch Ratio}$（Host CPU 拷贝字节占比）**必须严格为 $0\%$**。
 
 ### 7.3 Host CPU 开销节约比
 $$\text{CPU Saving Ratio} = \frac{\text{Host\_CPU\%}_{\text{memcpy}} - \text{Host\_CPU\%}_{\text{direct}}}{\text{Host\_CPU\%}_{\text{memcpy}}} \times 100\%$$
@@ -260,7 +260,7 @@ $$\text{CPU Saving Ratio} = \frac{\text{Host\_CPU\%}_{\text{memcpy}} - \text{Hos
 - **Go 门槛**：
   1. URMA / UBMEM 跨节点大包传输有效带宽 $\ge 80\%$ 物理线速（$\ge 640\text{ Gbps}$）；
   2. NVMe SSD 直达读取带宽 $\ge 80\%$ 物理峰值；
-  3. 主路径 Host Payload Touch 字节数严格为 0；
+  3. 主路径 Host CPU 拷贝正文字节数严格为 0；
   4. CPU 节约比 $\ge 85\%$。
 - **No-Go 门槛**：
   - 跨节点传输或 SSD 直达仍需 Host CPU 深度参与 memcpy；
@@ -271,14 +271,14 @@ $$\text{CPU Saving Ratio} = \frac{\text{Host\_CPU\%}_{\text{memcpy}} - \text{Hos
 # PVT-01 提前验证交付报告
 
 ## 1. 核心传输与 CPU 触碰指标汇总
-| 传输路径 | 数据块大小 | 实测带宽(Gbps) | 线速达成率 | Host Touch字节数 | CPU占用率 | 判定 |
+| 传输路径 | 数据块大小 | 实测带宽(Gbps) | 线速达成率 | Host CPU拷贝字节数 | CPU占用率 | 判定 |
 |---|---|---|---|---|---|---|
 | URMA Direct | 64MB | 682.0 | 85.25% | 0 Bytes | 0.6% | PASS |
 | UBMEM Direct | 64MB | 745.0 | 93.12% | 0 Bytes | 0.4% | PASS |
 | NVMe Direct | 64MB | 112.5 (14GB/s)| 87.50% | 0 Bytes | 0.8% | PASS |
 | Host Memcpy (对照)| 64MB| 145.0 | 18.12% | 67108864 Bytes | 88.5% | BASELINE |
 
-## 2. 硬件 CapabilityMatrix 探针导出片段 (`capability_matrix.json`)
+## 2. 硬件能力矩阵导出片段 (`capability_matrix.json`)
 ```json
 {
   "paths": {

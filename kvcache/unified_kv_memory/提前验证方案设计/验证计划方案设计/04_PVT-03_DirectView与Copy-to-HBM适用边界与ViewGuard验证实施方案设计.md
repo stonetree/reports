@@ -1,8 +1,8 @@
 # PVT-03：Direct-View 与 Copy-to-HBM 适用边界与 ViewGuard 验证实施方案设计
 
 > **验证 ID**：PVT-03  
-> **验证名称**：Direct-View 与 Copy-to-HBM 适用边界及 ViewGuard 安全验证  
-> **对应证据门**：**E1/E2 路径与决策**  
+> **验证名称**：Direct-View（远端直读）与 Copy-to-HBM（拷贝到本地显存）适用边界及 ViewGuard 安全验证  
+> **对应验证阶段**：**E1/E2 路径选择与安全隔离**  
 > **证伪标记**：**是（证伪“Decode 活跃 KV 默认适合 Direct-View 远端读取”）**  
 > **建议周期**：6~8 人日  
 > **主关联 IR**：`IR-01-07`, `IR-02-04`, `IR-02-05`  
@@ -16,10 +16,10 @@
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 待验证核心命题
-针对业界“通过远端共享内存直接读取（Direct-View）KV 状态以省去数据拷贝”的假设，本验证旨在通过算法原型与实测：
-1. **明确证伪**：**“Decode-Active 活跃 KV Cache 默认适合 Direct-View 远端读取”**这一不实假设。实测证明 Decode 阶段逐 Token 频繁读取远端内存会导致算力严重 Stall，TPOT 尾部延迟急剧恶化；
-2. **界定物理边界**：精确测量并绘制 Direct-View 与 Copy-to-HBM 的延迟交叉曲线，确定重读次数与数据块大小的临界点（Crossover Point）；
-3. **验证安全底线**：验证 `DirectViewGuard` 租约隔离机制，确保在远端节点异常崩溃（Crash）或租约过期时，实现 **$0$ 进程挂死、$0$ 越界段错误（SIGBUS）与 $100\%$ 安全 Fallback**。
+针对业界“通过远端共享内存直接读取（Direct-View：通过跨节点总线直接读取远端显存中的 KV 数据，不产生本地显存拷贝）以省去初始数据搬运”的设想，本验证旨在通过算法原型与实测：
+1. **明确证伪**：**“Decode 活跃生成阶段默认适合 Direct-View 远端直读”**这一设想。实测证明在 Decode 阶段逐 Token 频繁读取远端显存会导致 NPU 算力严重挂起 (Stall)，单字生成延迟 TPOT（Time Per Output Token）尾部时延急剧恶化；
+2. **界定物理边界**：精确测量并绘制 Direct-View 与 Copy-to-HBM（拷贝到本地显存：通过 DMA 将远端数据完整搬运至本地高带宽显存 HBM 中）的延迟交叉曲线，确定重读次数与数据块大小的临界平衡点（Crossover Point）；
+3. **验证安全底线**：验证 `DirectViewGuard`（视图租约安全守卫机制），确保在远端节点异常崩溃（Crash）或租约过期时，实现 **$0$ 进程挂死、$0$ 越界段错误（SIGBUS）与 $100\%$ 安全回滚至本地重算**。
 
 ### 1.2 最终交付数据与结论产出
 开发人员执行完本方案后，必须输出以下交付件：
@@ -332,5 +332,5 @@ $$\text{Degradation Ratio} = \frac{\text{TPOT}_{\text{view}}}{\text{TPOT}_{\text
 - 源节点 Crash 注入测试 (100 次): 0 次进程挂死, 100 次成功回退至本地重算
 
 ## 4. 最终结论
-【Go / Conditional / No-Go】: GO (架构决策与证伪结论双重确认)
+【Go / Conditional / No-Go】: GO (架构决策与证伪依据双重确认)
 ```

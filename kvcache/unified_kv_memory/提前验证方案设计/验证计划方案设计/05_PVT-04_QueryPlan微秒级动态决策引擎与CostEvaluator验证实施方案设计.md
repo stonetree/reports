@@ -1,8 +1,8 @@
 # PVT-04：QueryPlan 微秒级动态决策引擎与 CostEvaluator 验证实施方案设计
 
 > **验证 ID**：PVT-04  
-> **验证名称**：QueryPlan 微秒级动态决策引擎与 Cost Evaluator 验证  
-> **对应证据门**：**E2 决策优越性**  
+> **验证名称**：QueryPlan 动态决策引擎与 CostEvaluator 成本预估模型验证  
+> **对应验证阶段**：**E2 动态调度决策准确性**  
 > **证伪标记**：否（决策能力确认）  
 > **建议周期**：5~7 人日  
 > **主关联 IR**：`IR-01-03`, `IR-01-05`  
@@ -16,9 +16,9 @@
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 待验证核心命题
-物理命中（Raw Hit）并不等于一定带来性能收益。当网络拥塞、前缀过短或请求 Deadline 极其苛刻时，强行远端 Load KV Cache 反而可能比本地 NPU 重新计算（Recompute）更慢。本验证旨在通过算法原型与微基准证明：
-1. **QueryPlan 动态决策引擎**能够在 **$P99 < 5\mu s$** 内，基于实时 Telemetry 链路状态（EWMA 带宽、队列深度）与 NPU 算力吞吐，在 `Local_HBM_Attach`, `Remote_URMA_Load`, `Local_SSD_Restore`, `Recompute` 之间输出全局最优计划；
-2. **CostEvaluator 成本预估模型**的预测误差 **$\text{MAPE} < 20\%$**，决策准确率 **$\ge 90\%$**，且**负收益命中率（选了 Load 但实际慢于 Recompute）严格 $< 1\%$**。
+物理命中（Raw Hit）并不等于一定带来性能收益。当网络拥塞、前缀过短或请求 Deadline（服务最晚容忍时延）极其苛刻时，强行从远端加载 KV Cache 反而可能比本地 NPU 重新计算（Recompute）耗时更长。本验证旨在通过算法原型与微基准测试证明：
+1. **QueryPlan 动态决策引擎**（在微秒级时间内根据链路状态、算力与上下文长度选择最优数据加载或重算路径）能够在 **$P99 < 5\mu s$** 内，基于实时 Telemetry 链路状态（EWMA 带宽、队列深度）与 NPU 算力吞吐，在 `Local_HBM_Attach`, `Remote_URMA_Load`, `Local_SSD_Restore`, `Recompute` 之间输出全局最优执行计划；
+2. **CostEvaluator 成本预估模型**（在发起请求前量化预估各存储路径与重算开销的数学模型）的预测误差 **$\text{MAPE} < 20\%$**，决策准确率 **$\ge 90\%$**，且**负收益命中率（选了 Load 但实际慢于 Recompute）严格 $< 1\%$**。
 
 ### 1.2 最终交付数据与结论产出
 开发人员执行完本方案后，必须输出以下交付件：

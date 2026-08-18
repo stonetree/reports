@@ -2,8 +2,8 @@
 
 > **验证 ID**：PVT-00  
 > **验证名称**：业务流量 Saved-Prefill 收益上限与通信协议加速评估  
-> **对应证据门**：**E0 立项充分性**  
-> **证伪标记**：否（收益前提确认）  
+> **对应验证阶段**：**E0 业务收益前提确认**  
+> **证伪标记**：否（业务收益前提确认）  
 > **建议周期**：4~6 人日  
 > **主关联 IR**：`IR-02-11`, `IR-02-12`  
 > **核心 SRS / SR23 锚点**：  
@@ -16,9 +16,9 @@
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 待验证核心命题
-大模型推理中，输入预计算阶段（Prefill）计算量大、耗时长。本验证旨在通过受控 Benchmark 与底层网络 Micro-Benchmark 交叉比对，探明在不同复用率特征（30%、50%、70%、90%、98%）及不同长文本场景下：
-1. 外接 KVCache 存储池相比纯算力重算（Recompute），能否取得明确的端到端 TTFT 净时间节省（Saved-Prefill）；
-2. 采用 UBMEM 共享内存协议相比 URMA / 标准 RDMA 通信协议，在元数据处理与数据传输阶段带来的性能增益上限。
+大模型推理中，输入预计算阶段（Prefill，即首字生成前的 Prompt 计算）计算量大、耗时长。本验证旨在通过受控基准测试与底层网络微基准测试交叉比对，探明在不同前缀复用率（30%、50%、70%、90%、98%）及不同长文本场景下：
+1. 外接 KVCache 存储池相比纯算力重算（Recompute），能否取得明确的端到端 TTFT（Time To First Token，首字生成延迟）净时间节省（即 Saved-Prefill 收益：利用已缓存的 KV Cache 避免重复计算 Prompt 所节省的时间）；
+2. 采用 UBMEM（统一总线内存直通共享协议）相比 URMA（通用远程直接内存访问）/ 标准 RDMA 通信协议，在元数据处理与数据传输阶段带来的性能增益上限。
 
 ### 1.2 最终交付数据与结论产出
 开发人员执行完本方案后，必须输出以下交付件：
@@ -116,9 +116,9 @@ python3 ./原型验证代码/PVT-00/traffic_generator.py --workload workload_50p
 
 ### 4.1 实验环境、测试模型基线与源码版本锁定
 - **模型权重基线路径**：
-  - 主测模型：`/models/Qwen/Qwen2.5-72B-Instruct`（FP16，80 层，GQA $H_{kv}=8$, $D_{head}=128$，单 Token KV 大小为 $320\text{ KB/Token}$，TP=8 单卡 $40\text{ KB/Token}$）；
+  - 主测模型：`/models/Qwen/Qwen2.5-72B-Instruct`（FP16，80 层，GQA 分组查询注意力 $H_{kv}=8$, $D_{head}=128$，单 Token KV 大小为 $320\text{ KB/Token}$，张量并行 TP=8 单卡 $40\text{ KB/Token}$）；
   - 备选长文模型：`/models/meta-llama/Llama-3.1-70B-Instruct`（FP16/FP8）；
-  - MLA 压缩态模型：`/models/deepseek-ai/DeepSeek-V3`（FP8 MLA，$D_{latent}=512$，单 Token 仅 $512\text{ Bytes}$）。
+  - MLA 压缩态模型：`/models/deepseek-ai/DeepSeek-V3`（FP8 MLA 多头潜变量注意力，$D_{latent}=512$，单 Token 仅 $512\text{ Bytes}$）。
 - **推理引擎与存储组件版本锁定**：
   - `vLLM`：锁定 Commit Tag `v0.6.3.post1`；
   - `Mooncake`：锁定 Release Tag `v0.2.0-rc1`。
@@ -274,7 +274,7 @@ $$T_{saved\_theoretical} = TTFT_{recompute\_100K} - \left( T_{meta} + T_{transfe
 
 ### 7.3 收益开销比 (Benefit-to-Overhead Ratio)
 $$\text{Benefit Ratio} = \frac{T_{recompute}(S_{prefix})}{T_{meta} + T_{transfer} + T_{attach}}$$
-- 当 $\text{Benefit Ratio} > 2.0\times$ 时，判定该复用率具有显著立项正价值。
+- 当 $\text{Benefit Ratio} > 2.0\times$ 时，判定该复用率具有显著工程落地价值。
 
 ---
 

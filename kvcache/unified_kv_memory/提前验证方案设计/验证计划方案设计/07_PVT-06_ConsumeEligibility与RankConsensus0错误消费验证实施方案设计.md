@@ -1,8 +1,8 @@
 # PVT-06：ConsumeEligibility 与 RankConsensus 0 错误消费验证实施方案设计
 
 > **验证 ID**：PVT-06  
-> **验证名称**：ConsumeEligibility 语义校验与 RankConsensus 多卡空间共识验证  
-> **对应证据门**：**E1 可消费正确性**  
+> **验证名称**：ConsumeEligibility 消费资格校验与 RankConsensus 多卡状态同步验证  
+> **对应验证阶段**：**E1 多卡状态同步与消费正确性**  
 > **证伪标记**：否（可消费性安全底线确认）  
 > **建议周期**：5~7 人日  
 > **主关联 IR**：`IR-01-10`, `IR-01-11`, `IR-02-01`, `IR-02-05`  
@@ -16,9 +16,9 @@
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 待验证核心命题
-物理命中（Raw Hit）绝不等于可以安全消费的有效命中（Usable Hit）。如果命中的 KV Cache 存在模型版本冲突、Tokenizer/ChatTemplate 不匹配、Ready 写入未就绪或多卡状态分歧，强行消费将导致输出胡言乱语、多卡死锁甚至越权数据泄露。本验证旨在通过算法原型与冲突注入证明：
-1. **ConsumeEligibility 6 维语义校验引擎**能够在微秒级内（$< 5\mu s$）对候选 KV 进行完整校验，在各类冲突注入下实现 **错误消费数、过期消费数、越权消费数严格为 0**，冲突拦截率 **$100\%$**；
-2. **RankConsensus 多卡空间共识机制**在 $TP=8$ 张量并行下，基于共享内存/UBMEM 的多卡共识耗时 **$P99 < 100\mu s$**；在单卡丢包或不一致时，能够 $100\%$ 正确决策协同 Fallback 重算，杜绝多卡死锁与状态分歧。
+物理命中（Raw Hit）绝不等于可以安全消费的有效命中（Usable Hit）。如果命中的 KV Cache 存在模型版本冲突、Tokenizer/ChatTemplate 不匹配、Ready 写入未就绪或多卡状态分歧，强行消费将导致输出乱码、多卡集合通信死锁甚至越权数据泄露。本验证旨在通过算法原型与冲突注入证明：
+1. **ConsumeEligibility 6 维语义校验引擎**（对命中 KV 的模型架构、Tokenizer 词表哈希、Prompt 模板哈希、LoRA 适配器、Ready 就绪位与租约有效性等 6 维语义进行微秒级合法性检查）能够在微秒级内（$< 5\mu s$）对候选 KV 进行完整校验，在各类冲突注入下实现 **错误消费数、过期消费数、越权消费数严格为 0**，冲突拦截率 **$100\%$**；
+2. **RankConsensus 多卡状态同步机制**（在张量并行 TP=8 时，通过共享内存同步各卡命中状态与一致性动作）在 $TP=8$ 张量并行下，基于共享内存/UBMEM 的多卡状态同步耗时 **$P99 < 100\mu s$**；在单卡丢包或不一致时，能够 $100\%$ 正确决策协同 Fallback 重算，杜绝多卡死锁与状态分歧。
 
 ### 1.2 最终交付数据与结论产出
 开发人员执行完本方案后，必须输出以下交付件：
@@ -29,7 +29,7 @@
 
 ---
 
-## 2. 核心数据结构与 xxHash64 / 空间共识设计
+## 2. 核心数据结构与 xxHash64 / 多卡状态同步设计
 
 ### 2.1 6 维语义元数据与 xxHash64 标准哈希定义
 
@@ -110,7 +110,7 @@ EligibilityResult ConsumeEligibility::evaluate(const SemanticTag6D& cached,
 }
 ```
 
-### 2.3 TP=8 多卡 POSIX 共享内存空间共识与 NCCL/HCCL 协同防死锁协议
+### 2.3 TP=8 多卡 POSIX 共享内存状态同步与 NCCL/HCCL 协同防死锁协议
 
 为消除单机模拟偏差，8 卡间通过 POSIX 共享内存（`/dev/shm/kv_consensus_bitmap`）进行无锁原子 Bitmap 交换。
 
@@ -153,7 +153,7 @@ sequenceDiagram
 原型验证代码/PVT-06/
 ├── consume_eligibility.h   # 6 维语义强校验引擎 (xxHash64) 与部分前缀拼接计划头文件
 ├── consume_eligibility.cc  # 模型/Tokenizer/模板/LoRA/Ready/Lease 6 维匹配算法实现
-├── rank_consensus_bench.cc # TP=8 多卡 POSIX 共享内存空间共识耗时测量与协同 Fallback 压测工具
+├── rank_consensus_bench.cc # TP=8 多卡 POSIX 共享内存多卡状态同步耗时测量与协同 Fallback 压测工具
 ├── Makefile                # 编译 rank_consensus_bench 的工程构建文件 (make -j16)
 └── test_correctness.py     # 注入 8 类语义冲突与验证输出 Token 100% 正确性的测试脚本
 ```
@@ -164,11 +164,11 @@ sequenceDiagram
 cd ./原型验证代码/PVT-06 && make clean && make
 ```
 - **6 维校验微基准**：压测 `ConsumeEligibility::evaluate()` 函数单次耗时；
-- **RankConsensus 微基准**：基于 `/dev/shm` 共享内存 Bitmap 测量 8 卡空间共识耗时。
+- **RankConsensus 微基准**：基于 `/dev/shm` 共享内存 Bitmap 测量 8 卡多卡状态同步耗时。
 
 ### 3.2 两组实验对照设置
 - **对照组 A（无校验直读基线）**：关闭语义校验与多卡共识，直接使用物理匹配的 KV 数据；
-- **实验组 B（ConsumeEligibility + RankConsensus 保护组）**：开启 6 维校验与分布式空间共识。
+- **实验组 B（ConsumeEligibility + RankConsensus 保护组）**：开启 6 维校验与分布式多卡状态同步。
 
 ---
 
@@ -207,8 +207,8 @@ cd ./原型验证代码/PVT-06 && make clean && make
 ./rank_consensus_bench --mode single_eval --iterations 100000
 ```
 
-### 步骤 3：测量 TP=8 多进程空间共识时延
-启动 8 个并发进程，循环执行 10,000 次 8 卡 Bitmap 空间共识，记录 P50, P90, P99 时延：
+### 步骤 3：测量 TP=8 多进程多卡状态同步时延
+启动 8 个并发进程，循环执行 10,000 次 8 卡 Bitmap 多卡状态同步，记录 P50, P90, P99 时延：
 ```bash
 ./rank_consensus_bench --mode tp8_shm_consensus --ranks 8 --iterations 10000
 ```
@@ -237,7 +237,7 @@ python3 ./原型验证代码/PVT-06/test_correctness.py --mode with_check
 ### 步骤 10：统计错误消费数与冲突拦截率
 记录错误消费数（必须为 0）与拦截成功率（必须为 100%）。
 
-### 步骤 11：对账空间共识开销与整体 Prefill 耗时占比
+### 步骤 11：对账多卡状态同步开销与整体 Prefill 耗时占比
 验证共识耗时是否占总 TTFT 比例 $< 0.1\%$。
 
 ### 步骤 12：输出判定结论与立项证据包。
@@ -305,7 +305,7 @@ $$\text{Wrong Consumption Count} = \sum (\text{Model Mismatch} + \text{Dirty Rea
 
 ## 1. 语义校验与多卡共识性能
 - 单次 6 维语义校验耗时: 0.42 us (PASS, 门槛 < 5.0 us)
-- TP=8 空间共识 P99 时延: 38.2 us (PASS, 门槛 < 100.0 us)
+- TP=8 多卡状态同步 P99 时延: 38.2 us (PASS, 门槛 < 100.0 us)
 
 ## 2. 冲突拦截与正确性实测
 - 注入 8 大冲突用例总数: 8 类共 1,000 次
