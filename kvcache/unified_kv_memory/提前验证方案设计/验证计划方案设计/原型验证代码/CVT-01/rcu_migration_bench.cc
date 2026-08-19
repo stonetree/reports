@@ -1,4 +1,4 @@
-// rcu_migration_bench.cc - 页迁移/Defrag 软件 RCU 与硬件 Atomic Remap 必要性证伪微基准
+// rcu_migration_bench.cc - 页迁移/Defrag 软件 RCU 与硬件 Atomic Remap 必要性证伪微基准 (CVT-01)
 // 测量 32 个并发 Reader 持续读取下，Stop-the-world 锁表 vs 软件 RCU Copy-on-Migrate 的最大停顿与 TPOT 抖动
 #include <iostream>
 #include <vector>
@@ -19,7 +19,7 @@ struct MigrationMetrics {
 };
 
 int main(int argc, char** argv) {
-    std::cout << "=== CVT-02: Page Migration Software RCU vs Hardware Atomic Remap Benchmark ===\n";
+    std::cout << "=== CVT-01: Page Migration Software RCU vs Hardware Atomic Remap Benchmark ===\n";
     std::cout << "Extent Size: 16 MB, Concurrent Readers: 32 (100K QPS)\n";
 
     // 方案对比实测值 (基线读延迟 2.5us)

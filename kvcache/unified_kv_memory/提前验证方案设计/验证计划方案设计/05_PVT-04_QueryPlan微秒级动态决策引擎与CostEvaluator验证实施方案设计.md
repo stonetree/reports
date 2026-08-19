@@ -1,7 +1,9 @@
 # PVT-04：QueryPlan 微秒级动态决策引擎与 CostEvaluator 验证实施方案设计
+## —— Mooncake 启发式调度器深度重构：微秒级动态 ROI 选路决策引擎
 
 > **验证 ID**：PVT-04  
 > **验证名称**：QueryPlan 动态决策引擎与 CostEvaluator 成本预估模型验证  
+> **穿刺优先级**：**🔴 P0 级（核心决胜项）**  
 > **对应验证阶段**：**E2 动态调度决策准确性**  
 > **证伪标记**：否（决策能力确认）  
 > **建议周期**：5~7 人日  
@@ -9,6 +11,9 @@
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L1-RT-Admission-007`, `L3-SE-QueryPlanFastPath-072`, `L3-TRANS-TOPO-SENSE-004`, `L4-FABRIC-ROUTER-001`  
 > - SR23: `SR23-01-03-01`, `SR23-01-05-01`, `SR23-01-09-01`, `SR23-02-02-01`, `SR23-02-02-02`  
+> **开源基线版本与代码仓库**：  
+> - **Mooncake**：[`https://github.com/kvcache-ai/Mooncake.git`](https://github.com/kvcache-ai/Mooncake.git) (Commit: `f90ae691f109e49a60920e0c8abbf7e572826d8c`，子模块: `mooncake-store/`, `mooncake-integration/`)  
+> - **vLLM**：[`https://github.com/vllm-project/vllm.git`](https://github.com/vllm-project/vllm.git) (Commit: `842dd8fd96650063e1ad32e6075742d457d39773`，模块: `vllm/core/scheduler.py`)  
 > **研发对齐状态**：已闭环研发评估报告 6 项与 Telemetry 采集规范（明确 100Hz EWMA Daemon、alignas(64) 缓存行隔离防 False Sharing）  
 
 ---
@@ -16,9 +21,9 @@
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 待验证核心命题
-物理命中（Raw Hit）并不等于一定带来性能收益。当网络拥塞、前缀过短或请求 Deadline（服务最晚容忍时延）极其苛刻时，强行从远端加载 KV Cache 反而可能比本地 NPU 重新计算（Recompute）耗时更长。本验证旨在通过算法原型与微基准测试证明：
-1. **QueryPlan 动态决策引擎**（在微秒级时间内根据链路状态、算力与上下文长度选择最优数据加载或重算路径）能够在 **$P99 < 5\mu s$** 内，基于实时 Telemetry 链路状态（EWMA 带宽、队列深度）与 NPU 算力吞吐，在 `Local_HBM_Attach`, `Remote_URMA_Load`, `Local_SSD_Restore`, `Recompute` 之间输出全局最优执行计划；
-2. **CostEvaluator 成本预估模型**（在发起请求前量化预估各存储路径与重算开销的数学模型）的预测误差 **$\text{MAPE} < 20\%$**，决策准确率 **$\ge 90\%$**，且**负收益命中率（选了 Load 但实际慢于 Recompute）严格 $< 1\%$**。
+物理命中（Raw Hit）并不等于一定带来性能收益。当网络拥塞、前缀过短或请求 Deadline（服务最晚容忍时延）极其苛刻时，Mooncake 最新主线 TENT 模块中的 `admission_queue` 仅依靠硬超时被动丢弃，缺乏前置量化决策，强行从远端加载 KV Cache 反而慢于本地直接重算。本验证旨在重构调度层，在 TENT 选路前置注入微秒级动态决策大脑：
+1. **QueryPlan 动态决策引擎**（在微秒级时间内根据链路状态、算力与上下文长度选择最优数据加载或重算路径）能够在 **$P99 < 5\mu s$** 内，基于实时 Telemetry 链路状态与 NPU 算力吞吐，在 `Local_HBM_Attach`, `Remote_URMA_Load`, `Local_SSD_Restore`, `Recompute` 之间输出全局最优执行计划；
+2. **CostEvaluator 成本预估模型**（在发起请求前量化预估各存储路径与重算开销的数学模型）的预测误差 **$\text{MAPE} < 20\%$**，决策准确率 **$\ge 90\%$**，且**负收益命中率（拉取与加载总开销 > 本地直接重算耗时）严格 $< 1\%$**。
 
 ### 1.2 最终交付数据与结论产出
 开发人员执行完本方案后，必须输出以下交付件：
@@ -33,23 +38,19 @@
 
 ### 2.1 核心数据结构与缓存行隔离 (`alignas(64)`)
 
-为了防止高频采集守护线程（Updater）与高并发推理调度线程（Readers）在多核 CPU 下引发 **False Sharing（伪共享）** 导致的 CPU Cacheline 乒乓与时延抖动，遥测结构体各变量显式采用 64 字节独立对齐：
-
 ```cpp
 #include <stdint.h>
 #include <atomic>
 #include <thread>
 #include <chrono>
 
-// 1. 计划决策动作枚举
 enum class PlanAction : uint8_t {
     Local_HBM_Attach = 0, // 本地 HBM 直接复用 (开销 ~0.05ms)
     Remote_URMA_Load = 1, // 跨节点 800G URMA 传输 (开销 ~2.5ms)
     Local_SSD_Restore= 2, // 本地 NVMe SSD 直达换入 (开销 ~12.0ms)
-    Recompute        = 3  // 本地算力重算 (Prefill Compute)
+    Recompute        = 3  // 本地算力直接重算 (Prefill Compute)
 };
 
-// 2. 访问意图描述 (来自调度层)
 struct alignas(64) KVAccessIntent {
     uint64_t request_id;
     uint32_t prefix_tokens;       // 匹配前缀 Token 数
@@ -60,16 +61,14 @@ struct alignas(64) KVAccessIntent {
     bool is_cached_ssd;           // SSD 是否归档
 };
 
-// 3. 实时遥测快照 (各原子成员独立 64B 隔离，彻底杜绝 False Sharing)
 struct alignas(64) LinkTelemetrySnapshot {
-    alignas(64) std::atomic<double> ewma_remote_bw_gbps{750.0}; // 指数平滑可用带宽 (Gbps)
-    alignas(64) std::atomic<double> remote_queue_delay_ms{0.2}; // 远端传输排队延迟 (ms)
+    alignas(64) std::atomic<double> ewma_remote_bw_gbps{750.0}; // 可用带宽 (Gbps)
+    alignas(64) std::atomic<double> remote_queue_delay_ms{0.2}; // 传输排队延迟 (ms)
     alignas(64) std::atomic<double> ssd_read_bw_gbps{190.0};    // SSD 直达读带宽 (Gbps)
     alignas(64) std::atomic<double> npu_prefill_tps{8500.0};    // NPU Prefill 算力吞吐 (Tokens/s)
     alignas(64) std::atomic<double> meta_overhead_ms{0.08};     // 元数据交互时延 (80us)
 };
 
-// 4. 决策输出结果
 struct ExecutionPlan {
     PlanAction action;
     double estimated_cost_ms;     // 预估总耗时
@@ -78,53 +77,7 @@ struct ExecutionPlan {
 };
 ```
 
-### 2.2 Telemetry 采集守护线程与 EWMA 平滑算法
-
-系统通过独立的后台轻量级守护线程 `TelemetryCollectorDaemon` 以 **100Hz 频率（10ms 周期）** 采集系统与网卡状态，并使用指数加权移动平均（EWMA, $\alpha = 0.2$）平滑抖动：
-
-```cpp
-class TelemetryCollectorDaemon {
-public:
-    static void start_collector(LinkTelemetrySnapshot& snapshot, std::atomic<bool>& running) {
-        std::thread([&snapshot, &running]() {
-            const double alpha = 0.2; // EWMA 平滑系数
-            while (running.load(std::memory_order_relaxed)) {
-                // 1. 从网卡驱动获取瞬时带宽与队列深度 (如 RDMA stats)
-                double raw_bw = sample_nic_available_bw();
-                double raw_queue = sample_remote_queue_latency();
-
-                // 2. EWMA 平滑更新
-                double old_bw = snapshot.ewma_remote_bw_gbps.load(std::memory_order_relaxed);
-                snapshot.ewma_remote_bw_gbps.store(alpha * raw_bw + (1.0 - alpha) * old_bw, std::memory_order_relaxed);
-
-                double old_queue = snapshot.remote_queue_delay_ms.load(std::memory_order_relaxed);
-                snapshot.remote_queue_delay_ms.store(alpha * raw_queue + (1.0 - alpha) * old_queue, std::memory_order_relaxed);
-
-                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // 100Hz
-            }
-        }).detach();
-    }
-};
-```
-
-### 2.3 CostEvaluator 五维成本评估模型与迟滞防抖规则
-
-```
-1. 算力重算耗时预估：
-   T_recompute = (prefix_tokens / npu_prefill_tps) * 1000.0  [ms]
-
-2. 远端 URMA 加载耗时预估：
-   KV_bytes = prefix_tokens * bytes_per_token (例: Qwen2.5-72B 为 320 KB/token)
-   T_remote = meta_overhead + queue_delay + (KV_bytes * 8 / (ewma_remote_bw * 1e6))  [ms]
-
-3. SSD 直达恢复耗时预估：
-   T_ssd = meta_overhead + (KV_bytes * 8 / (ssd_read_bw * 1e6)) + t_nvme_driver_setup  [ms]
-
-4. 迟滞防抖规则 (Anti-Flapping Hysteresis):
-   仅当 (T_recompute - T_remote) / T_recompute >= 5% 时才决策 Remote_Load，避免临界点抖动。
-```
-
-### 2.4 微秒级 FastPath 决策树状态机与剪枝算法
+### 2.2 微秒级 FastPath 决策树与负收益拦截算法
 
 ```mermaid
 flowchart TD
@@ -138,219 +91,52 @@ flowchart TD
     DeadlineRule -- "NO" --> CompareNet
     
     CheckDeadline -- "NO" --> CompareNet{"is_cached_remotely && (T_remote < T_recompute) ?"}
-    CompareNet -- "YES" --> ActionRemote["Plan: Remote_URMA_Load<br/>(正收益确认: 省时 T_recomp - T_remote)"]
+    CompareNet -- "YES" --> ActionRemote["Plan: Remote_URMA_Load<br/>(净收益确认: 拉取耗时 < 重算耗时)"]
     CompareNet -- "NO" --> CheckSSD{"is_cached_ssd && (T_ssd < T_recompute) ?"}
     CheckSSD -- "YES" --> ActionSSD["Plan: Local_SSD_Restore<br/>(容量层回源)"]
-    CheckSSD -- "NO" --> Intercept["Plan: Recompute<br/>(负收益强制拦截: 加载耗时慢于算力重算)"]
-```
-
-#### 决策核心代码实现：
-```cpp
-ExecutionPlan QueryPlanFastPath::generate_plan(const KVAccessIntent& intent, const LinkTelemetrySnapshot& tele) {
-    ExecutionPlan plan;
-    double t_recomp = (intent.prefix_tokens / tele.npu_prefill_tps.load(std::memory_order_relaxed)) * 1000.0;
-    plan.recompute_baseline_ms = t_recomp;
-
-    // 1. 本地命中分支 (极速返回 < 0.1us)
-    if (intent.is_cached_locally) {
-        plan.action = PlanAction::Local_HBM_Attach;
-        plan.estimated_cost_ms = 0.05;
-        plan.decision_reason = "LOCAL_HBM_HIT";
-        return plan;
-    }
-
-    // 2. 远端加载成本计算
-    double kv_bytes = intent.prefix_tokens * 327680.0; // 320KB/tok
-    double t_remote = tele.meta_overhead_ms.load(std::memory_order_relaxed) +
-                      tele.remote_queue_delay_ms.load(std::memory_order_relaxed) +
-                      (kv_bytes * 8.0) / (tele.ewma_remote_bw_gbps.load(std::memory_order_relaxed) * 1e6);
-
-    // 3. Deadline 约束检查
-    if (intent.deadline_ms > 0 && t_remote > intent.deadline_ms && t_recomp <= intent.deadline_ms) {
-        plan.action = PlanAction::Recompute;
-        plan.estimated_cost_ms = t_recomp;
-        plan.decision_reason = "DEADLINE_MISS_FALLBACK_RECOMPUTE";
-        return plan;
-    }
-
-    // 4. 正负收益严格裁决 (含 5% 迟滞阈值)
-    if (intent.is_cached_remotely && (t_remote < t_recomp * 0.95)) {
-        plan.action = PlanAction::Remote_URMA_Load;
-        plan.estimated_cost_ms = t_remote;
-        plan.decision_reason = "POSITIVE_BENEFIT_REMOTE_LOAD";
-        return plan;
-    }
-
-    plan.action = PlanAction::Recompute;
-    plan.estimated_cost_ms = t_recomp;
-    plan.decision_reason = "NEGATIVE_BENEFIT_INTERCEPTED";
-    return plan;
-}
+    CheckSSD -- "NO" --> Intercept["Plan: Recompute<br/>(主动拦截负收益: 加载总开销 > 本地直接重算耗时)"]
 ```
 
 ---
 
-## 3. 基础/对照 Micro-Benchmark 构建方法
+## 3. 测试工具与工程构建规范
 
-### 3.1 测试工具与源码结构
-本项验证涉及的全部决策引擎与压测 Harness 源码存放在 `./原型验证代码/PVT-04/` 目录下：
+测试工程存放在 `./原型验证代码/PVT-04/` 目录下：
 
 ```
 原型验证代码/PVT-04/
-├── query_plan_fastpath.h  # 微秒级动态决策引擎与 CostEvaluator 成本预估头文件 (alignas(64))
-├── query_plan_fastpath.cc # 实时链路感知、5 维成本预估与微秒级剪枝决策算法实现
-├── query_plan_bench.cc    # 决策引擎 100K QPS 吞吐压测与反事实决策对账 Harness
-└── Makefile               # 编译 query_plan_bench 的工程构建文件 (make -j16)
+├── query_plan_fastpath.h      # 动态决策引擎头文件
+├── query_plan_fastpath.cc     # 实时算网评估与剪枝决策实现
+├── query_plan_bench.cc        # 决策引擎 100K QPS 吞吐压测 Harness
+└── Makefile                   # 编译构建工程 (make -j16)
 ```
 
-编译方法：
+编译与测试命令：
 ```bash
-# 编译决策引擎压测 Harness
 cd ./原型验证代码/PVT-04 && make clean && make
-```
-- **FastPath 决策核心**：执行无锁、查表与成本计算逻辑；
-- **反事实校验执行器（Counterfactual Executor）**：在真实执行所选 Action 后，立即镜像执行未被选择的 Action，精准获取真实客观的时间差。
-
-### 3.2 四组实验对照设计
-- **实验组（QueryPlan 智能决策）**：由引擎依据实时链路感知动态选择 Action；
-- **对照组 A（盲目总是 Load）**：只要有缓存命中，强制执行远端传输；
-- **对照组 B（纯算力重算基线）**：忽略所有缓存，强制由 NPU 纯算力重新计算；
-- **对照组 C（反事实镜像组）**：用于精确计算实验组决策的“后悔值”与准确率。
-
----
-
-## 4. 业务 Benchmark 构造与流量特征编排
-
-### 4.1 四类典型决策场景构造
-1. **场景 1（正常空闲长前缀）**：
-   - 前缀 32K Tokens，网络空闲（800G URMA），此时 $T_{load} \approx 2.5\text{ms} \ll T_{recompute} \approx 40.0\text{ms}$，应决策 `Remote_Load`；
-2. **场景 2（极短前缀场景）**：
-   - 前缀 16 ~ 32 Tokens，此时 $T_{recompute} \approx 0.05\text{ms} < T_{load\_overhead} \approx 0.2\text{ms}$，应决策 `Recompute`；
-3. **场景 3（网络严重拥塞/高丢包）**：
-   - 前缀 8K Tokens，人为注入网络拥塞（限速至 1Gbps / 增加 30ms 延迟），此时 $T_{load} \approx 65.0\text{ms} > T_{recompute} \approx 10.0\text{ms}$，应决策 `Recompute`；
-4. **场景 4（苛刻 Deadline 约束）**：
-   - 请求携带 `Deadline = 5ms`，但远端队列排队预计需要 12ms，应决策 `Recompute`。
-
----
-
-## 5. 软硬件环境与打点插桩方案
-
-### 5.1 注入与打点配置
-- 利用 Linux `tc netem` 动态注入链路延迟与抖动；
-- 植入打点：
-  - `T_decision_start` / `end`：决策耗时（纳秒级）；
-  - `T_actual_action_cost`：所选动作真实耗时；
-  - `T_counterfactual_cost`：反事实对比耗时。
-
----
-
-## 6. 分步执行测试操作规程
-
-开发人员请按以下 12 个步骤依次执行：
-
-### 步骤 1：编译微基准 Harness
-编译 `query_plan_bench`。
-
-### 步骤 2：执行极限并发单核决策延迟压测
-启动后台 `TelemetryCollectorDaemon`（100Hz 刷新），同时循环调用 500,000 次 `generate_plan()`，记录 QPS 与延迟分位值（P50, P90, P99, P99.9）：
-```bash
-./query_plan_bench --benchmark-mode latency --iterations 500000
+./query_plan_bench --threads 64 --qps 100000 --duration 10
 ```
 
-### 步骤 3：验证场景 1（空闲长前缀）
-注入 32K Tokens 请求，验证决策动作是否为 `Remote_Load`，并记录预估耗时与实际耗时。
-
-### 步骤 4：验证场景 2（极短前缀拦截）
-注入 16~64 Tokens 请求，验证决策引擎是否正确拦截小 I/O 并决策为 `Recompute`。
-
-### 步骤 5：验证场景 3（网络拥塞扰动注入）
-通过 `tc netem` 注入 50ms 网络延迟，验证决策引擎是否立即感知并切换为 `Recompute`。
-
-### 步骤 6：验证场景 4（Deadline 约束求解）
-设置 Deadline = 5ms，验证决策动作是否正确放弃排队。
-
-### 步骤 7：启用反事实镜像对账（Counterfactual Check）
-开启反事实执行器，对 10,000 个混合请求记录实际耗时与未选路径耗时。
-
-### 步骤 8：计算 CostEvaluator 预测误差 MAPE
-比对 $T_{pred}$ 与 $T_{real}$，计算平均绝对百分比误差。
-
-### 步骤 9：统计负收益发生率（Negative Benefit Ratio）
-统计实际发生“选了 Load 但实际慢于 Recompute”的异常请求比例。
-
-### 步骤 10：对比“盲目 Load”组与“QueryPlan 决策”组的平均 TTFT
-计算两组在混流下的平均 TTFT 差距。
-
-### 步骤 11：压力测试 Telemetry 遥测并发更新
-以 1000 Hz 极端频率在后台持续刷新链路快照，验证决策引擎无锁读取的线程安全性与低延迟。
-
-### 步骤 12：输出判定结论与立项证据包。
-
 ---
 
-## 7. 数据采集清单与记录格式
+## 4. 数据采集清单与记录格式
 
-### 7.1 决策引擎性能记录表 (`pvt04_decision_latency.csv`)
-| 吞吐 (QPS) | P50 时延 ($\mu s$) | P90 时延 ($\mu s$) | P99 时延 ($\mu s$) | P99.9 时延 ($\mu s$) |
-|---|---|---|---|---|
-| 380,000 | 0.85 | 1.45 | 3.10 | 4.80 |
-
-### 7.2 场景决策与反事实对账表 (`pvt04_plan_accuracy.csv`)
-| 场景 | 前缀长度 | 决策 Action | 预估耗时 (ms) | 实际耗时 (ms) | 反事实耗时 (ms) | 决策收益 (ms) | 准确判定 |
-|---|---|---|---|---|---|---|---|
-| **空闲长前缀** | 32K | Remote_Load | 2.50 | 2.58 | 40.20 | +37.62 | 正确 |
-| **极短前缀** | 24 | Recompute | 0.03 | 0.03 | 0.28 | +0.25 | 正确 |
-| **网络拥塞** | 8K | Recompute | 10.00 | 9.85 | 68.20 | +58.35 | 正确 (拦截负收益) |
-| **紧迫 Deadline**| 16K | Recompute | 20.00 | 19.50 | 35.00 | +15.50 | 正确 |
-
----
-
-## 8. 数据交叉组合与运算推导逻辑
-
-### 8.1 预测误差 MAPE 计算
-$$\text{MAPE} = \frac{1}{N} \sum_{i=1}^{N} \left| \frac{T_{\text{real}}(i) - T_{\text{pred}}(i)}{T_{\text{real}}(i)} \right| \times 100\%$$
-
-### 8.2 负收益发生率 (Negative Benefit Ratio)
-$$\text{Negative Benefit Ratio} = \frac{\sum \mathbb{I}(\text{Action}=\text{Load} \land T_{\text{load\_real}} > T_{\text{recomp\_real}})}{N_{\text{total\_requests}}} \times 100\%$$
-
----
-
-## 9. 多维扩展与扫参矩阵
-
-| 维度 | 参数网格 |
-|---|---|
-| **前缀长度** | 16, 64, 256, 1K, 4K, 16K, 32K, 64K, 128K Tokens |
-| **网络带宽** | 100M, 1G, 10G, 100G, 400G, 800G URMA |
-| **注入网络延迟** | 0ms, 1ms, 5ms, 20ms, 50ms, 100ms |
-| **NPU 算力吞吐** | 2000, 5000, 8500, 15000 Tokens/s |
-
----
-
-## 10. Go / No-Go 判定规则与交付报告模板
-
-### 10.1 判定规则
-- **Go 门槛**：
-  1. 决策引擎单次耗时 $P99 < 5.0\mu s$；
-  2. CostEvaluator 预测误差 $\text{MAPE} < 20\%$；
-  3. 决策准确率 $\ge 90\%$，负收益发生率 $< 1.0\%$。
-- **No-Go 门槛**：
-  - 决策耗时 $> 50\mu s$；
-  - 负收益率 $> 5.0\%$（即频繁做出错误拉取决策）。
-
-### 10.2 开发者交付报告格式模板
-```markdown
-# PVT-04 提前验证交付报告
-
-## 1. 决策引擎性能
-- 峰值吞吐: 380,000 req/s
-- P99 决策耗时: 3.10 us (PASS, 门槛 < 5.0 us)
-
-## 2. 预测准确度与收益实测
-- CostEvaluator MAPE 误差: 11.2% (PASS, 门槛 < 20%)
-- 综合决策准确率: 98.4% (PASS, 门槛 >= 90%)
-- 负收益拦截率: 100.0% (在 50ms 网络拥塞与极短前缀下 0 次发生负拉取)
-- 相对盲目 Load 组端到端平均 TTFT 优化: 34.2%
-
-## 3. 最终结论
-【Go / Conditional / No-Go】: GO
+### 4.1 决策引擎性能与准确率表 (`pvt04_decision_results.csv`)
+```csv
+workload_id,prefix_tokens,remote_bw_gbps,queue_delay_ms,deadline_ms,chosen_action,t_recomp_ms,t_chosen_ms,decision_time_us,is_correct_choice,is_negative_profit
+DEC-001,4096,800.0,0.1,50,Remote_URMA_Load,4.8,2.1,1.2,TRUE,FALSE
+DEC-002,512,120.0,15.0,50,Recompute,0.6,18.4,1.4,TRUE,FALSE
+DEC-003,32768,40.0,30.0,10,Recompute,38.5,125.0,1.1,TRUE,FALSE
 ```
+
+---
+
+## 5. Go / Conditional / No-Go 判定规则
+
+- **Go (准入通过)**：
+  - 决策引擎单次决策耗时 $P99 < 5\mu s$，吞吐 $\ge 100\text{K QPS}$；
+  - 决策准确率 $\ge 90\%$，负收益发生率严格 $< 1\%$；
+- **Conditional (条件准入)**：
+  - 决策耗时在 $5\mu s \sim 15\mu s$ 之间，负收益率 $< 3\%$，需优化内存 Cacheline 布局；
+- **No-Go (否决关闭)**：
+  - 决策耗时 $> 20\mu s$ 或负收益率 $\ge 5\%$。

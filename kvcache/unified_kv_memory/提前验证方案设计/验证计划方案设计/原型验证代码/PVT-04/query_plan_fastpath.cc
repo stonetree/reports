@@ -1,10 +1,16 @@
-// query_plan_fastpath.cc - 动态决策引擎与成本评估实现
+// query_plan_fastpath.cc - 动态决策引擎与成本评估实现 (支持 MLA/MHA 多模型)
 #include "query_plan_fastpath.h"
 #include <algorithm>
 
-double CostEvaluator::estimate_load_cost(uint32_t tokens, double bw_gbps, double queue_ms) {
-    // 假设每 Token KV 约 320KB (Qwen 72B TP8)
-    double kv_bytes = tokens * 327.68 * 1024.0;
+double CostEvaluator::estimate_load_cost(uint32_t tokens, double bw_gbps, double queue_ms, ModelArch model_arch) {
+    double bytes_per_tok = 327680.0; // 默认 MHA Qwen 72B (320KB/tok)
+    if (model_arch == ModelArch::MLA_DeepSeek) {
+        bytes_per_tok = 512.0;       // DeepSeek MLA (512B/tok)
+    } else if (model_arch == ModelArch::GQA_Llama) {
+        bytes_per_tok = 81920.0;     // LLaMA GQA (80KB/tok)
+    }
+
+    double kv_bytes = tokens * bytes_per_tok;
     double bw_bytes_per_ms = (bw_gbps * 1e9) / (8.0 * 1000.0);
     double xfer_ms = kv_bytes / std::max(bw_bytes_per_ms, 1e5);
     double metadata_overhead_ms = 0.15; // 150us 元数据开销
@@ -25,7 +31,7 @@ ExecutionPlan QueryPlanFastPath::generate_plan(const AccessIntent& intent) {
         return plan;
     }
 
-    double load_cost = CostEvaluator::estimate_load_cost(intent.prefix_tokens, intent.current_ewma_bw_gbps, intent.queue_delay_ms);
+    double load_cost = CostEvaluator::estimate_load_cost(intent.prefix_tokens, intent.current_ewma_bw_gbps, intent.queue_delay_ms, intent.model_arch);
     double recompute_cost = CostEvaluator::estimate_recompute_cost(intent.prefix_tokens);
 
     // 判定条件 1: Deadline 约束

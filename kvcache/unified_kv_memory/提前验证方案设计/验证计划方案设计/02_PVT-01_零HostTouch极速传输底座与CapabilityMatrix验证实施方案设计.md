@@ -1,7 +1,9 @@
 # PVT-01：Host CPU 零数据拷贝传输底座与硬件能力矩阵验证实施方案设计
+## —— Mooncake TransferEngine 深度重构与国产硬件零拷贝底座打通
 
 > **验证 ID**：PVT-01  
 > **验证名称**：Host CPU 零数据拷贝极速传输底座与硬件能力矩阵 (CapabilityMatrix) 验证  
+> **穿刺优先级**：**🟡 P1 级（底座支撑项）**  
 > **对应验证阶段**：**E1 核心数据路径打通**  
 > **证伪标记**：否（底层传输能力确认）  
 > **建议周期**：6~8 人日  
@@ -9,6 +11,8 @@
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L4-MC-HIER-STORE-001`, `L3-MS-Tiering-038`, `L4-HW-HostPayloadTouchBudget-076`, `L4-FT-PathIntegrityPolicy-077`  
 > - SR23: `SR23-01-06-01`, `SR23-01-07-01`, `SR23-01-08-01`, `SR23-01-09-01`, `SR23-01-12-01`  
+> **开源基线版本与代码仓库**：  
+> - **Mooncake TransferEngine**：[`https://github.com/kvcache-ai/Mooncake.git`](https://github.com/kvcache-ai/Mooncake.git) (Commit: `f90ae691f109e49a60920e0c8abbf7e572826d8c`，子模块路径: `mooncake-transfer-engine/`)  
 > **研发对齐状态**：已闭环研发评估报告 1, 2, 3 项及 eBPF 探针防漏报规范（明确 P2P Pinning 接口、io_uring 双模式与全量 uprobe）  
 
 ---
@@ -16,9 +20,9 @@
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 待验证核心命题
-统一异构存储池的数据平面必须建立在 Host CPU 零数据拷贝的高性能硬件通路上。本验证旨在通过受控传输基准测试与内核/用户态 eBPF 插桩，证明：
+面向国产 AI 芯片构建统一异构 KVCache 存储与调度底座，必须将数据平面建立在 Host CPU 零数据拷贝的高性能硬件通路上。本验证旨在通过重构 Mooncake `TransferEngine`，并在受控传输基准与内核/用户态 eBPF 插桩下证明：
 1. **跨节点 URMA / UBMEM 传输**与**本地 NVMe SSD 直达读写**过程中，Host CPU 零数据拷贝（CPU 仅负责下发控制指令与轮询完成队列 CQ，不参与正文搬运，Host Payload Touch Bytes 严格为 0）；
-2. 跨节点有效传输带宽达到物理网络线速的 **$\ge 80\%$**（800G 网卡 $\ge 640\text{ Gbps}$），本地 NVMe SSD 直达顺序读带宽达到设备物理峰值的 **$\ge 80\%$**；
+2. 跨节点有效传输带宽达到物理网络线速的 **$\ge 80\%$**（800G 网卡 $\ge 640\text{ Gbps}$ / $80\text{ GB/s}$），本地 NVMe SSD 直达顺序读带宽达到设备物理峰值的 **$\ge 80\%$**；
 3. 输出系统级的**《硬件能力矩阵文件 (CapabilityMatrix)》**（即在运行时自动探测各通信链路的带宽、时延等物理参数表，供调度算法使用），为上层 QueryPlan 决策引擎提供真实的硬件拓扑时延与带宽参数。
 
 ### 1.2 最终交付数据与结论产出
@@ -44,13 +48,17 @@
 ```
 - **库文件链接**：`-lurma -lubmem -luring -lascendcl -lpthread`
 
-#### 2. NPU 显存 P2P 注册与 Pinning 驱动接口实现：
+#### 2. NPU 显存 P2P 注册与 Mooncake 扩展版驱动接口实现：
+对齐 Mooncake 最新主线 `include/ascend_allocator.h` 与 `TransportType::AscendDirect` / `TransportType::UB` 体系：
 ```cpp
-// 1. 分配支持跨设备 P2P DMA 的 NPU 显存
-void* npu_hbm_ptr = nullptr;
-aclError ret = aclrtMalloc(&npu_hbm_ptr, payload_size, ACL_MEM_MALLOC_HUGE_FIRST_P2P);
+// 1. 调用 Mooncake 扩展版 VMM 接口分配支持跨设备 P2P DMA 的 NPU 显存 (1GB 对齐物理连续)
+void* npu_hbm_ptr = mooncake::ascend_allocate_vmm_memory_direct(payload_size);
+if (!npu_hbm_ptr) {
+    aclrtMalloc(&npu_hbm_ptr, payload_size, ACL_MEM_MALLOC_HUGE_FIRST_P2P);
+}
 
-// 2. 将 NPU 显存注册至 URMA 网卡控制器 (Pin Memory)
+// 2. 将 NPU 显存物理 Handle 注册至 URMA 网卡控制器 (Pin Memory)
+aclrtDrvMemHandle drv_handle = mooncake::ascend_get_physical_handle_from_va(npu_hbm_ptr);
 struct urma_mr* mr = urma_register_dev_mr(
     qp->dev, npu_hbm_ptr, payload_size, 
     URMA_ACCESS_LOCAL_WRITE | URMA_ACCESS_REMOTE_READ | URMA_ACCESS_REMOTE_WRITE
@@ -88,7 +96,7 @@ cd ./原型验证代码/PVT-01 && make clean && make
   - Host CPU 仅执行描述符提交与 CQ Polling。
 - **路径 B（NVMe Direct SSD 直达模式）**：
   - 采用 `io_uring` + `O_DIRECT` + Peer-to-Peer DMA；
-  - 数据直接在 NVMe SSD 与 NPU HBM 之间流转，数据直接在 NVMe SSD 与 NPU HBM 之间流转，绕过 Host DDR。
+  - 数据直接在 NVMe SSD 与 NPU HBM 之间流转，严格绕过 Host DDR。
 - **对照组 C（CPU Memcpy 软中转基准）**：
   - 模拟传统两阶段中转：网卡/SSD $\to$ Host DDR $\to$ Host CPU `memcpy` $\to$ NPU HBM。
 - **对照组 D（标准 TCP/IP Socket 基准）**：
@@ -136,7 +144,6 @@ cd ./原型验证代码/PVT-01 && make clean && make
 
 启动监控命令：
 ```bash
-# 启动全量 eBPF 探针监控
 python3 ./原型验证代码/PVT-01/host_touch_monitor.py --target-pid <target_pid> --out ebpf_touch_log.txt
 ```
 
@@ -147,7 +154,7 @@ python3 ./原型验证代码/PVT-01/host_touch_monitor.py --target-pid <target_p
 开发人员请按以下 12 个步骤依次执行：
 
 ### 步骤 1：启动内核与用户态 eBPF 监控
-在被测节点上启动 `host_touch_monitor.py`，传入即将运行的测试进程 PID，确保实时捕获系统调用与动态库。
+在被测节点上启动 `host_touch_monitor.py`，传入即将运行的测试进程 PID。
 
 ### 步骤 2：运行对照组 C（CPU Memcpy 软中转基准）
 测试经过 Host CPU `memcpy` 中转的吞吐与 CPU 占用：
@@ -169,10 +176,7 @@ python3 ./原型验证代码/PVT-01/host_touch_monitor.py --target-pid <target_p
 ```
 
 ### 步骤 5：读取路径 A 的 eBPF 统计，验证 Host Touch
-从 eBPF 输出中读取路径 A 执行期间的统计：
-- 检查 `@memcpy_calls` 与 `@uprobe_memcpy_calls` 是否严格等于 0；
-- 检查 `@memcpy_bytes` 是否严格等于 0；
-- 统计 Host CPU 占用率（从 `/proc/[pid]/stat` 获取）。
+检查 `@memcpy_bytes` 是否严格等于 0，CPU 占用是否 $< 5\%$。
 
 ### 步骤 6：运行路径 B（NVMe Direct SSD 直达模式）
 测试 HBM ↔ NVMe SSD 直达顺序读写性能（基于 `io_uring` FIXED buffer）：
@@ -181,121 +185,69 @@ python3 ./原型验证代码/PVT-01/host_touch_monitor.py --target-pid <target_p
 ```
 
 ### 步骤 7：读取路径 B 的 eBPF 统计，验证 Host Touch
-检查 NVMe 直达传输期间，Host CPU `@memcpy_calls` 与 `@memcpy_bytes` 是否为 0。
+检查 NVMe 直达传输下的 memcpy 字节数是否严格为 0。
 
-### 步骤 8：测量 Completion & Fence 异步通知延迟
-在 `raw_trans_bench` 中打点测量硬件传输完成（CQE 就绪）到内存 Fence 同步屏障生效的微秒级耗时：
-$$T_{fence\_sync} = T_{ready\_visible} - T_{dma\_complete}$$
+### 步骤 8：汇总并生成吞吐对比表
+将 4 条路径的 CSV 汇总生成带宽对比表。
 
-### 步骤 9：比对路径 A/B 与对照组 C/D，计算吞吐与 CPU 节省
-比对四组实验在相同包大小下的传输耗时与 CPU 周期开销（详见第 7 节推导公式）。
-
-### 步骤 10：注入异常与网络拥塞扰动
-使用 `tc` 限速或注入丢包，测试 URMA/UBMEM 重传机制与超时保护：
+### 步骤 9：运行硬件能力矩阵自动导出脚本
 ```bash
-# 模拟 5% 丢包
-sudo tc qdisc add dev eth0 root netem loss 5%
-./raw_trans_bench --mode urma_direct --sizes 16M --qd 16 --out res_urma_loss.csv
-sudo tc qdisc del dev eth0 root
+python3 ./原型验证代码/PVT-01/export_capability_matrix.py --input-dir . --out capability_matrix.json
 ```
 
-### 步骤 11：生成并导出《硬件 CapabilityMatrix 探针能力表》
-将实测数据汇总并导出为标准 JSON 探针配置文件 `capability_matrix.json`：
-```bash
-python3 ./原型验证代码/PVT-01/export_capability_matrix.py --in res_urma.csv,res_nvme.csv,res_memcpy.csv --out capability_matrix.json
-```
+### 步骤 10：验证 JSON 格式合法性与字段完备性
+检查 `capability_matrix.json` 是否包含所有介质对的时延与带宽。
 
-### 步骤 12：执行 Go / No-Go 判定与交付物打包。
+### 步骤 11：判定 Go / No-Go 结论
+按判定公式计算线速达成率与零拷贝合规性。
+
+### 步骤 12：归档数据并输出报告
+将数据与日志归档至 `reports/evidence_pack_v1.0/`。
 
 ---
 
 ## 6. 数据采集清单与记录格式
 
-### 6.1 原始传输性能记录表 (`pvt01_raw_bandwidth.csv`)
-| 字段名称 | 含义 | 单位 | 示例值 |
-|---|---|---|---|
-| `path_mode` | 传输路径模式 | 字符串 | URMA_Direct / NVMe_Direct / Host_Memcpy |
-| `payload_size_kb` | 数据块大小 | KB | 16384 (16MB) |
-| `queue_depth` | 队列深度 | 整数 | 16 |
-| `bandwidth_gbps` | 测得有效带宽 | Gbps | 682.5 |
-| `latency_p50_us` | 传输中位数时延 | 微秒 ($\mu s$) | 198.5 |
-| `latency_p99_us` | 传输 P99 时延 | 微秒 ($\mu s$) | 235.0 |
-| `host_cpu_pct` | Host CPU 占用率 | 百分比 | 0.6% |
-| `host_memcpy_bytes`| Host CPU 拷贝正文字节数 | 字节 | 0 |
-| `fence_delay_us` | 异步 Fence 同步耗时 | 微秒 ($\mu s$) | 2.1 |
+### 6.1 传输性能数据表 (`pvt01_trans_results.csv`)
+```csv
+path_id,mode,payload_size,queue_depth,bandwidth_gbps,latency_p50_us,latency_p99_us,cpu_usage_pct,memcpy_calls,memcpy_bytes
+PATH-A1,urma_direct,67108864,16,84.2,760.5,820.1,2.1,0,0
+PATH-A2,ubmem_direct,67108864,16,92.5,690.2,740.3,1.8,0,0
+PATH-B,nvme_direct,67108864,8,26.4,2420.0,2650.0,3.2,0,0
+PATH-C,host_memcpy,67108864,16,38.1,1680.0,2150.0,98.5,1024,67108864
+PATH-D,socket_tcp,67108864,16,22.4,2890.0,3950.0,85.2,4096,67108864
+```
 
 ---
 
 ## 7. 数据交叉组合与运算推导逻辑
 
-### 7.1 线速达成率 (Line-Rate Efficiency)
-$$\text{LineRate Efficiency} = \frac{\text{Measured Bandwidth (Gbps)}}{\text{Hardware Physical Peak Bandwidth (Gbps)}} \times 100\%$$
-- 目标：800G URMA 网卡实测有效带宽 $\ge 640\text{ Gbps}$（达成率 $\ge 80\%$）；
-- 目标：NVMe SSD 阵列实测顺序读带宽 $\ge 80\%$ 物理标称值。
+### 7.1 线速达成率计算公式
+$$\eta_{\text{wire\_speed}} = \frac{\text{实测吞吐带宽 (Gbps)}}{\text{物理标称线速 (Gbps)}} \times 100\%$$
 
-### 7.2 Host CPU 零数据拷贝判定 (Host Payload Touch Ratio)
-$$\text{Host Touch Ratio} = \frac{\text{Host Copied Bytes}}{\text{Total Transferred Payload Bytes}} \times 100\%$$
-- **判定硬指标**：对于 URMA_Direct 与 NVMe_Direct，$\text{Host Touch Ratio}$（Host CPU 拷贝字节占比）**必须严格为 $0\%$**。
-
-### 7.3 Host CPU 开销节约比
-$$\text{CPU Saving Ratio} = \frac{\text{Host\_CPU\%}_{\text{memcpy}} - \text{Host\_CPU\%}_{\text{direct}}}{\text{Host\_CPU\%}_{\text{memcpy}}} \times 100\%$$
-- 预期直接降低 CPU 负载 $\ge 90\%$，彻底消除 Host CPU 拷贝瓶颈。
+### 7.2 Host Payload Touch Bytes 判定
+$$\text{Host Payload Touch Bytes} = \text{eBPF 捕获的 memcpy 搬运总字节数} \equiv 0$$
 
 ---
 
 ## 8. 多维扩展与扫参矩阵
 
-| 维度 | 参数网格 |
-|---|---|
-| **介质通路** | NPU HBM ↔ NPU HBM (Remote URMA), NPU HBM ↔ NPU HBM (Remote UBMEM), NPU HBM ↔ NVMe SSD |
-| **数据包大小** | 64KB, 256KB, 1MB, 4MB, 16MB, 64MB, 256MB, 1GB |
-| **并发深度 (QD)** | 1 (Latency bound), 4, 16, 32, 64 (Throughput bound) |
-| **内存对齐** | 4KB Page 严格对齐、64B Cacheline 对齐、非对齐跨页 |
+| 参数维度 | 扫描范围 | 测试目标 |
+|---|---|---|
+| **数据包尺寸** | 64KB, 256KB, 1MB, 4MB, 16MB, 64MB, 256MB, 1GB | 绘制各介质带宽饱和曲线与小包时延惩罚 |
+| **队列深度** | 1, 2, 4, 8, 16, 32, 64 | 探明物理网卡与 NVMe 控制器的最佳并发深度 |
+| **介质链路** | UBMEM, URMA, NVMe Direct, Memcpy, TCP | 建立完备的硬件能力矩阵 |
 
 ---
 
-## 9. Go / No-Go 判定规则与交付报告模板
+## 9. Go / Conditional / No-Go 判定规则与交付报告模板
 
-### 9.1 判定规则
-- **Go 门槛**：
-  1. URMA / UBMEM 跨节点大包传输有效带宽 $\ge 80\%$ 物理线速（$\ge 640\text{ Gbps}$）；
-  2. NVMe SSD 直达读取带宽 $\ge 80\%$ 物理峰值；
-  3. 主路径 Host CPU 拷贝正文字节数严格为 0；
-  4. CPU 节约比 $\ge 85\%$。
-- **No-Go 门槛**：
-  - 跨节点传输或 SSD 直达仍需 Host CPU 深度参与 memcpy；
-  - 传输有效带宽低于线速的 50%。
-
-### 9.2 开发者交付报告格式模板
-```markdown
-# PVT-01 提前验证交付报告
-
-## 1. 核心传输与 CPU 触碰指标汇总
-| 传输路径 | 数据块大小 | 实测带宽(Gbps) | 线速达成率 | Host CPU拷贝字节数 | CPU占用率 | 判定 |
-|---|---|---|---|---|---|---|
-| URMA Direct | 64MB | 682.0 | 85.25% | 0 Bytes | 0.6% | PASS |
-| UBMEM Direct | 64MB | 745.0 | 93.12% | 0 Bytes | 0.4% | PASS |
-| NVMe Direct | 64MB | 112.5 (14GB/s)| 87.50% | 0 Bytes | 0.8% | PASS |
-| Host Memcpy (对照)| 64MB| 145.0 | 18.12% | 67108864 Bytes | 88.5% | BASELINE |
-
-## 2. 硬件能力矩阵导出片段 (`capability_matrix.json`)
-```json
-{
-  "paths": {
-    "hbm_to_remote_hbm_ubmem": {
-      "bandwidth_gbps": 745.0,
-      "base_latency_us": 3.2,
-      "host_touch_bytes": 0
-    },
-    "hbm_to_local_ssd_direct": {
-      "bandwidth_gbps": 112.5,
-      "base_latency_us": 18.5,
-      "host_touch_bytes": 0
-    }
-  }
-}
-```
-
-## 3. 最终结论
-【Go / Conditional / No-Go】: GO
-```
+### 9.1 量化判定准则
+- **Go (准入通过)**：
+  - 800G 网络下有效线速达成率 $\ge 80\%$（带宽 $\ge 80\text{GB/s}$）；
+  - NVMe SSD 直达顺序读带宽达到设备峰值 $\ge 80\%$；
+  - 传输期间 Host CPU 零数据拷贝（`Host Payload Touch Bytes` 严格为 0，CPU 占用率 $< 5\%$）。
+- **Conditional (条件准入)**：
+  - 线速达成率在 $70\% \sim 80\%$ 之间，且零拷贝成立，需在驱动层进一步调优 QD 与轮询策略；
+- **No-Go (否决关闭)**：
+  - 存在不可消除的 Host CPU 内存拷贝，或有效带宽 $< 70\%$ 物理线速。

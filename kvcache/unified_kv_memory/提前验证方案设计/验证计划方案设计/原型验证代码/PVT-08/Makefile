@@ -1,8 +1,8 @@
 CXX = g++
 CXXFLAGS = -O3 -std=c++17 -pthread -Wall
 
-TARGET = rcu_migration_bench
-SRCS = rcu_migration_bench.cc
+TARGET = multicast_fanout_bench
+SRCS = multicast_fanout_bench.cc
 
 all: $(TARGET)
 

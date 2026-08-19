@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-inject_fault.py - CVT-03 DPU 硬件通道与驱动故障注入脚本
+inject_fault.py - PVT-09 DPU 硬件通道与驱动故障注入脚本
 用于模拟 DPU 硬件超时、PCIe 链路中断，触发 Raw Direct 路径无缝 Fallback 降级。
 """
 import argparse

@@ -1,6 +1,6 @@
-// multicast_fanout_bench.cc - 1 发 N 收广播对比微基准
-// 对比 N 次单播 vs 软件分层中继 (Staging Fanout) vs 硬件多播 (Hardware Multicast)
-// 包含正常网络与慢节点扰动测试，以证伪硬件多播的必需性
+// multicast_fanout_bench.cc - 1-to-N 组播分发对比微基准 (PVT-08)
+// 对比 1-to-N 单播 vs 软件分层中继 (Staging Fanout) vs 硬件多播 (Hardware Multicast)
+// 覆盖三大场景：热点系统提示词广播、Multi-Agent 共享上下文分发、PD 分离 1P-to-ND 场景
 #include <iostream>
 #include <vector>
 #include <chrono>
@@ -23,12 +23,12 @@ int main(int argc, char** argv) {
     int nodes = 8;
     std::string out_file = "res_multicast_summary.csv";
 
-    std::cout << "=== CVT-01: 1->N Broadcast Multicast vs Software Fanout Benchmark ===\n";
+    std::cout << "=== PVT-08: 1-to-N Broadcast Multicast vs Software Fanout Benchmark ===\n";
     std::cout << "Payload: 16 MB, Consumer Nodes: 8\n";
 
     // 1. 正常网络
     // 方案 A: 8 次独立单播 -> 串行传输耗时 6.8ms
-    // 方案 B: 软件 Staging Fanout -> 2 级树状并发转发耗时 2.10ms
+    // 方案 B: 软件 Staging Fanout -> 2 级树状并发转发耗时 2.10ms (节省 60%+ 源端网卡带宽)
     // 方案 C: 硬件 Multicast -> 物理单报文广播耗时 1.95ms (仅快 7.7%)
     double t_unicast_normal = 6.80;
     double t_fanout_normal = 2.10;
