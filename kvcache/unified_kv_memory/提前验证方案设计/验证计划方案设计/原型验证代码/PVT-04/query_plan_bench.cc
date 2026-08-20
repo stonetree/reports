@@ -1,72 +1,72 @@
-// query_plan_bench.cc - QueryPlan 决策引擎 100K QPS 压测与反事实验证 Harness
 #include "query_plan_fastpath.h"
-#include <iostream>
-#include <vector>
+#include <algorithm>
 #include <chrono>
 #include <fstream>
-#include <algorithm>
-#include <cmath>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+struct Scenario {
+    AccessIntent intent;
+    double actual_load_ms;
+    double actual_recompute_ms;
+};
+
+std::vector<std::string> split(const std::string& line) {
+    std::vector<std::string> parts;
+    std::stringstream stream(line);
+    std::string part;
+    while (std::getline(stream, part, ',')) parts.push_back(part);
+    return parts;
+}
+
+std::vector<Scenario> load_scenarios(const std::string& path) {
+    std::ifstream input(path);
+    std::string line;
+    std::getline(input, line); // header
+    std::vector<Scenario> scenarios;
+    while (std::getline(input, line)) {
+        const auto f = split(line);
+        if (f.size() != 11) throw std::runtime_error("scenario CSV requires 11 columns");
+        scenarios.push_back({
+            {std::stoull(f[0]), static_cast<uint32_t>(std::stoul(f[1])), static_cast<uint32_t>(std::stoul(f[2])),
+             std::stod(f[3]), std::stod(f[4]), f[5] == "1", std::stoull(f[6]), std::stod(f[7]), std::stod(f[8])},
+            std::stod(f[9]), std::stod(f[10])});
+    }
+    return scenarios;
+}
 
 int main(int argc, char** argv) {
-    int qps_loops = 500000;
-    std::string out_file = "res_plan_accuracy.csv";
-
-    std::cout << "=== PVT-04: QueryPlan Dynamic Decision & CostEvaluator Benchmark ===\n";
-
-    QueryPlanFastPath engine;
-
-    // 1. 极限单次决策延迟压测 (100K+ QPS 模拟)
-    std::vector<double> latencies_us;
-    latencies_us.reserve(qps_loops);
-
-    AccessIntent test_intent = {1001, 16384, 50, 600.0, 0.5, true};
-
-    auto t0 = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < qps_loops; ++i) {
-        auto d0 = std::chrono::high_resolution_clock::now();
-        auto plan = engine.generate_plan(test_intent);
-        auto d1 = std::chrono::high_resolution_clock::now();
-        latencies_us.push_back(std::chrono::duration<double, std::micro>(d1 - d0).count());
+    std::string scenario_csv, output = "query_plan_results.csv", evidence_level = "DEMO";
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--scenario-csv" && i + 1 < argc) scenario_csv = argv[++i];
+        else if (arg == "--out" && i + 1 < argc) output = argv[++i];
+        else if (arg == "--evidence-level" && i + 1 < argc) evidence_level = argv[++i];
     }
-    auto t1 = std::chrono::high_resolution_clock::now();
-
-    double total_sec = std::chrono::duration<double>(t1 - t0).count();
-    double actual_qps = qps_loops / total_sec;
-
-    std::sort(latencies_us.begin(), latencies_us.end());
-    double p50 = latencies_us[latencies_us.size() * 0.50];
-    double p90 = latencies_us[latencies_us.size() * 0.90];
-    double p99 = latencies_us[latencies_us.size() * 0.99];
-
-    std::cout << "1. Decision Throughput & Latency:\n"
-              << "   - Measured QPS: " << actual_qps << " req/s\n"
-              << "   - P50 Latency: " << p50 << " us\n"
-              << "   - P90 Latency: " << p90 << " us\n"
-              << "   - P99 Latency: " << p99 << " us (Goal: < 5.0 us)\n";
-
-    // 2. 多场景决策与反事实验证 (长前缀、短前缀、拥塞网络)
-    std::vector<AccessIntent> scenarios = {
-        {1, 32768, 100, 750.0, 0.1, true}, // 场景1: 空闲长前缀 -> 应 Load
-        {2, 24, 100, 750.0, 0.1, true},    // 场景2: 极短前缀 -> 应 Recompute (拦截小IO)
-        {3, 8192, 100, 1.0, 20.0, true},   // 场景3: 严重拥塞 -> 应 Recompute (拦截慢加载)
-        {4, 16384, 5, 400.0, 10.0, true}   // 场景4: 紧迫 Deadline -> 应 Recompute
-    };
-
-    std::ofstream out(out_file);
-    out << "req_id,prefix_tokens,bw_gbps,queue_ms,action,est_cost_ms,reason\n";
-
-    std::cout << "\n2. Scenario Validation:\n";
-    for (const auto& sc : scenarios) {
-        auto plan = engine.generate_plan(sc);
-        std::string action_str = (plan.action == PlanAction::Remote_Load) ? "Remote_Load" : "Recompute";
-        std::cout << "   - Req " << sc.request_id << " (Tokens: " << sc.prefix_tokens
-                  << ", BW: " << sc.current_ewma_bw_gbps << " Gbps) => Action: "
-                  << action_str << " (Est Cost: " << plan.estimated_cost_ms << " ms, Reason: " << plan.reason << ")\n";
-
-        out << sc.request_id << "," << sc.prefix_tokens << "," << sc.current_ewma_bw_gbps << ","
-            << sc.queue_delay_ms << "," << action_str << "," << plan.estimated_cost_ms << "," << plan.reason << "\n";
+    if (scenario_csv.empty()) {
+        std::cerr << "--scenario-csv is required. It must contain request_id,prefix_tokens,deadline_ms,bw_gbps,queue_ms,is_cached,kv_bytes_per_token,compute_tps,metadata_ms,actual_load_ms,actual_recompute_ms\n";
+        return 2;
     }
-
-    std::cout << "\nResults saved to " << out_file << "\n";
+    const auto scenarios = load_scenarios(scenario_csv);
+    QueryPlanFastPath planner;
+    std::ofstream stream(output);
+    stream << "request_id,kv_bytes_per_token,predicted_path,actual_path,predicted_load_ms,predicted_recompute_ms,actual_load_ms,actual_recompute_ms,regret_ms,is_correct,decision_ns,evidence_level\n";
+    for (const auto& scenario : scenarios) {
+        const auto begin = std::chrono::steady_clock::now();
+        const auto plan = planner.generate_plan(scenario.intent);
+        const auto end = std::chrono::steady_clock::now();
+        const PlanAction optimal = scenario.actual_load_ms < scenario.actual_recompute_ms ? PlanAction::Remote_Load : PlanAction::Recompute;
+        const double selected_actual = plan.action == PlanAction::Remote_Load ? scenario.actual_load_ms : scenario.actual_recompute_ms;
+        const double optimal_actual = std::min(scenario.actual_load_ms, scenario.actual_recompute_ms);
+        stream << scenario.intent.request_id << ',' << scenario.intent.kv_bytes_per_token << ',' << action_name(plan.action) << ','
+               << action_name(optimal) << ',' << plan.predicted_load_ms << ',' << plan.predicted_recompute_ms << ','
+               << scenario.actual_load_ms << ',' << scenario.actual_recompute_ms << ',' << selected_actual - optimal_actual << ','
+               << (plan.action == optimal ? "TRUE" : "FALSE") << ','
+               << std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count() << ',' << evidence_level << '\n';
+    }
+    std::cout << "results=" << output << " scenarios=" << scenarios.size() << '\n';
     return 0;
 }

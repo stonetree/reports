@@ -1,9 +1,11 @@
 # PVT-06：ConsumeEligibility 与 RankConsensus 0 错误消费验证实施方案设计
 ## —— Mooncake 分布式元数据重构：6 维语义强校验与 TP=8 多卡原子共识
 
+> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。正确性用例必须调用被测接口并由独立 Oracle 判定；8 类冲突必须包含 Tokenizer。单进程位图和固定延时仅为 DEMO，不代表 TP=8 多卡实测。
+
 > **验证 ID**：PVT-06  
 > **验证名称**：ConsumeEligibility 消费资格校验与 RankConsensus 多卡状态同步验证  
-> **穿刺优先级**：**🔴 P0 级（核心决胜项）**  
+> **验证优先级**：**🔴 P0 级（核心关键项）**  
 > **对应验证阶段**：**E1 多卡状态同步与消费正确性**  
 > **证伪标记**：否（可消费性安全底线确认）  
 > **建议周期**：5~7 人日  
@@ -21,7 +23,7 @@
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 待验证核心命题
-物理命中（Raw Hit）绝不等于可以安全消费的有效命中（Usable Hit）。Mooncake 最新主线 `mooncake-store/` 仅提供基础的对象存在性与内存定位元数据，缺乏细粒度 Tokenizer/ChatTemplate/LoRA 语义版本控制，且在张量并行（如 TP=8）时缺乏原子状态同步机制。本验证旨在重构扩展 `mooncake-common/` 与元数据协议层：
+物理命中（Raw Hit）不等于可以安全消费的有效命中（Usable Hit）。固定基线中的 `mooncake-store/` 提供基础的对象存在性与内存定位元数据，但没有覆盖本项目所需的 Tokenizer、ChatTemplate、LoRA 语义版本控制和张量并行多卡状态同步。本验证用于明确 `mooncake-common/` 与元数据协议层的增强边界：
 1. **ConsumeEligibility 6 维语义校验引擎**（对命中 KV 的模型架构、Tokenizer 词表哈希、Prompt 模板哈希、LoRA 适配器、Ready 就绪位与租约有效性等 6 维语义进行微秒级合法性检查）能够在微秒级内（$< 5\mu s$）对候选 KV 进行完整校验，在各类冲突注入下实现 **错误消费数、过期消费数、越权消费数严格为 0**，冲突拦截率 **100%**；
 2. **RankConsensus 多卡状态同步机制**（在张量并行 TP=8 时，通过共享内存同步各卡命中状态与一致性动作）在 $TP=8$ 张量并行下，基于共享内存/UBMEM 的多卡状态同步耗时 **$P99 < 100\mu s$**；在单卡丢包或不一致时，能够 100% 正确决策协同 Fallback 重算，杜绝多卡死锁与状态分歧。
 
@@ -109,7 +111,7 @@ sequenceDiagram
 原型验证代码/PVT-06/
 ├── consume_eligibility.h   # 6 维语义强校验引擎头文件
 ├── consume_eligibility.cc  # 6 维匹配算法实现
-├── rank_consensus_bench.cc # TP=8 多卡 POSIX 共享内存状态同步压测工具
+├── rank_consensus_bench.cc # 单进程 DEMO 脚手架；正式测试替换为多进程/多卡事件
 ├── Makefile                # 编译构建工程 (make -j16)
 └── test_correctness.py     # 注入 8 类语义冲突与验证正确性的测试脚本
 ```
@@ -117,8 +119,8 @@ sequenceDiagram
 编译与测试命令：
 ```bash
 cd ./原型验证代码/PVT-06 && make clean && make
-python3 ./test_correctness.py --all-conflicts
-./rank_consensus_bench --ranks 8 --iterations 100000
+python3 ./test_correctness.py --sut-command './consume_eligibility_adapter' --out res_correctness.json
+./rank_consensus_bench
 ```
 
 ---

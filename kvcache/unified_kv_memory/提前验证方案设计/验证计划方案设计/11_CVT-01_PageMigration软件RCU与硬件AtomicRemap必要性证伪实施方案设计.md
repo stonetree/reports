@@ -1,9 +1,11 @@
 # CVT-01：PageMigration 软件 RCU 与硬件 AtomicRemap 必要性证伪实施方案设计
 ## —— Mooncake 显存整理纯软化：软件 RCU 机制证伪硬件 AtomicRemap 芯片依赖
 
-> **验证 ID**：CVT-01 (原 CVT-02 重新编号)  
+> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。统一判定量为 Reader 停顿 P99 `<1ms`、TPOT 干扰率 `<3%` 和错误读取为 0；最大值不能替代 P99。无硬件 Atomic Remap 时硬件组标记 `NOT-SUPPORTED/N/A`。
+
+> **验证 ID**：CVT-01  
 > **验证名称**：页迁移/Defrag 软件 RCU 与硬件 Atomic Remap 原语必要性证伪  
-> **穿刺优先级**：**🟢 P2 级（拓展证伪项）**  
+> **验证优先级**：**🟢 P2 级（拓展证伪项）**  
 > **对应验证阶段**：**条件证伪阶段 (架构简化与去依赖)**  
 > **证伪标记**：**是（优先证伪“硬件 Atomic Remap 是内存整理迁移的必需依赖”）**  
 > **建议周期**：3~4 人日  
@@ -21,7 +23,7 @@
 
 ### 1.1 待验证核心命题
 针对 KV Cache 显存碎片整理（Defrag）与动态页迁移时“必须依赖底层硬件提供虚拟地址原子重映射原语（Hardware Atomic Remap）”的假设，本验证旨在通过算法原型与实测：
-1. **优先证伪必需性**：基于**软件 RCU (Read-Copy-Update，读-拷贝-更新无锁迁移机制：通过原子指针替换与双层宽限期检测，在后台显存碎片整理与页迁移时保证前台读请求零停顿) + Copy-on-Migrate** 的机制，在并发推理 Reader 持续读取下，迁移期间的停顿时间 **$P99\text{ Pause Time} < 1\text{ms}$**，对单字生成延迟 **$\text{TPOT Jitter} < 5\%$**，且具备 100% 安全回滚能力；
+1. **优先证伪必需性**：基于**软件 RCU (Read-Copy-Update，读-拷贝-更新无锁迁移机制：通过原子指针替换与宽限期检测，在后台显存碎片整理与页迁移时保护前台读请求)** 与 Copy-on-Migrate，在并发 Reader 持续读取下验证迁移停顿 **$P99 < 1\text{ms}$**、TPOT 干扰率 **$< 3\%$**、错误读取为 0 和回退可执行；
 2. **规避硬件依赖风险**：证明软件 RCU 完全满足生产可用要求，无需强行依赖非成熟的硬件虚拟化原语，防范因硬件 Remap 引发的硬件级锁死与多卡协同死锁风险。
 
 ### 1.2 最终交付数据与结论产出
@@ -107,7 +109,7 @@ sequenceDiagram
 编译与测试命令：
 ```bash
 cd ./原型验证代码/CVT-01 && make clean && make
-./rcu_migration_bench --readers 32 --migrating-blocks 1024 --out res_rcu.csv
+./rcu_migration_bench --out res_rcu.csv
 ```
 
 ---
@@ -126,6 +128,6 @@ hardware_atomic_remap,32,1024,380.0,1.8,0,TRUE
 
 ## 5. Go / Conditional / No-Go 判定规则
 
-- **Go (证伪成功/准入)**：软件 RCU 迁移停顿 $P99 < 1\text{ms}$，TPOT 抖动 $< 5\%$，内存校验 100% 正确；
+- **Go (证伪成功/准入)**：软件 RCU 迁移停顿 $P99 < 1\text{ms}$，TPOT 干扰率 $< 3\%$，错误读取为 0；
 - **Conditional (条件准入)**：停顿在 $1\text{ms} \sim 3\text{ms}$，需缩小单个迁移 Batch 的 Extent 粒度；
 - **No-Go (证伪失败)**：高并发下软件 RCU 读脏或崩溃，仍需底层硬件 Remap 支持。

@@ -10,6 +10,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 
+EVIDENCE_ENVIRONMENT=${EVIDENCE_ENVIRONMENT:-"W0"}
+if [[ "${EVIDENCE_ENVIRONMENT}" != "W0" ]]; then
+    echo "deploy_cluster.sh only demonstrates the W0 localhost workflow. Use the site-specific multi-node orchestrator for W1/W2." >&2
+    exit 2
+fi
+
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2.5-72B-Instruct"}
 MOONCAKE_CONFIG=${MOONCAKE_CONFIG:-"${SCRIPT_DIR}/mooncake.config"}
 MASTER_PORT=${MASTER_PORT:-"10001"}
@@ -23,6 +29,7 @@ echo " [DEPLOY] 启动统一异构 KVCache 存储池开源基线集群 (vLLM + M
 echo " 模型: ${MODEL_PATH}"
 echo " 连接器: ${KV_CONNECTOR}"
 echo " 日志目录: ${LOG_DIR}"
+echo " 证据环境档位: ${EVIDENCE_ENVIRONMENT} (localhost workflow; DEMO only)"
 echo "======================================================================"
 
 # 1. 启动 Mooncake 元数据 Master 守护进程
@@ -83,6 +90,6 @@ PROXY_PID=$!
 echo "PD Proxy PID: ${PROXY_PID}"
 
 echo "======================================================================"
-echo " [SUCCESS] 集群部署完成！统一在线打流入口: http://localhost:${PROXY_PORT}/v1"
+echo " [READY] W0 localhost 工作流已就绪；该结果只能标记 DEMO。入口: http://localhost:${PROXY_PORT}/v1"
 echo " 运行 ./run_online_benchmark.sh 即可发起端到端压测。"
 echo "======================================================================"

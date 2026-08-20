@@ -27,8 +27,8 @@ void DirectViewGuard::revoke_lease(ViewLease& lease) {
 }
 
 bool DirectViewGuard::handle_remote_crash_fallback(uint64_t object_id) {
-    // 捕获远端 SIGBUS / 通信超时，触发本地重算 Fallback 机制
-    std::cout << "[ViewGuard] Remote crash captured for Object " << object_id
-              << "! Successfully isolated failure and falling back to local recompute.\n";
-    return true;
+    // DEMO 接口占位：尚未安装 SIGBUS handler，也未与推理服务回退事件闭环。
+    std::cout << "[ViewGuard][DEMO_ONLY] fallback hook requested for object " << object_id
+              << "; no SIGBUS capture evidence was produced.\n";
+    return false;
 }

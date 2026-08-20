@@ -1,9 +1,11 @@
 # PVT-02：异构框架 Layout 描述符编译器与异步 DAG 流水验证实施方案设计
 ## —— Mooncake 离散 Block 传输协议重构：连续块贪心合并与异步 Stream 重叠
 
+> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。描述符正确性/编译时延与真实计算—传输重叠分成两组测试；只有固定字段的 wire header 和 SG entry 可以声明为 POD，含 `std::vector` 的宿主容器不作 POD 承诺。
+
 > **验证 ID**：PVT-02  
 > **验证名称**：异构框架内存布局 (Layout) 描述符编译器与异步有向无环图 (DAG) 流水验证  
-> **穿刺优先级**：**🔴 P0 级（核心决胜项）**  
+> **验证优先级**：**🔴 P0 级（核心关键项）**  
 > **对应验证阶段**：**E1 核心数据路径打通**  
 > **证伪标记**：否（关键执行链确认）  
 > **建议周期**：6~8 人日  
@@ -90,7 +92,7 @@ struct alignas(64) BatchDescriptorHeader {
 ```
 
 ### 2.2 跨框架内存布局向 ExtentManifest 的极速转换适配器
-原生支持 vLLM `v0.26.1+ (main)`（兼容传统 BlockTable 与新一代 V1 `KVCacheManager`）以及 SGLang Radix Tree：
+以 vLLM Commit `842dd8fd96650063e1ad32e6075742d457d39773` 为接口基线，适配其 BlockTable、V1 `KVCacheManager` 和 SGLang Radix Tree 布局：
 
 ```cpp
 // 1. vLLM V0/V1 BlockTable 适配器
@@ -174,7 +176,7 @@ BatchDescriptorHeader DescriptorCompiler::compile_and_merge(
 
 ```
 原型验证代码/PVT-02/
-├── descriptor_compiler.h      # 描述符编译器头文件 (64B POD C++ 结构)
+├── descriptor_compiler.h      # 64B 固定字段 wire header 与动态 SG 宿主容器
 ├── descriptor_compiler.cc     # 描述符贪心合并与硬件描述符生成算法实现
 ├── async_dag_bench.cc         # 跨节点 Layerwise 边算边传异步 DAG 重叠流水压测工具
 ├── Makefile                   # 编译构建工程 (make -j16)
@@ -184,7 +186,7 @@ BatchDescriptorHeader DescriptorCompiler::compile_and_merge(
 ### 3.1 单元基准压测命令
 ```bash
 cd ./原型验证代码/PVT-02 && make clean && make -j16
-./async_dag_bench --chunks 16 --chunk_tokens 2048 --discrete_ratio 0.5
+./async_dag_bench --block-count 1024 --fragmentation 0.5 --chunks 16 --compute-ms 300 --dma-ms 160 --loops 1000 --out res_compiler_dag.csv
 ```
 
 ### 3.2 对标 vLLM-Ascend MooncakeLayerwiseConnector 在线消融

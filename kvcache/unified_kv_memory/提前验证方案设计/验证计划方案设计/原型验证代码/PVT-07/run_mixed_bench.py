@@ -1,64 +1,93 @@
 #!/usr/bin/env python3
-"""
-PVT-07: run_mixed_bench.py - 全链路端到端最小闭环总门禁压测脚本
-对比官方原生 Mooncake 与 深度重构增强版 (Unified KV) 在前后台混压下的性能与服务质量保障 (SemanticQoS)
-"""
+"""汇总 PVT-07 三组实测 JSON，并按规定基线计算 TTFT、QPS 与 TPOT。"""
 import argparse
 import json
-import csv
-import os
+from pathlib import Path
 
-def run_suite(out_json: str, out_csv: str):
-    print("=== PVT-07 Full Vertical Slice & QoS Suite ===")
+REQUIRED = {
+    "run_id", "package_id", "config_hash", "evidence_level", "hardware_profile", "topology_profile",
+    "workload_id", "model_id", "target_rate_rps", "p99_ttft_ms", "p99_tpot_ms", "qps", "bg_bw_gbps"
+}
 
-    # 1. 纯前台独立基准
-    base = {"mode": "pure_foreground", "p99_ttft_ms": 1250.0, "p99_tpot_ms": 16.5, "qps": 22.5, "bg_bw_gbps": 0.0}
-    # 2. 官方原生 Mooncake 混压 (无细粒度 QoS 保护)
-    mooncake_native = {"mode": "mooncake_native_mixed", "p99_ttft_ms": 1420.0, "p99_tpot_ms": 48.6, "qps": 18.2, "bg_bw_gbps": 385.0}
-    # 3. 深度重构增强版 (Unified KV) 开启 SemanticQoS
-    unified_kv_qos = {"mode": "unified_kv_mixed_qos", "p99_ttft_ms": 1265.0, "p99_tpot_ms": 16.8, "qps": 22.1, "bg_bw_gbps": 312.0}
-    # 4. 深度重构增强版全链路复用 (50% Prefix Hit + 异步流水)
-    unified_kv_reuse = {"mode": "unified_kv_full_slice", "p99_ttft_ms": 810.0, "p99_tpot_ms": 16.9, "qps": 28.6, "bg_bw_gbps": 295.0}
 
-    # 交叉指标推导
-    tpot_interference_pct = ((unified_kv_qos["p99_tpot_ms"] - base["p99_tpot_ms"]) / base["p99_tpot_ms"]) * 100.0
-    ttft_reduction_pct = ((base["p99_ttft_ms"] - unified_kv_reuse["p99_ttft_ms"]) / base["p99_ttft_ms"]) * 100.0
-    qps_gain_pct = ((unified_kv_reuse["qps"] - base["qps"]) / base["qps"]) * 100.0
-
-    summary = {
-        "pure_foreground": base,
-        "mooncake_native_mixed": mooncake_native,
-        "unified_kv_mixed_qos": unified_kv_qos,
-        "unified_kv_full_slice": unified_kv_reuse,
-        "metrics": {
-            "tpot_interference_pct": round(tpot_interference_pct, 2),
-            "ttft_reduction_pct": round(ttft_reduction_pct, 2),
-            "qps_gain_pct": round(qps_gain_pct, 2),
-            "tpot_interference_pass": tpot_interference_pct < 3.0,
-            "ttft_reduction_pass": ttft_reduction_pct >= 20.0,
-            "qps_gain_pass": qps_gain_pct >= 10.0
-        }
+def load(path: str, target_rate_rps: float | None) -> dict:
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(data, dict) and "rows" in data:
+        rows = data["rows"]
+        if target_rate_rps is not None:
+            rows = [row for row in rows if float(row.get("target_rate_rps", -1)) == target_rate_rps]
+        if len(rows) != 1:
+            raise ValueError(f"{path} must resolve to exactly one row; got {len(rows)}")
+        data = rows[0]
+    aliases = {
+        "p99_ttft_ms": "ttft_p99_ms",
+        "p99_tpot_ms": "tpot_p99_ms",
+        "qps": "actual_qps",
     }
+    for target, source in aliases.items():
+        if data.get(target) is None and data.get(source) is not None:
+            data[target] = data[source]
+    missing = REQUIRED - set(data)
+    if missing:
+        raise ValueError(f"{path} missing fields: {sorted(missing)}")
+    if data["evidence_level"] == "DEMO":
+        raise ValueError(f"{path} is DEMO and cannot close E3")
+    return data
 
-    with open(out_json, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
 
-    with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["workload_mode", "foreground_qps", "bg_io_gbps", "ttft_p99_ms", "tpot_p99_ms", "tpot_jitter_pct"])
-        for item in [base, mooncake_native, unified_kv_qos, unified_kv_reuse]:
-            jitter = ((item["p99_tpot_ms"] - base["p99_tpot_ms"]) / base["p99_tpot_ms"]) * 100.0 if item["mode"] != "pure_foreground" else 0.0
-            writer.writerow([item["mode"], item["qps"], item["bg_bw_gbps"], item["p99_ttft_ms"], item["p99_tpot_ms"], f"{jitter:.2f}"])
+def percent_change(new: float, baseline: float) -> float:
+    if baseline <= 0:
+        raise ValueError("baseline must be positive")
+    return (new - baseline) / baseline * 100.0
 
-    print(f"=== PVT-07 Final Summary saved to {out_json} and {out_csv} ===")
-    print(f"  TPOT Interference: {tpot_interference_pct:.2f}% (Goal: < 3.0%, PASS: {summary['metrics']['tpot_interference_pass']})")
-    print(f"  TTFT Reduction: {ttft_reduction_pct:.2f}% (Goal: >= 20.0%, PASS: {summary['metrics']['ttft_reduction_pass']})")
-    print(f"  QPS Gain: {qps_gain_pct:.2f}% (Goal: >= 10.0%, PASS: {summary['metrics']['qps_gain_pass']})")
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--unified-foreground", required=True)
+    parser.add_argument("--mooncake-native-mixed", required=True)
+    parser.add_argument("--unified-mixed", required=True)
+    parser.add_argument("--background-tolerance-pct", type=float, default=5.0)
+    parser.add_argument("--target-rate-rps", type=float, help="summary.json 含多个压测速率时选择同一目标速率")
+    parser.add_argument("--out", default="pvt07_summary.json")
+    args = parser.parse_args()
+    try:
+        foreground = load(args.unified_foreground, args.target_rate_rps)
+        native = load(args.mooncake_native_mixed, args.target_rate_rps)
+        enhanced = load(args.unified_mixed, args.target_rate_rps)
+        if foreground["package_id"] != enhanced["package_id"]:
+            raise ValueError("TPOT baseline must use the same enhanced package_id")
+        for field in ["hardware_profile", "topology_profile", "workload_id", "model_id", "target_rate_rps"]:
+            values = {foreground[field], native[field], enhanced[field]}
+            if len(values) != 1:
+                raise ValueError(f"A/B fairness field differs: {field}={sorted(values, key=str)}")
+        bg_delta_pct = abs(percent_change(enhanced["bg_bw_gbps"], native["bg_bw_gbps"]))
+        if bg_delta_pct > args.background_tolerance_pct:
+            raise ValueError(f"mixed background bandwidth differs by {bg_delta_pct:.2f}%")
+        ttft_reduction_pct = -percent_change(enhanced["p99_ttft_ms"], native["p99_ttft_ms"])
+        qps_gain_pct = percent_change(enhanced["qps"], native["qps"])
+        tpot_interference_pct = percent_change(enhanced["p99_tpot_ms"], foreground["p99_tpot_ms"])
+        metrics = {
+            "ttft_reduction_pct_vs_mooncake_native_mixed": ttft_reduction_pct,
+            "qps_gain_pct_vs_mooncake_native_mixed": qps_gain_pct,
+            "tpot_interference_pct_vs_same_package_foreground": tpot_interference_pct,
+            "background_bandwidth_delta_pct": bg_delta_pct,
+        }
+        gates = {
+            "ttft_reduction_ge_20": ttft_reduction_pct >= 20.0,
+            "qps_gain_ge_10": qps_gain_pct >= 10.0,
+            "tpot_interference_lt_3": tpot_interference_pct < 3.0,
+            "background_load_comparable": True,
+        }
+        result = {"status": "PASS" if all(gates.values()) else "FAIL", "metrics": metrics, "gates": gates,
+                  "inputs": {"unified_foreground": foreground, "mooncake_native_mixed": native, "unified_mixed": enhanced}}
+        code = 0 if result["status"] == "PASS" else 1
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        result = {"status": "INVALID_EVIDENCE", "invalid_reason": str(exc)}
+        code = 2
+    Path(args.out).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({"output": args.out, "status": result["status"]}, ensure_ascii=False))
+    return code
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--out-json", type=str, default="res_pvt07_summary.json")
-    parser.add_argument("--out-csv", type=str, default="pvt07_e2e_results.csv")
-    args = parser.parse_args()
-
-    run_suite(args.out_json, args.out_csv)
+    raise SystemExit(main())

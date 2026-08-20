@@ -1,9 +1,11 @@
 # PVT-08：1-to-N 组播式 KV 分发拓扑与效能验证实施方案设计
-## —— 真实业务广播场景穿刺：硬件网络多播 vs 软件分层中继 (Staging Fanout) 效能与拓扑验证
+## —— 真实业务广播场景验证：硬件网络多播与软件分层中继 (Staging Fanout) 效能及拓扑对比
 
-> **验证 ID**：PVT-08 (原 CVT-01 升级)  
+> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。输入必须覆盖节点数、对象大小、拓扑和故障；输出必须包含源端 Egress 字节/带宽、各接收端完成时间、重试和慢节点影响。无硬件多播时标记 `NOT-SUPPORTED/N/A`，不记 PASS。
+
+> **验证 ID**：PVT-08  
 > **验证名称**：1-to-N 组播式 KV 分发：硬件多播 vs 软件分层中继 (Staging Fanout) 拓扑与效能验证  
-> **穿刺优先级**：**🟢 P2 级（拓展验证项）**  
+> **验证优先级**：**🟢 P2 级（拓展验证项）**  
 > **对应验证阶段**：**E1 核心数据路径与分发拓扑打通**  
 > **证伪标记**：否（分发效能与拓扑选型确认）  
 > **建议周期**：3~4 人日  
@@ -105,7 +107,8 @@ flowchart TD
 ```bash
 cd ./原型验证代码/PVT-08 && make clean && make
 ./multicast_fanout_bench --nodes 8 --sizes 1M,16M,64M --out res_fanout.csv
-python3 test_fanout_scenarios.py --scenario prompt_broadcast --nodes 16
+python3 test_fanout_scenarios.py --scenario prompt_broadcast --nodes 16 --payload-mb 64 --topology staging_fanout --fault none --out scenario_prompt_broadcast.json
+./multicast_fanout_bench --nodes 16 --payload-mb 64 --out res_prompt_broadcast.csv
 ```
 
 ---

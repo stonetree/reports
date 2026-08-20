@@ -1,9 +1,11 @@
 # PVT-05：HBM-SSD 直达容量主路径与 DDR 条件角色 Tiering 验证实施方案设计
 ## —— Mooncake LocalCache 分层存储重构：打通 io_uring HBM↔SSD 直达主路径
 
+> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。固定样例只用于展示流程；正式对照包含纯 HBM、原生 Mooncake SSD Offload、DDR 中转和 SSD 直达四组。容量按实际可服务 Token/请求计算，Host DDR 触碰来自探针。
+
 > **验证 ID**：PVT-05  
 > **验证名称**：HBM↔SSD 直达容量主路径与 DDR 条件角色 Tiering（分层存储）验证  
-> **穿刺优先级**：**🔴 P0 级（核心决胜项）**  
+> **验证优先级**：**🔴 P0 级（核心关键项）**  
 > **对应验证阶段**：**E2/E3 分层存储扩容收益**  
 > **证伪标记**：否（容量扩展价值确认）  
 > **建议周期**：6~8 人日  
@@ -20,7 +22,7 @@
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 待验证核心命题
-HBM（High Bandwidth Memory，高带宽显存）容量昂贵且有限，Mooncake 原生 LocalCache 主要依赖 Host DRAM 内存池，大并发长文本超载时极易 OOM。虽然 Mooncake 最新主线在 `types.h` 中预留了 `TransportType::IOURING` 通道，但尚缺乏裸盘物理扇区管理与 NPU HBM 直达机制。本验证旨在重构底层存储引擎，在 `TransportType::IOURING` 通道上打通 NVMe SSD 容量主路径：
+HBM（High Bandwidth Memory，高带宽显存）容量有限。固定 Mooncake 基线的 LocalCache 主要依赖 Host DRAM 内存池；`types.h` 预留了 `TransportType::IOURING` 通道，但没有覆盖本项目要求的裸盘物理扇区管理与 NPU HBM 直达机制。本验证在该接口基础上评估 NVMe SSD 容量主路径：
 1. **HBM ↔ SSD 直达容量主路径**有效读写带宽达到 NVMe 物理设备顺序峰值的 **$\ge 80\%$**；
 2. 在 130% ~ 200% HBM 额定容量的超载压力（Memory Overcommit，内存超配）下，通过 Tiering（分层存储技术：冷 KV Cache 异步沉淀至 SSD）换入换出，实现**可服务有效 Token 容量提升 $\ge 30\%$**，**OOM（Out of Memory 内存溢出）/ 请求抢占驱逐率下降 $\ge 50\%$**；
 3. 验证 **Payload 路径严格 Bypass Host DDR**（数据直接在 NVMe SSD 与 NPU HBM 之间流转，严格绕过主机内存 Host DDR），证明 DDR 仅适合作为元数据索引与轻量注册缓冲的“条件角色”，杜绝将 DDR 作为必经中转带来的无效益 CPU 拷贝与总线带宽争用。
@@ -111,7 +113,7 @@ flowchart TD
 
 ```
 原型验证代码/PVT-05/
-├── tier_storage_bench.cc      # NVMe SSD io_uring Direct I/O 与 DDR 中转吞吐对比工具
+├── tier_storage_bench.cc      # NVMe SSD 直达与 DDR 中转结果字段脚手架；当前不执行真实 I/O
 ├── Makefile                   # 编译构建工程 (make -j16)
 └── benchmark_tiering.py       # 150%~200% HBM 显存超载下分层扩容压测脚本
 ```
@@ -119,8 +121,10 @@ flowchart TD
 ### 3.1 单元存储基准压测
 ```bash
 cd ./原型验证代码/PVT-05 && make clean && make -j16
-./tier_storage_bench --device /dev/nvme0n1 --block_size 16M --qd 32 --out res_ssd_direct.csv
+./tier_storage_bench --device /dev/nvme0n1 --block-size 16M --qd 32 --out res_ssd_direct.csv
 ```
+
+当前程序输出 DEMO 级固定样例，只用于验证参数、结果字段和失败关闭流程。LAB/MEASURED 必须将其内部固定值替换为 SPDK、io_uring 或现场存储适配器返回的实际提交与完成量，并接入 Host CPU 数据拷贝探针。
 
 ### 3.2 对标 Mooncake 原生 SSD Offload 在线超载打流压测
 ```bash
@@ -143,8 +147,11 @@ python3 -m vllm.benchmarks.benchmark_serving \
     --port 8000 \
     --save-result --result-filename ./res_tiering_native.json
 
-# 3. 切换为 io_uring FIXED 裸盘直达扩展版，重复打流对比 OOM 降幅
-python3 ./benchmark_tiering.py --concurrency 64 --overcommit-ratio 1.5 --out tiering_results.csv
+# 3. W0 使用结果 Schema 脚手架核对四组模式的输入输出；该命令不产生正式性能证据
+python3 ./benchmark_tiering.py --mode hbm_ssd_direct --concurrency 64 --overcommit 1.5 --out tiering_results_demo.json
+
+# 4. LAB/MEASURED 切换为各实际代码包与配置，重复同一工作负载，并将原始 vLLM/Mooncake 结果交给公共解析器
+# <site_tiering_runner> --mode pure_hbm|mooncake_native_ssd|hbm_ddr_tier|hbm_ssd_direct --manifest <manifest.json>
 ```
 
 ---

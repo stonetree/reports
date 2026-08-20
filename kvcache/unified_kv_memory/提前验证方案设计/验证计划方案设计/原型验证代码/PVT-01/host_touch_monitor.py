@@ -1,56 +1,60 @@
 #!/usr/bin/env python3
-"""
-host_touch_monitor.py - Linux eBPF / bpftrace 监控脚本
-用于捕获目标进程是否触发内核态或用户态 memcpy/memmove，以判定 Host Payload Touch 是否严格为 0。
-"""
-import sys
+"""采集 Host Payload Touch。缺少正式探针时失败关闭，不生成 0 或 PASS。"""
+import argparse
+import json
+import re
+import shutil
 import subprocess
 import time
+from pathlib import Path
 
-BPF_TRACE_PROGRAM = """
-kprobe:memcpy, kprobe:memmove, kprobe:copy_user_generic_unrolled /pid == %d/ {
+BPF_PROGRAM = r"""
+kprobe:memcpy, kprobe:memmove /pid == %d/ {
     @memcpy_calls = count();
     @memcpy_bytes = sum(arg2);
 }
-
-tracepoint:io_uring:io_uring_complete /pid == %d/ {
-    @cq_events = count();
-}
 """
 
-def run_monitor(target_pid: int, duration_sec: int = 10):
-    print(f"=== Starting eBPF Host Touch Monitor for PID {target_pid} (Duration: {duration_sec}s) ===")
-    program = BPF_TRACE_PROGRAM % (target_pid, target_pid)
-    cmd = ["bpftrace", "-e", program]
 
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        time.sleep(duration_sec)
-        proc.terminate()
-        stdout, stderr = proc.communicate()
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("target_pid", type=int)
+    parser.add_argument("duration_sec", nargs="?", type=int, default=10)
+    parser.add_argument("--out", default="host_touch_evidence.json")
+    parser.add_argument("--evidence-level", choices=["LAB", "MEASURED"], default="LAB")
+    args = parser.parse_args()
+    evidence = {
+        "target_pid": args.target_pid,
+        "duration_sec": args.duration_sec,
+        "evidence_level": args.evidence_level,
+        "probe": "bpftrace:kprobe_memcpy_memmove",
+    }
+    if not shutil.which("bpftrace"):
+        evidence.update({"status": "INVALID_EVIDENCE", "host_touch_bytes": None, "invalid_reason": "bpftrace_not_found"})
+        Path(args.out).write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+        print(json.dumps(evidence))
+        return 2
 
-        print("=== eBPF Kernel Probe Output ===")
-        print(stdout)
-        if stderr:
-            print("Errors/Warnings:", stderr)
+    process = subprocess.Popen(
+        ["bpftrace", "-e", BPF_PROGRAM % args.target_pid],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    time.sleep(args.duration_sec)
+    process.terminate()
+    stdout, stderr = process.communicate(timeout=10)
+    match = re.search(r"@memcpy_bytes:\s*(\d+)", stdout)
+    if match is None:
+        evidence.update({"status": "INVALID_EVIDENCE", "host_touch_bytes": None, "invalid_reason": "probe_output_missing_memcpy_bytes", "stderr": stderr})
+        code = 3
+    else:
+        evidence.update({"status": "OK", "host_touch_bytes": int(match.group(1)), "invalid_reason": None})
+        code = 0
+    Path(args.out).write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+    print(json.dumps(evidence))
+    return code
 
-        # 简单解析
-        if "@memcpy_bytes" in stdout:
-            print("WARNING: Non-zero Host Payload Touch detected!")
-        else:
-            print("SUCCESS: Zero Host Payload Touch confirmed (0 bytes copied by CPU).")
-
-    except FileNotFoundError:
-        print("Note: bpftrace not found in path. Simulating Zero-Touch check:")
-        print("  - Host memcpy calls: 0")
-        print("  - Host copied bytes: 0 Bytes")
-        print("  - Host Touch Ratio: 0.00% (PASS)")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 host_touch_monitor.py <target_pid> [duration_sec]")
-        sys.exit(1)
-
-    pid = int(sys.argv[1])
-    dur = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-    run_monitor(pid, dur)
+    raise SystemExit(main())

@@ -1,51 +1,42 @@
 #!/usr/bin/env python3
-"""
-export_capability_matrix.py - 自动解析 raw_trans_bench.csv 并生成标准 capability_matrix.json
-为上层 QueryPlan 与调度器提供实测硬件介质能力参数。
-"""
+"""将传输结果与 Host Touch 探针证据汇总为硬件能力矩阵。"""
+import argparse
 import csv
 import json
-import os
-import sys
+from pathlib import Path
 
-def parse_csv_to_matrix(csv_files: list, output_json: str):
-    matrix = {
-        "version": "1.0",
-        "description": "Hardware Capability Matrix from PVT-01 actual measurements",
-        "paths": {}
-    }
 
-    for fpath in csv_files:
-        if not os.path.exists(fpath):
-            continue
-        with open(fpath, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                mode = row["path_mode"]
-                size = int(row["payload_bytes"])
-                qd = int(row["queue_depth"])
-                bw = float(row["bandwidth_gbps"])
-                p50 = float(row["latency_p50_us"])
-                p99 = float(row["latency_p99_us"])
-                cpu = float(row["host_cpu_pct"])
-
-                key = f"{mode}_{size//1024}KB_QD{qd}"
-                matrix["paths"][key] = {
-                    "mode": mode,
-                    "payload_bytes": size,
-                    "queue_depth": qd,
-                    "effective_bw_gbps": bw,
-                    "latency_p50_us": p50,
-                    "latency_p99_us": p99,
-                    "host_cpu_pct": cpu,
-                    "host_touch_bytes": 0 if "direct" in mode else size
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("csv_files", nargs="+")
+    parser.add_argument("--host-touch-evidence", required=True)
+    parser.add_argument("--out", default="capability_matrix.json")
+    args = parser.parse_args()
+    touch = json.loads(Path(args.host_touch_evidence).read_text(encoding="utf-8"))
+    paths = {}
+    for csv_file in args.csv_files:
+        with Path(csv_file).open("r", encoding="utf-8") as stream:
+            for row in csv.DictReader(stream):
+                key = f"{row['path_mode']}_{row['payload_bytes']}B_QD{row['queue_depth']}"
+                status = row["status"]
+                valid = row["evidence_level"] != "DEMO" and status == "OK" and touch.get("status") == "OK" and int(row["actual_completed_bytes"]) > 0
+                paths[key] = {
+                    "mode": row["path_mode"],
+                    "payload_bytes": int(row["payload_bytes"]),
+                    "queue_depth": int(row["queue_depth"]),
+                    "actual_completed_bytes": int(row["actual_completed_bytes"]),
+                    "effective_bw_gbps": float(row["bandwidth_gbps"]) if valid else None,
+                    "latency_p50_us": float(row["latency_p50_us"]) if valid else None,
+                    "latency_p99_us": float(row["latency_p99_us"]) if valid else None,
+                    "host_cpu_pct": float(row["host_cpu_pct"]),
+                    "host_touch_bytes": touch.get("host_touch_bytes") if valid else None,
+                    "evidence_level": row["evidence_level"],
+                    "status": "OK" if valid else "INVALID_EVIDENCE",
                 }
+    matrix = {"schema_version": "capability_matrix.v2", "host_touch_evidence": touch, "paths": paths}
+    Path(args.out).write_text(json.dumps(matrix, indent=2), encoding="utf-8")
+    print(json.dumps({"output": args.out, "entries": len(paths)}))
 
-    with open(output_json, "w", encoding="utf-8") as f:
-        json.dump(matrix, f, indent=2)
-
-    print(f"Exported capability matrix with {len(matrix['paths'])} entries to {output_json}")
 
 if __name__ == "__main__":
-    files = sys.argv[1:] if len(sys.argv) > 1 else ["res_urma.csv", "res_ubmem.csv", "res_nvme.csv"]
-    parse_csv_to_matrix(files, "capability_matrix.json")
+    main()

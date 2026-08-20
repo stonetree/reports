@@ -1,9 +1,11 @@
 # PVT-04：QueryPlan 微秒级动态决策引擎与 CostEvaluator 验证实施方案设计
 ## —— Mooncake 启发式调度器深度重构：微秒级动态 ROI 选路决策引擎
 
+> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。每个样本必须同时记录运行时 KV 字节、预测路径、实际路径、预测耗时、实测耗时、反事实最优路径和决策后悔值；缺少实际执行结果时只能形成 DEMO 决策逻辑结论。
+
 > **验证 ID**：PVT-04  
 > **验证名称**：QueryPlan 动态决策引擎与 CostEvaluator 成本预估模型验证  
-> **穿刺优先级**：**🔴 P0 级（核心决胜项）**  
+> **验证优先级**：**🔴 P0 级（核心关键项）**  
 > **对应验证阶段**：**E2 动态调度决策准确性**  
 > **证伪标记**：否（决策能力确认）  
 > **建议周期**：5~7 人日  
@@ -21,7 +23,7 @@
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 待验证核心命题
-物理命中（Raw Hit）并不等于一定带来性能收益。当网络拥塞、前缀过短或请求 Deadline（服务最晚容忍时延）极其苛刻时，Mooncake 最新主线 TENT 模块中的 `admission_queue` 仅依靠硬超时被动丢弃，缺乏前置量化决策，强行从远端加载 KV Cache 反而慢于本地直接重算。本验证旨在重构调度层，在 TENT 选路前置注入微秒级动态决策大脑：
+物理命中（Raw Hit）并不等于一定带来性能收益。当网络拥塞、前缀过短或请求 Deadline（服务最晚容忍时延）较紧时，固定 Mooncake 基线中的准入流程不能覆盖本项目所需的前置量化决策，远端加载可能慢于本地直接重算。本验证在选路前增加微秒级动态决策：
 1. **QueryPlan 动态决策引擎**（在微秒级时间内根据链路状态、算力与上下文长度选择最优数据加载或重算路径）能够在 **$P99 < 5\mu s$** 内，基于实时 Telemetry 链路状态与 NPU 算力吞吐，在 `Local_HBM_Attach`, `Remote_URMA_Load`, `Local_SSD_Restore`, `Recompute` 之间输出全局最优执行计划；
 2. **CostEvaluator 成本预估模型**（在发起请求前量化预估各存储路径与重算开销的数学模型）的预测误差 **$\text{MAPE} < 20\%$**，决策准确率 **$\ge 90\%$**，且**负收益命中率（拉取与加载总开销 > 本地直接重算耗时）严格 $< 1\%$**。
 
@@ -46,7 +48,7 @@
 
 enum class PlanAction : uint8_t {
     Local_HBM_Attach = 0, // 本地 HBM 直接复用 (开销 ~0.05ms)
-    Remote_URMA_Load = 1, // 跨节点 800G URMA 传输 (开销 ~2.5ms)
+    Remote_URMA_Load = 1, // 跨节点 URMA 传输；开销由硬件能力矩阵实测输入
     Local_SSD_Restore= 2, // 本地 NVMe SSD 直达换入 (开销 ~12.0ms)
     Recompute        = 3  // 本地算力直接重算 (Prefill Compute)
 };
@@ -114,7 +116,8 @@ flowchart TD
 编译与测试命令：
 ```bash
 cd ./原型验证代码/PVT-04 && make clean && make
-./query_plan_bench --threads 64 --qps 100000 --duration 10
+# scenarios.csv 字段：request_id,prefix_tokens,deadline_ms,bw_gbps,queue_ms,is_cached,kv_bytes_per_token,compute_tps,metadata_ms,actual_load_ms,actual_recompute_ms
+./query_plan_bench --scenario-csv scenarios.csv --evidence-level LAB --out query_plan_results.csv
 ```
 
 ---

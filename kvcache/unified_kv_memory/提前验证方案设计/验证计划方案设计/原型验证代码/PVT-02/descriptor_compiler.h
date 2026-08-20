@@ -1,39 +1,43 @@
-// descriptor_compiler.h - 异构框架 Layout 描述符编译器头文件
 #ifndef DESCRIPTOR_COMPILER_H
 #define DESCRIPTOR_COMPILER_H
 
 #include <cstdint>
 #include <vector>
-#include <string>
 
-// 逻辑物理块描述
 struct LogicalBlock {
     uint64_t block_id;
     uint64_t phys_addr;
     uint32_t size_bytes;
 };
 
-// 硬件 Scatter-Gather 描述符条目
 struct HardwareSGEntry {
     uint64_t src_phys_addr;
     uint64_t dst_phys_addr;
     uint32_t len_bytes;
+    uint32_t flags;
 };
 
-// 批量提交描述符头结构
-struct BatchDescriptorHeader {
+// 仅该固定字段 wire header 声明为 64B POD；动态 entries 存放在宿主容器中。
+struct WireBatchDescriptorHeader {
+    uint32_t version;
+    uint32_t flags;
     uint32_t entry_count;
-    uint32_t flags; // 0x01: ASYNC, 0x02: FENCE_BARRIER
+    uint32_t reserved0;
+    uint64_t total_bytes;
+    uint64_t manifest_id;
+    uint8_t reserved1[32];
+};
+static_assert(sizeof(WireBatchDescriptorHeader) == 64, "wire header must be 64 bytes");
+
+struct CompiledBatch {
+    WireBatchDescriptorHeader header{};
     std::vector<HardwareSGEntry> entries;
 };
 
 class DescriptorCompiler {
 public:
-    DescriptorCompiler() = default;
-
-    // 编译 Manifest 并执行相邻物理连续块的合并
-    BatchDescriptorHeader compile_manifest(const std::vector<LogicalBlock>& src_blocks,
-                                          const std::vector<LogicalBlock>& dst_blocks);
+    CompiledBatch compile_manifest(const std::vector<LogicalBlock>& source,
+                                   const std::vector<LogicalBlock>& target) const;
 };
 
-#endif // DESCRIPTOR_COMPILER_H
+#endif

@@ -1,56 +1,24 @@
-// rcu_migration_bench.cc - 页迁移/Defrag 软件 RCU 与硬件 Atomic Remap 必要性证伪微基准 (CVT-01)
-// 测量 32 个并发 Reader 持续读取下，Stop-the-world 锁表 vs 软件 RCU Copy-on-Migrate 的最大停顿与 TPOT 抖动
-#include <iostream>
-#include <vector>
-#include <chrono>
+// CVT-01 结果 Schema 脚手架。固定值仅为 DEMO；正式测试需要并发 Reader 和原始停顿样本。
 #include <fstream>
-#include <algorithm>
-#include <atomic>
-#include <thread>
-#include <cstring>
-
-struct MigrationMetrics {
-    std::string scheme;
-    double max_pause_ms;
-    double p99_read_us;
-    double tpot_jitter_pct;
-    int corrupted_reads;
-    bool rollback_safe;
-};
+#include <iostream>
+#include <string>
 
 int main(int argc, char** argv) {
-    std::cout << "=== CVT-01: Page Migration Software RCU vs Hardware Atomic Remap Benchmark ===\n";
-    std::cout << "Extent Size: 16 MB, Concurrent Readers: 32 (100K QPS)\n";
-
-    // 方案对比实测值 (基线读延迟 2.5us)
-    // 方案 A: Stop-the-world 全局锁 -> 最大停顿 14.50ms，TPOT 劣化 +125%
-    // 方案 B: 软件 RCU Copy-on-Migrate -> 指针原子翻转耗时 < 1us，最大停顿 0.08ms (80us)，TPOT 抖动 +1.8%
-    // 方案 C: 硬件 Atomic Remap 原语 -> 最大停顿 0.05ms (50us)，TPOT 抖动 +1.2%
-    std::vector<MigrationMetrics> metrics = {
-        {"Stop_The_World_Lock", 14.50, 14500.0, 125.0, 0, false},
-        {"Software_RCU_Copy_On_Migrate", 0.08, 3.8, 1.8, 0, true},
-        {"Hardware_Atomic_Remap", 0.05, 3.5, 1.2, 0, false}
-    };
-
-    std::cout << "\nResults Summary:\n";
-    for (const auto& m : metrics) {
-        std::cout << "  - [" << m.scheme << "] Max Pause: " << m.max_pause_ms
-                  << " ms, P99 Read: " << m.p99_read_us << " us, TPOT Jitter: +"
-                  << m.tpot_jitter_pct << "% (Corrupted Reads: " << m.corrupted_reads << ")\n";
+    bool hardware_supported = false;
+    std::string output = "res_rcu_migration.csv";
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--hardware-supported") hardware_supported = true;
+        else if (arg == "--out" && i + 1 < argc) output = argv[++i];
     }
-
-    std::cout << "\nFalsification Conclusion:\n"
-              << "  - Software RCU Pause: 0.08 ms (< 1.0 ms threshold, PASS)\n"
-              << "  - TPOT Jitter: 1.8% (< 5.0% threshold, PASS)\n"
-              << "  - Hardware Atomic Remap is successfully FALSIFIED (not mandatory for production).\n";
-
-    std::ofstream out("res_rcu_migration.csv");
-    out << "scheme,max_pause_ms,p99_read_us,tpot_jitter_pct,corrupted_reads,rollback_safe\n";
-    for (const auto& m : metrics) {
-        out << m.scheme << "," << m.max_pause_ms << "," << m.p99_read_us << ","
-            << m.tpot_jitter_pct << "," << m.corrupted_reads << "," << (m.rollback_safe ? "YES" : "NO") << "\n";
-    }
-
-    std::cout << "Results saved to res_rcu_migration.csv\n";
+    std::ofstream stream(output);
+    stream << "scheme,concurrent_readers,p99_pause_ms,p99_read_us,tpot_interference_pct,corrupted_reads,rollback_safe,evidence_level,status\n";
+    stream << "STOP_THE_WORLD,32,14.5,14500,125,0,FALSE,DEMO,DEMO_ONLY\n";
+    stream << "SOFTWARE_RCU_COPY_ON_MIGRATE,32,0.08,3.8,1.8,0,TRUE,DEMO,DEMO_ONLY\n";
+    if (hardware_supported) stream << "HARDWARE_ATOMIC_REMAP,32,0.05,3.5,1.2,0,TRUE,DEMO,DEMO_ONLY\n";
+    else stream << "HARDWARE_ATOMIC_REMAP,32,,,,,,,DEMO,NOT_SUPPORTED\n";
+    std::cout << "output=" << output
+              << " evidence_level=DEMO formal_gates=p99_pause_ms<1,tpot_interference_pct<3,corrupted_reads=0"
+              << " hardware_status=" << (hardware_supported ? "DEMO_ONLY" : "NOT_SUPPORTED") << '\n';
     return 0;
 }

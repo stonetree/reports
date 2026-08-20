@@ -1,4 +1,4 @@
-// rank_consensus_bench.cc - TP=8 多卡空间共识与 6 维校验微基准 Harness
+// rank_consensus_bench.cc - 单进程 DEMO 脚手架；不代表 TP=8 多卡实测证据。
 #include "consume_eligibility.h"
 #include <iostream>
 #include <vector>
@@ -8,7 +8,7 @@
 
 int main(int argc, char** argv) {
     int loops = 100000;
-    std::cout << "=== PVT-06: ConsumeEligibility & RankConsensus Benchmark ===\n";
+    std::cout << "=== PVT-06: ConsumeEligibility & RankConsensus workflow scaffold (DEMO) ===\n";
 
     ConsumeEligibility engine;
     SemanticMetadata req = {"Qwen2.5-72B", "tok_hash_123", "tpl_hash_456", "base", 2000000000ULL, true};
@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
               << "   - Loops: " << loops << "\n"
               << "   - Avg Latency: " << avg_us << " us (Goal: < 5.0 us)\n";
 
-    // 2. 模拟 TP=8 多卡空间共识耗时 (UBMEM Bitmap 广播与聚合)
+    // 2. 单进程位图流程示范。开发人员需替换为多进程/多卡完成事件。
     // 8 张卡并发广播 1-bit Ready 状态并求与 (AND)
     int consensus_loops = 10000;
     std::vector<double> consensus_lats_us;
@@ -54,13 +54,13 @@ int main(int argc, char** argv) {
 
     std::cout << "\n2. TP=8 RankConsensus Latency:\n"
               << "   - P50: " << p50 << " us\n"
-              << "   - P99: " << p99 << " us (Goal: < 100.0 us)\n";
+              << "   - P99: " << p99 << " us (DEMO only; not TP=8 evidence)\n";
 
     std::ofstream out("res_consensus_summary.csv");
-    out << "metric,value_us\n";
-    out << "eligibility_avg_us," << avg_us << "\n";
-    out << "consensus_p50_us," << p50 << "\n";
-    out << "consensus_p99_us," << p99 << "\n";
+    out << "metric,value_us,evidence_level,status\n";
+    out << "eligibility_avg_us," << avg_us << ",DEMO,DEMO_ONLY\n";
+    out << "consensus_p50_us," << p50 << ",DEMO,DEMO_ONLY\n";
+    out << "consensus_p99_us," << p99 << ",DEMO,DEMO_ONLY\n";
 
     std::cout << "\nResults saved to res_consensus_summary.csv\n";
     return 0;

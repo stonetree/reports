@@ -1,108 +1,69 @@
-// raw_trans_bench.cc - 零 Host Touch 传输底座微基准压测工具
-// 测量 URMA / UBMEM / NVMe Direct vs Host Memcpy vs Socket TCP 的带宽、延迟与 CPU 开销
-#include <iostream>
-#include <vector>
-#include <string>
-#include <chrono>
-#include <thread>
-#include <atomic>
-#include <fstream>
-#include <cstring>
-#include <cstdlib>
+// PVT-01 传输微基准脚手架。未接入设备 DMA 的路径明确标为 DEMO_ONLY。
 #include <algorithm>
-#include <unistd.h>
-#include <fcntl.h>
+#include <chrono>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <time.h>
+#include <vector>
 
-struct BenchArgs {
-    std::string mode = "urma_direct"; // urma_direct, ubmem_direct, nvme_direct, host_memcpy, socket_tcp
-    std::vector<size_t> sizes = {65536, 1048576, 16777216, 67108864, 268435456};
-    std::vector<int> qd_list = {1, 16, 64};
-    int loops = 1000;
-    std::string output_file = "res_trans.csv";
-};
-
-// 获取进程 CPU 时间 (微秒)
-uint64_t get_process_cpu_time_us() {
-    struct timespec ts;
+uint64_t process_cpu_us() {
+    timespec ts{};
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
     return ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000ULL;
 }
 
-void run_trans_case(const std::string& mode, size_t size, int qd, int loops, std::ofstream& out) {
-    char* src = (char*)aligned_alloc(4096, size);
-    char* dst = (char*)aligned_alloc(4096, size);
-    memset(src, 0xAB, size);
-    memset(dst, 0x00, size);
-
-    uint64_t cpu_start_us = get_process_cpu_time_us();
-    auto wall_start = std::chrono::high_resolution_clock::now();
-
-    std::vector<double> latencies_us;
-    latencies_us.reserve(loops);
-
-    for (int i = 0; i < loops; ++i) {
-        auto t0 = std::chrono::high_resolution_clock::now();
-
-        if (mode == "host_memcpy") {
-            // 对照组：Host CPU 深度介入内存拷贝
-            memcpy(dst, src, size);
-        } else if (mode == "urma_direct" || mode == "ubmem_direct") {
-            // 实验组：零 Host Touch 硬件 Direct DMA (无 CPU memcpy)
-            // 仅模拟描述符提交与完成轮询
-            for (volatile int k = 0; k < 10; ++k);
-        } else if (mode == "nvme_direct") {
-            // NVMe SSD Direct I/O 模拟 (O_DIRECT / SPDK Bypass)
-            for (volatile int k = 0; k < 20; ++k);
-        } else {
-            // Socket TCP 模拟
-            memcpy(dst, src, size / 4); // 内核协议栈部分拷贝开销
-        }
-
-        auto t1 = std::chrono::high_resolution_clock::now();
-        latencies_us.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
-    }
-
-    auto wall_end = std::chrono::high_resolution_clock::now();
-    uint64_t cpu_end_us = get_process_cpu_time_us();
-
-    double wall_time_sec = std::chrono::duration<double>(wall_end - wall_start).count();
-    double cpu_time_sec = (cpu_end_us - cpu_start_us) / 1e6;
-    double cpu_util_pct = (cpu_time_sec / std::max(wall_time_sec, 0.001)) * 100.0;
-
-    double total_gb = (size * (double)loops * 8.0) / 1e9;
-    double bw_gbps = total_gb / wall_time_sec;
-
-    std::sort(latencies_us.begin(), latencies_us.end());
-    double lat_p50 = latencies_us[latencies_us.size() * 0.50];
-    double lat_p99 = latencies_us[latencies_us.size() * 0.99];
-
-    std::cout << "[" << mode << "] Size: " << size / 1024 << " KB, QD: " << qd
-              << " => BW: " << bw_gbps << " Gbps, P99 Lat: " << lat_p99 << " us, Host CPU: " << cpu_util_pct << "%\n";
-
-    out << mode << "," << size << "," << qd << "," << bw_gbps << ","
-        << lat_p50 << "," << lat_p99 << "," << cpu_util_pct << "\n";
-    out.flush();
-
-    free(src);
-    free(dst);
-}
-
 int main(int argc, char** argv) {
-    BenchArgs args;
+    std::string mode = "urma_direct";
+    std::string output = "res_trans.csv";
+    size_t payload_bytes = 64 * 1024 * 1024;
+    int queue_depth = 1;
+    int loops = 10;
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--mode" && i + 1 < argc) args.mode = argv[++i];
-        if (std::string(argv[i]) == "--out" && i + 1 < argc) args.output_file = argv[++i];
+        std::string arg = argv[i];
+        if (arg == "--mode" && i + 1 < argc) mode = argv[++i];
+        else if (arg == "--payload-bytes" && i + 1 < argc) payload_bytes = std::stoull(argv[++i]);
+        else if (arg == "--qd" && i + 1 < argc) queue_depth = std::stoi(argv[++i]);
+        else if (arg == "--loops" && i + 1 < argc) loops = std::stoi(argv[++i]);
+        else if (arg == "--out" && i + 1 < argc) output = argv[++i];
     }
 
-    std::ofstream out(args.output_file);
-    out << "path_mode,payload_bytes,queue_depth,bandwidth_gbps,latency_p50_us,latency_p99_us,host_cpu_pct\n";
-
-    for (size_t s : args.sizes) {
-        for (int qd : args.qd_list) {
-            run_trans_case(args.mode, s, qd, args.loops, out);
+    std::vector<char> source(payload_bytes, static_cast<char>(0xAB));
+    std::vector<char> target(payload_bytes, 0);
+    std::vector<double> latency_us;
+    const bool executable_reference = mode == "host_memcpy";
+    const uint64_t cpu_begin = process_cpu_us();
+    const auto wall_begin = std::chrono::steady_clock::now();
+    for (int loop = 0; loop < loops; ++loop) {
+        const auto begin = std::chrono::steady_clock::now();
+        for (int q = 0; q < queue_depth; ++q) {
+            if (executable_reference) std::memcpy(target.data(), source.data(), payload_bytes);
+            else asm volatile("" ::: "memory"); // 仅示范描述符提交位置，不代表数据已搬运。
         }
+        const auto end = std::chrono::steady_clock::now();
+        latency_us.push_back(std::chrono::duration<double, std::micro>(end - begin).count());
     }
+    const auto wall_end = std::chrono::steady_clock::now();
+    const uint64_t cpu_end = process_cpu_us();
+    const double wall_seconds = std::chrono::duration<double>(wall_end - wall_begin).count();
+    const uint64_t actual_completed_bytes = executable_reference
+        ? static_cast<uint64_t>(payload_bytes) * queue_depth * loops
+        : 0;
+    const double bandwidth_gbps = actual_completed_bytes > 0
+        ? actual_completed_bytes * 8.0 / wall_seconds / 1e9
+        : 0.0;
+    std::sort(latency_us.begin(), latency_us.end());
+    const double cpu_pct = (cpu_end - cpu_begin) / 1e6 / std::max(wall_seconds, 0.001) * 100.0;
+    const std::string status = executable_reference ? "OK" : "DEMO_ONLY";
 
-    std::cout << "Raw transfer benchmark completed. Results in " << args.output_file << "\n";
+    std::ofstream stream(output);
+    stream << "path_mode,payload_bytes,queue_depth,actual_completed_bytes,bandwidth_gbps,latency_p50_us,latency_p99_us,host_cpu_pct,evidence_level,status\n";
+    stream << mode << ',' << payload_bytes << ',' << queue_depth << ',' << actual_completed_bytes << ','
+           << bandwidth_gbps << ',' << latency_us[latency_us.size() / 2] << ','
+           << latency_us[static_cast<size_t>(latency_us.size() * 0.99)] << ',' << cpu_pct
+           << ",DEMO," << status << '\n';
+    std::cout << "status=" << status << " actual_completed_bytes=" << actual_completed_bytes
+              << " evidence_level=DEMO output=" << output << '\n';
     return 0;
 }

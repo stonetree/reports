@@ -1,58 +1,69 @@
 #!/usr/bin/env python3
-"""
-make_workload.py - 构造 R1 (前置预热) 与 R2 (复用测试) 请求数据集
-支持指定前缀 Token 数与独立 Token 数，构造 30%, 50%, 70%, 90%, 98% 复用率场景。
-"""
+"""构造 PVT-00 的 R1 预热请求和 R2 复用请求，输出统一 workload schema。"""
 import argparse
 import json
 import random
+import uuid
+from pathlib import Path
 
-def generate_workload(prefix_tokens: int, unique_tokens: int, output_file: str):
-    random.seed(42)
-    # 构造确定性的公共前缀 Token 序列 (1000 ~ 50000)
-    prefix_seq = [random.randint(100, 30000) for _ in range(prefix_tokens)]
-    # 构造 R2 独有的后半段 Token 序列
-    unique_seq = [random.randint(100, 30000) for _ in range(unique_tokens)]
 
-    r1_prompt = prefix_seq
+def load_layout_manifest(path: str | None) -> dict | None:
+    if not path:
+        return None
+    with Path(path).open("r", encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    if "kv_bytes_per_token" not in manifest:
+        raise ValueError("layout manifest must contain kv_bytes_per_token")
+    return manifest
+
+
+def generate_workload(args: argparse.Namespace) -> None:
+    random.seed(args.seed)
+    prefix_seq = [random.randint(100, 30000) for _ in range(args.prefix_tokens)]
+    unique_seq = [random.randint(100, 30000) for _ in range(args.unique_tokens)]
     r2_prompt = prefix_seq + unique_seq
-
-    reuse_ratio = prefix_tokens / len(r2_prompt)
-
+    reuse_ratio = args.prefix_tokens / len(r2_prompt)
+    layout = load_layout_manifest(args.layout_manifest)
     payload = {
+        "schema_version": "pvt00.workload.v1",
+        "workload_id": args.workload_id or str(uuid.uuid4()),
         "metadata": {
-            "prefix_tokens": prefix_tokens,
-            "unique_tokens": unique_tokens,
+            "model_type": args.model_type,
+            "model_id": args.model_id,
+            "model_layout_manifest": args.layout_manifest,
+            "kv_bytes_per_token": layout["kv_bytes_per_token"] if layout else None,
+            "prefix_tokens": args.prefix_tokens,
+            "unique_tokens": args.unique_tokens,
             "total_r2_tokens": len(r2_prompt),
-            "reuse_ratio": f"{reuse_ratio * 100:.1f}%"
+            "reuse_ratio": reuse_ratio,
+            "seed": args.seed,
         },
         "requests": [
-            {
-                "id": "R1_warmup",
-                "prompt_tokens": r1_prompt,
-                "max_tokens": 1,
-                "description": "Pre-warming prefix cache"
-            },
-            {
-                "id": "R2_reuse_test",
-                "prompt_tokens": r2_prompt,
-                "max_tokens": 32,
-                "description": "Evaluating TTFT with prefix cache hit"
-            }
-        ]
+            {"id": "R1_warmup", "prompt_tokens": prefix_seq, "max_tokens": 1},
+            {"id": "R2_reuse_test", "prompt_tokens": r2_prompt, "max_tokens": 32},
+        ],
     }
+    with Path(args.out).open("w", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
+    print(json.dumps({
+        "status": "OK",
+        "schema_version": payload["schema_version"],
+        "workload_id": payload["workload_id"],
+        "total_r2_tokens": len(r2_prompt),
+        "reuse_ratio": reuse_ratio,
+        "kv_bytes_per_token": payload["metadata"]["kv_bytes_per_token"],
+        "output": args.out,
+    }, ensure_ascii=False))
 
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-
-    print(f"Generated workload saved to {output_file}")
-    print(f"  R1 Tokens: {len(r1_prompt)}, R2 Tokens: {len(r2_prompt)}, Reuse Ratio: {reuse_ratio * 100:.1f}%")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix-tokens", type=int, default=50000, help="Prefix token length")
-    parser.add_argument("--unique-tokens", type=int, default=50000, help="Unique token length for R2")
-    parser.add_argument("--out", type=str, default="workload_50pct.json", help="Output JSON file")
-    args = parser.parse_args()
-
-    generate_workload(args.prefix_tokens, args.unique_tokens, args.out)
+    parser.add_argument("--model-type", choices=["mha", "mla", "gqa"], required=True)
+    parser.add_argument("--model-id", required=True)
+    parser.add_argument("--layout-manifest", help="运行时 KV 布局清单；正式测试必须提供")
+    parser.add_argument("--workload-id")
+    parser.add_argument("--prefix-tokens", type=int, default=50000)
+    parser.add_argument("--unique-tokens", type=int, default=50000)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--out", default="workload_50pct.json")
+    generate_workload(parser.parse_args())

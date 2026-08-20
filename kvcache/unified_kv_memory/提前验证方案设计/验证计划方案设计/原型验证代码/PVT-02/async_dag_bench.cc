@@ -1,88 +1,64 @@
-// async_dag_bench.cc - 描述符编译性能与 NPU 计算-传输异步 DAG 流水基准
 #include "descriptor_compiler.h"
-#include <iostream>
-#include <vector>
-#include <chrono>
-#include <thread>
-#include <fstream>
 #include <algorithm>
-#include <numeric>
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <vector>
 
-// 模拟生成物理 Block 列表
-std::vector<LogicalBlock> generate_mock_blocks(int count, double fragmentation, uint32_t block_size = 65536) {
+std::vector<LogicalBlock> mock_blocks(int count, double fragmentation, uint32_t block_size = 65536) {
     std::vector<LogicalBlock> blocks;
-    blocks.reserve(count);
-
-    uint64_t current_phys = 0x10000000ULL;
+    uint64_t address = 0x10000000ULL;
     for (int i = 0; i < count; ++i) {
-        LogicalBlock b;
-        b.block_id = i;
-        b.size_bytes = block_size;
-
-        if (i > 0 && (rand() / (double)RAND_MAX) < fragmentation) {
-            // 插入离散跳跃
-            current_phys += 0x1000000ULL + (rand() % 0x100000ULL);
-        }
-        b.phys_addr = current_phys;
-        current_phys += block_size;
-        blocks.push_back(b);
+        if (i > 0 && (std::rand() / static_cast<double>(RAND_MAX)) < fragmentation) address += 0x1000000ULL;
+        blocks.push_back({static_cast<uint64_t>(i), address, block_size});
+        address += block_size;
     }
     return blocks;
 }
 
+double percentile(std::vector<double> values, double p) {
+    std::sort(values.begin(), values.end());
+    return values[static_cast<size_t>((values.size() - 1) * p)];
+}
+
 int main(int argc, char** argv) {
-    int block_count = 1024;
-    double fragmentation = 0.5;
-    std::string out_file = "res_compiler_dag.csv";
-
-    std::cout << "=== PVT-02: Descriptor Compiler & Async DAG Benchmark ===\n";
-
-    auto src_blocks = generate_mock_blocks(block_count, fragmentation);
-    auto dst_blocks = generate_mock_blocks(block_count, fragmentation);
-
-    DescriptorCompiler compiler;
-
-    // 1. 压测编译耗时
-    int loops = 1000;
-    auto t0 = std::chrono::high_resolution_clock::now();
-    BatchDescriptorHeader batch;
-    for (int i = 0; i < loops; ++i) {
-        batch = compiler.compile_manifest(src_blocks, dst_blocks);
+    int block_count = 1024, chunks = 4, loops = 1000;
+    double fragmentation = 0.5, compute_ms = 300.0, dma_ms = 160.0;
+    std::string output = "res_compiler_dag.csv";
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--block-count" && i + 1 < argc) block_count = std::stoi(argv[++i]);
+        else if (arg == "--fragmentation" && i + 1 < argc) fragmentation = std::stod(argv[++i]);
+        else if (arg == "--chunks" && i + 1 < argc) chunks = std::stoi(argv[++i]);
+        else if (arg == "--compute-ms" && i + 1 < argc) compute_ms = std::stod(argv[++i]);
+        else if (arg == "--dma-ms" && i + 1 < argc) dma_ms = std::stod(argv[++i]);
+        else if (arg == "--loops" && i + 1 < argc) loops = std::stoi(argv[++i]);
+        else if (arg == "--out" && i + 1 < argc) output = argv[++i];
     }
-    auto t1 = std::chrono::high_resolution_clock::now();
-
-    double total_compile_us = std::chrono::duration<double, std::micro>(t1 - t0).count();
-    double avg_compile_us = total_compile_us / loops;
-    double compression_ratio = (1.0 - (double)batch.entry_count / block_count) * 100.0;
-
-    std::cout << "1. Compiler Performance:\n"
-              << "   - Raw Blocks: " << block_count << "\n"
-              << "   - Compiled SG Entries: " << batch.entry_count << "\n"
-              << "   - Compression Ratio: " << compression_ratio << "%\n"
-              << "   - Avg Compile Latency: " << avg_compile_us << " us\n";
-
-    // 2. 模拟串行 vs 异步 DAG 流水
-    // 假设 4 个 Chunk，每个 Chunk 计算需 300ms，传输需 160ms
-    int chunks = 4;
-    double t_compute_chunk = 300.0; // ms
-    double t_dma_chunk = 160.0;     // ms
-
-    double t_serial_ms = (t_compute_chunk + t_dma_chunk) * chunks;
-
-    // 异步重叠 DAG: 第 0 个 Chunk 算力执行时，DMA 异步传输第 1 个 Chunk
-    double t_async_dag_ms = t_dma_chunk + std::max(t_compute_chunk, t_dma_chunk) * (chunks - 1) + t_compute_chunk;
-    double overlap_ratio = ((t_compute_chunk * chunks + t_dma_chunk * chunks) - t_async_dag_ms) / (t_dma_chunk * chunks) * 100.0;
-
-    std::cout << "\n2. Async DAG Stream Overlap (4 Chunks):\n"
-              << "   - Serial Total Wall Time: " << t_serial_ms << " ms\n"
-              << "   - Async DAG Total Wall Time: " << t_async_dag_ms << " ms\n"
-              << "   - Overlap Ratio: " << overlap_ratio << "% (Goal: >= 60%)\n";
-
-    std::ofstream out(out_file);
-    out << "block_count,frag_ratio,sg_entries,compile_lat_us,compression_pct,serial_wall_ms,async_dag_ms,overlap_ratio_pct\n";
-    out << block_count << "," << fragmentation << "," << batch.entry_count << "," << avg_compile_us << ","
-        << compression_ratio << "," << t_serial_ms << "," << t_async_dag_ms << "," << overlap_ratio << "\n";
-
-    std::cout << "\nResults saved to " << out_file << "\n";
+    std::srand(42);
+    const auto source = mock_blocks(block_count, fragmentation);
+    const auto target = mock_blocks(block_count, fragmentation);
+    DescriptorCompiler compiler;
+    std::vector<double> compile_us;
+    CompiledBatch batch;
+    for (int i = 0; i < loops; ++i) {
+        const auto begin = std::chrono::steady_clock::now();
+        batch = compiler.compile_manifest(source, target);
+        const auto end = std::chrono::steady_clock::now();
+        compile_us.push_back(std::chrono::duration<double, std::micro>(end - begin).count());
+    }
+    const double compression_pct = (1.0 - static_cast<double>(batch.header.entry_count) / block_count) * 100.0;
+    const double serial_ms = (compute_ms + dma_ms) * chunks;
+    const double dag_ms = dma_ms + std::max(compute_ms, dma_ms) * (chunks - 1) + compute_ms;
+    const double overlap_pct = ((compute_ms + dma_ms) * chunks - dag_ms) / (dma_ms * chunks) * 100.0;
+    std::ofstream stream(output);
+    stream << "block_count,fragmentation,sg_entries,compile_p50_us,compile_p95_us,compile_p99_us,compression_pct,chunks,serial_ms,dag_ms,overlap_pct,evidence_level,status\n";
+    stream << block_count << ',' << fragmentation << ',' << batch.header.entry_count << ','
+           << percentile(compile_us, 0.50) << ',' << percentile(compile_us, 0.95) << ','
+           << percentile(compile_us, 0.99) << ',' << compression_pct << ',' << chunks << ','
+           << serial_ms << ',' << dag_ms << ',' << overlap_pct << ",DEMO,DEMO_ONLY\n";
+    std::cout << "descriptor correctness and compile timing recorded; DAG overlap is DEMO formula only. output=" << output << '\n';
     return 0;
 }

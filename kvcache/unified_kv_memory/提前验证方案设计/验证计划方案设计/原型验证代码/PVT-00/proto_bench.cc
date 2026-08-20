@@ -1,4 +1,4 @@
-// proto_bench.cc - URMA vs UBMEM 底层协议带宽与时延基准测试工具
+// proto_bench.cc - URMA/UBMEM 结果流程脚手架。当前实际执行本地 memcpy，只能标为 DEMO。
 #include <iostream>
 #include <vector>
 #include <string>
@@ -15,6 +15,7 @@ struct BenchConfig {
     std::vector<size_t> payload_sizes = {4096, 65536, 262144, 1048576, 4194304, 16777216, 67108864};
     std::vector<int> thread_counts = {1, 4, 16, 32, 64};
     int duration_sec = 10;
+    uint64_t iterations_per_thread = 0;
     std::string output_file = "proto_benchmark_results.csv";
 };
 
@@ -25,7 +26,8 @@ struct ThreadResult {
 };
 
 // 模拟 UBMEM 单边 Direct 访问 (微秒级) vs URMA 异步 RDMA 传输
-void worker_transfer(const std::string& protocol, size_t size, std::atomic<bool>& running, ThreadResult& result) {
+void worker_transfer(const std::string& protocol, size_t size, uint64_t iterations,
+                     std::atomic<bool>& running, ThreadResult& result) {
     char* src_buf = (char*)malloc(size);
     char* dst_buf = (char*)malloc(size);
     memset(src_buf, 0x5A, size);
@@ -33,7 +35,8 @@ void worker_transfer(const std::string& protocol, size_t size, std::atomic<bool>
 
     result.latencies_us.reserve(100000);
 
-    while (running.load(std::memory_order_relaxed)) {
+    while ((iterations > 0 && result.total_ops < iterations) ||
+           (iterations == 0 && running.load(std::memory_order_relaxed))) {
         auto t0 = std::chrono::high_resolution_clock::now();
 
         if (protocol == "ubmem") {
@@ -58,17 +61,22 @@ void worker_transfer(const std::string& protocol, size_t size, std::atomic<bool>
     free(dst_buf);
 }
 
-void run_benchmark_case(const std::string& protocol, size_t size, int num_threads, int duration, std::ofstream& out) {
+void run_benchmark_case(const std::string& protocol, size_t size, int num_threads,
+                        int duration, uint64_t iterations, std::ofstream& out) {
     std::atomic<bool> running(true);
     std::vector<std::thread> threads;
     std::vector<ThreadResult> results(num_threads);
+    const auto case_start = std::chrono::steady_clock::now();
 
     for (int i = 0; i < num_threads; ++i) {
-        threads.emplace_back(worker_transfer, protocol, size, std::ref(running), std::ref(results[i]));
+        threads.emplace_back(worker_transfer, protocol, size, iterations,
+                             std::ref(running), std::ref(results[i]));
     }
 
-    std::this_thread::sleep_for(std::chrono::seconds(duration));
-    running.store(false, std::memory_order_relaxed);
+    if (iterations == 0) {
+        std::this_thread::sleep_for(std::chrono::seconds(duration));
+        running.store(false, std::memory_order_relaxed);
+    }
 
     for (auto& t : threads) {
         t.join();
@@ -84,7 +92,8 @@ void run_benchmark_case(const std::string& protocol, size_t size, int num_thread
         all_lats.insert(all_lats.end(), res.latencies_us.begin(), res.latencies_us.end());
     }
 
-    double total_sec = duration;
+    const auto case_end = std::chrono::steady_clock::now();
+    double total_sec = std::chrono::duration<double>(case_end - case_start).count();
     double bw_gbps = (total_bytes * 8.0) / (total_sec * 1e9);
 
     std::sort(all_lats.begin(), all_lats.end());
@@ -99,26 +108,32 @@ void run_benchmark_case(const std::string& protocol, size_t size, int num_thread
               << " => BW: " << bw_gbps << " Gbps, Lat Avg: " << lat_avg << " us, P99: " << lat_p99 << " us\n";
 
     out << protocol << "," << size << "," << num_threads << ",write,"
-        << bw_gbps << "," << lat_avg << "," << lat_p50 << "," << lat_p99 << "\n";
+        << bw_gbps << "," << lat_avg << "," << lat_p50 << "," << lat_p99 << ",DEMO,LOCAL_MEMCPY_ONLY\n";
     out.flush();
 }
 
 int main(int argc, char** argv) {
     BenchConfig cfg;
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--protocol" && i + 1 < argc) cfg.protocol = argv[++i];
-        if (std::string(argv[i]) == "--out" && i + 1 < argc) cfg.output_file = argv[++i];
+        const std::string arg = argv[i];
+        if (arg == "--protocol" && i + 1 < argc) cfg.protocol = argv[++i];
+        else if (arg == "--payload-bytes" && i + 1 < argc) cfg.payload_sizes = {std::stoull(argv[++i])};
+        else if (arg == "--concurrency" && i + 1 < argc) cfg.thread_counts = {std::stoi(argv[++i])};
+        else if (arg == "--duration-sec" && i + 1 < argc) cfg.duration_sec = std::stoi(argv[++i]);
+        else if (arg == "--iters" && i + 1 < argc) cfg.iterations_per_thread = std::stoull(argv[++i]);
+        else if (arg == "--out" && i + 1 < argc) cfg.output_file = argv[++i];
     }
 
     std::ofstream out(cfg.output_file);
-    out << "protocol,payload_bytes,concurrency,direction,bandwidth_gbps,latency_avg_us,latency_p50_us,latency_p99_us\n";
+    out << "protocol,payload_bytes,concurrency,direction,bandwidth_gbps,latency_avg_us,latency_p50_us,latency_p99_us,evidence_level,status\n";
 
     for (size_t size : cfg.payload_sizes) {
         for (int threads : cfg.thread_counts) {
-            run_benchmark_case(cfg.protocol, size, threads, cfg.duration_sec, out);
+            run_benchmark_case(cfg.protocol, size, threads, cfg.duration_sec,
+                               cfg.iterations_per_thread, out);
         }
     }
 
-    std::cout << "Benchmark complete. Results saved to " << cfg.output_file << "\n";
+    std::cout << "DEMO local memcpy workflow complete; no URMA/UBMEM performance conclusion. output=" << cfg.output_file << "\n";
     return 0;
 }

@@ -1,6 +1,8 @@
 # 统一异构 KVCache 存储池 关键技术原型验证总体实施方案设计
 ## —— 基于开源生态底座深度重构与架构增强的高性能原厂扩展版实施总纲
 
+> **公共执行契约**：所有验证统一遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。DEMO 仅用于工作流示范；LAB/MEASURED 才能形成性能结论。缺探针、缺字段、解析失败或实际路径无法证明时，结果为 `INVALID_EVIDENCE`。
+
 > **文档版本**：V4.5 (面向一线开发人员与架构评审落地指导版)  
 > **战略基线**：基于开源生态底座（Mooncake 与 vLLM）深度重构与架构增强，注入原厂软硬件协同核心创新内核，突破开源既有框架边界，演进为面向国产 AI 硬件生态的 **Mooncake 高性能原厂扩展版 (Unified KV)**  
 > **开源基线版本与代码仓库**：  
@@ -21,9 +23,9 @@
 
 根据立项评审意见与最新技术路线，本项目充分借用 Mooncake 的成熟接口外壳与集群接入生态，在内部深度注入原厂软硬件协同核心观点；随着原厂传输底座、微秒调度大脑、SSD 直达容量主路径、6 维语义一致性校验、多卡原子共识、DPU 硬件安全双轨与组播分发体系的全面重构，系统演进为面向国产 AI 硬件生态的 **Mooncake 高性能原厂扩展版 (Unified KV)**。
 
-### 1.1 穿刺优先级分级原则 (P0 / P1 / P2)
-为确保研发兵力压强集中，对 11 项验证任务实施三级穿刺优先级管理：
-- **🔴 P0 级（核心决胜项，5 项）**：直面开源代码的核心瓶颈与痛点，必须拿出超越开源基线的代际性能证据（PVT-02 描述符编译、PVT-04 微秒 MLA 决策、PVT-05 裸盘直达、PVT-06 多卡状态同步、PVT-07 混压总门禁）；
+### 1.1 验证优先级分级原则 (P0 / P1 / P2)
+根据结论对架构和项目范围的影响，对 11 项验证任务设置三级优先级：
+- **🔴 P0 级（核心关键项，5 项）**：直接验证开源基线未覆盖或性能不足的关键路径（PVT-02 描述符编译、PVT-04 微秒级决策、PVT-05 SSD 直达、PVT-06 多卡状态同步、PVT-07 混压总门禁）；
 - **🟡 P1 级（底座支撑项，4 项）**：筑牢传输底座、零拷贝边界、安全容错与企业级硬件安全卸载（PVT-00 收益上限、PVT-01 零拷贝底座、PVT-03 远端直读边界、PVT-09 DPU 硬件安全双轨）；
 - **🟢 P2 级（拓展证伪项，2 项）**：验证高效分发拓扑与架构简化机制，避免外部强依赖（PVT-08 1-to-N 组播分发、CVT-01 软件 RCU 机制）。
 
@@ -61,7 +63,7 @@
 │ 等级 │ 验证ID │ 验证项标准功能名称                              │ 建议周期 │ 针对开源代码的核心重构命题与验证目标                   │
 ├──────┼────────┼─────────────────────────────────────────────────┼──────────┼────────────────────────────────────────────────────────┤
 │      │ PVT-02 │ 异构框架 Layout 描述符编译器与跨节点异步流水    │ 8 人日   │ 对标 vLLM-Ascend Python-ZMQ 连接器，C++ 描述符开销-40% │
-│  🔴  │ PVT-04 │ 微秒级动态决策引擎与 CostEvaluator 成本模型     │ 6 人日   │ 覆盖 DeepSeek MLA (512B) 与 Qwen MHA，负收益率严格<1%  │
+│  🔴  │ PVT-04 │ 微秒级动态决策引擎与 CostEvaluator 成本模型     │ 6 人日   │ KV 字节由运行时布局导出；覆盖 DeepSeek MLA 与 Qwen MHA │
 │  P0  │ PVT-05 │ HBM-SSD 直达容量主路径与分层存储扩容            │ 6 人日   │ 对标 Mooncake SSD Offload，裸盘 io_uring 直达吞吐提升50%│
 │ 核心 │ PVT-06 │ 多维度语义一致性强校验与 TP=8 多卡状态同步      │ 6 人日   │ 6维 xxHash64 杜绝脏读，POSIX 共享内存多卡同步 P99<100µs│
 │ 决胜 │ PVT-07 │ 前后台混压全链路端到端总门禁与 SemanticQoS      │ 8 人日   │ 三重消融总门禁：TTFT降幅≥20%，QPS提升≥10%，前台干扰<3%  │
@@ -86,10 +88,10 @@
    - 依托 NPU HBM ↔ RoCE/URMA DMA 直达，Host CPU 仅负责 64B 描述符提交，Payload 零拷贝，TCO 极优；
    - **流式量化/压缩替代手段**：严格杜绝由 Host CPU 承担全量数据转换，采用 **NPU 算子融合 (Fused Dequant-Attention Kernel)** 与 **结构化稀疏路由 (Sparse KV Routing)**，结合 Layerwise 边算边传隐藏转换开销。
 2. **企业级高安全专线路径 (DPU 硬件加速路径)**：
-   - 由 DPU 协处理器在硬件线速（800Gbps）下内联流水线级执行 AES 加解密、硬件 INT4 $\leftrightarrow$ FP16 反量化、硬件 Codec 与 CRC64 校验；
+   - 由 DPU 协处理器在 `hardware_profile` 登记的可用链路速率下，内联执行 AES 加解密、硬件 INT4 $\leftrightarrow$ FP16 反量化、硬件 Codec 与 CRC64 校验；
    - 全程严格绕过 Host CPU 与 DDR5，NPU 算力与内存带宽开销严格为 0。
 3. **高可用无缝回退**：若 DPU 发生控制超时或驱动异常，系统在 $< 1\text{ms}$ 内自动回退至 Raw Direct 裸机直达路径，保障推理业务连续不中断。
-*(注：Fly-in-line 量化与压缩作为重要场景扩展在架构设计中提前布局，本次提前验证重点穿刺基础传输与降级闭环，不强制要求输出全部衍生量化实测数据)*。
+*(注：Fly-in-line 量化与压缩作为后续场景扩展保留接口，本次提前验证重点检查基础传输与降级闭环，不要求输出全部衍生量化实测数据)*。
 
 ### 3.2 1-to-N 组播式 KV 分发的三大业务场景 (PVT-08)
 1. **热点系统提示词广播 (Hot System Prompt Broadcast)**：超长通用 System Prompt (32K~64K) 更新时，向 16~64 个 Decode 节点瞬间分发；
@@ -104,13 +106,13 @@
 │ 模型架构类别         │ 代表模型               │ 单 Token KV 显存占用   │ 核心测试关注点与成本交叉函数               │
 ├──────────────────────┼────────────────────────┼────────────────────────┼────────────────────────────────────────────┤
 │ **MLA 潜在注意力**   │ DeepSeek-V3 / R1 (FP8) │ **512 字节 / token**   │ 通信量暴降 600 倍，重点考核微秒调度决策     │
-│ **MHA 多头注意力**   │ Qwen2.5-72B (FP16)     │ **320 KB / token**     │ 通信数据量大，重点考核 800G 网络带宽利用率 │
+│ **MHA 多头注意力**   │ Qwen2.5-72B (FP16)     │ **320 KB / token**     │ 通信数据量大，重点考核可用网络的带宽利用率 │
 │ **GQA 分组查询注意** │ LLaMA-3-70B (FP16)     │ **80 KB / token**      │ 介于两者之间，考核描述符批量合并与分层流水 │
 └──────────────────────┴────────────────────────┴────────────────────────┴────────────────────────────────────────────┘
 ```
 
 ### 3.4 跨节点分布式物理拓扑与逐层流式传输 (Layerwise KV Streaming)
-在 2 节点分布式物理环境下（Node-0 Prefill 实例，Node-1 Decode 实例，800G URMA/RDMA 直连），全面穿刺跨节点分块预计算 *(Chunked Prefill)* 与逐层边算边传时序：
+在代表性跨节点物理环境下（推荐至少 2 个节点；设备不足时先形成 W1 限定结论），由 `topology_profile` 记录 Prefill、Decode 实例和链路能力，验证跨节点分块首字预计算 *(Chunked Prefill)* 与逐层边算边传时序：
 
 ```mermaid
 sequenceDiagram
@@ -125,7 +127,7 @@ sequenceDiagram
     P_NPU->>P_NIC: 触发 Layer 0 DMA 异步推送 (通过 64B POD 描述符)
     activate P_NIC
     P_NPU->>P_NPU: 并行计算 Layer 1 KV Cache (计算与传输 100% 重叠)
-    P_NIC->>D_NIC: 800G 网络极速传输 Layer 0 KV (Host CPU 零数据拷贝)
+    P_NIC->>D_NIC: 按环境清单记录的网络链路传输 Layer 0 KV (Host CPU 零数据拷贝)
     D_NIC->>D_NPU: DMA 直接写入 Node-1 NPU HBM
     deactivate P_NIC
     P_NPU->>P_NIC: 触发 Layer 1 DMA 异步推送
@@ -169,10 +171,10 @@ flowchart TD
     end
 
     subgraph Hardware["底层物理硬件层"]
-        NPU_HBM["8× NPU HBM3 (96GB/卡, P2P UVA)"]
-        NIC["800G URMA / RoCE 网卡 (TC0/TC1 硬件队列)"]
-        NVMe["4× NVMe PCIe Gen5 SSD (io_uring FIXED Direct)"]
-        DPU["可选企业级 800G DPU 协处理器 (AES/CRC64)"]
+        NPU_HBM["NPU HBM（型号、卡数、容量由 hardware_profile 记录）"]
+        NIC["URMA / RoCE 网卡（速率与队列能力由 hardware_profile 记录）"]
+        NVMe["NVMe SSD（数量、代际与 I/O 能力由 hardware_profile 记录）"]
+        DPU["可选 DPU 协处理器（安全与校验能力按实际探测）"]
     end
 
     Bench --> APIServer
@@ -215,7 +217,7 @@ flowchart TD
 
 ## 5. 开源基线端到端物理集群部署、在线打流与 Benchmark 压测标准 SOP
 
-全量穿刺实验均基于开源部署与在线打流套件（存放在 `./原型验证代码/deploy_and_bench_e2e/`）标准执行：
+全量实验均基于开源部署与在线打流套件（存放在 `./原型验证代码/deploy_and_bench_e2e/`）执行：
 
 ### Step 1：启动 Mooncake 元数据 Master 服务
 ```bash
@@ -276,19 +278,21 @@ python3 -m vllm.benchmarks.benchmark_serving \
 
 ### Step 5：自动解析指标并产出三重消融对账表
 ```bash
-python3 ./parse_benchmark_metrics.py --results-dir ./results --output ./results/e2e_summary.csv
+python3 ./parse_benchmark_metrics.py --results-dir ./results/unified_full/<run_id> --output ./results/unified_full/<run_id>/e2e_summary.csv --output-json ./results/unified_full/<run_id>/summary.json --mode unified_full --run-id <run_id> --package-id <package_id> --config-hash <hash> --hardware-profile <profile> --topology-profile <topology> --workload-id <workload_id> --model-id <model_id> --evidence-level LAB
 ```
 
 ---
 
 ## 6. 实验硬件环境与公共 Harness 拓扑
 
-验证集中在 **2 节点（Node-0, Node-1）** 标准硬件环境上执行：
-- **算力与显存**：每节点 8× NPU（单卡 96GB HBM3 高带宽显存），单机显存总计 768GB；支持 CANN 驱动与 P2P 显存锁定；
-- **网络互联**：800G URMA（通用远程直接内存访问）/ RDMA 双端口网卡，支持 UBMEM 共享内存协议，驱动库为 `/usr/lib64/liburma.so` 与 `/usr/lib64/libubmem.so`；
-- **存储介质**：每节点 4× NVMe PCIe Gen5 SSD 阵列（顺序读标称 28GB/s），挂载支持 `io_uring` + `O_DIRECT`；
-- **安全与协处理**：可选配置企业级 800G DPU 智能网卡（集成硬件 AES-256-GCM / SM4 加密与 CRC64 校验引擎）；
-- **宿主算力**：64 Cores Host CPU, 512GB DDR5（仅供控制面、元数据与 Telemetry 线程使用，不参与正文 Payload 搬运）。
+验证环境按现场可用设备参数化，不把节点数、卡数、网卡速率和 SSD 数量写成唯一前提。每次运行在 `hardware_profile` 与 `topology_profile` 中冻结以下信息：
+- **算力与显存**：NPU 型号、节点数、每节点卡数、单卡 HBM 容量、张量并行规模、驱动与固件版本；
+- **网络互联**：URMA（通用远程直接内存访问）/ RDMA 网卡型号、端口数、标称速率、交换拓扑和有效 MTU；
+- **存储介质**：NVMe SSD 型号、数量、PCIe 代际、文件系统或裸盘模式，以及 `io_uring`、`O_DIRECT` 等能力；
+- **安全与协处理**：DPU 是否存在、硬件加密与校验能力；没有 DPU 时按 PVT-09 的不支持分支记录；
+- **宿主算力**：Host CPU 与 DDR 配置，以及正文数据拷贝探针的采集范围。
+
+E3 推荐使用至少 2 个节点形成代表性跨节点路径；若现场设备不足，则只形成 W0/W1 限定结论，不以单机结果替代 W2 跨节点结论。
 
 ---
 
@@ -306,7 +310,7 @@ python3 ./parse_benchmark_metrics.py --results-dir ./results --output ./results/
 ├── PVT-00/
 │   ├── proto_bench.cc              # URMA 与 UBMEM 底层通信协议微基准压测工具
 │   ├── Makefile                   # 编译 proto_bench 的工程构建文件 (make -j16)
-│   ├── make_workload.py           # 构造覆盖 MLA (512B) 与 MHA (320KB) 的受控测试数据集生成脚本
+│   ├── make_workload.py           # 构造 MLA/MHA 受控数据集；KV 字节由运行时布局清单导出
 │   └── traffic_generator.py       # 受控发包与 TTFT/首 Token 时延采集驱动脚本
 ├── PVT-01/
 │   ├── raw_trans_bench.cc         # URMA/UBMEM/io_uring Direct 零拷贝 vs CPU memcpy 压测工具
@@ -344,15 +348,15 @@ python3 ./parse_benchmark_metrics.py --results-dir ./results --output ./results/
 │   ├── mixed_workload_bench.py    # 前台在线 Decode 流与后台高吞吐 I/O 混压驱动脚本
 │   ├── semantic_qos_controller.py # 前台高优先级保证 (RoCE TC0) 与后台微秒级自适应退避流控器
 │   └── run_mixed_bench.py         # 自动化执行三重消融最小闭环并计算 TPOT 干扰率与 TTFT 降幅脚本
-├── PVT-08/ (原 CVT-01)
+├── PVT-08/
 │   ├── multicast_fanout_bench.cc  # 1-to-N 单播 vs 软件 Staging 树状分层组播 vs 硬件多播对比压测工具
 │   ├── Makefile                   # 编译 multicast_fanout_bench 的工程构建文件
 │   └── test_fanout_scenarios.py   # 模拟系统提示词广播、Multi-Agent 与 1P-to-ND 场景测试脚本
-├── PVT-09/ (原 CVT-03)
+├── PVT-09/
 │   ├── offload_fallback_bench.cc  # DPU 硬件 AES/CRC 卸载 vs CPU 软算吞吐及 500µs 无缝降级测试工具
 │   ├── Makefile                   # 编译 offload_fallback_bench 的工程构建文件
-│   └── inject_dpu_fault.py        # DPU 控制通道断连与超时故障注入脚本
-└── CVT-01/ (原 CVT-02)
+│   └── inject_fault.py            # DPU 控制通道断连与超时故障注入脚本
+└── CVT-01/
     ├── rcu_migration_bench.cc     # 32 并发 Reader 下锁表 vs 软件 RCU 迁移停顿与 Jitter 对比工具
     └── Makefile                   # 编译 rcu_migration_bench 的工程构建文件
 ```

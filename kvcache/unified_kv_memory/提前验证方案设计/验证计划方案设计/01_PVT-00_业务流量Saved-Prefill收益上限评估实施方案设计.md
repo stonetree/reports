@@ -1,9 +1,11 @@
 # PVT-00：业务流量 Saved-Prefill 收益上限评估实施方案设计
-## —— Mooncake 原生传输开销瓶颈穿刺与国产专属协议加速上限评估
+## —— Mooncake 原生传输开销定位与国产通信协议加速上限评估
+
+> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。三种模式必须绑定独立代码包或配置；缓存就绪以事件为准；本地重算基线必须来自实测请求。
 
 > **验证 ID**：PVT-00  
 > **验证名称**：业务流量 Saved-Prefill 收益上限与通信协议加速评估  
-> **穿刺优先级**：**🟡 P1 级（底座支撑项）**  
+> **验证优先级**：**🟡 P1 级（底座支撑项）**  
 > **对应验证阶段**：**E0 业务收益前提确认**  
 > **证伪标记**：否（业务收益前提确认）  
 > **建议周期**：4~6 人日  
@@ -23,8 +25,8 @@
 
 ### 1.1 待验证核心命题
 大模型推理中，输入预计算阶段（Prefill，即首字生成前的 Prompt 计算）计算量大、耗时长。本验证旨在通过受控基准测试与底层网络微基准测试交叉比对，探明在不同前缀复用率（30%、50%、70%、90%、98%）及不同长文本场景下：
-1. 穿刺 Mooncake 原生数据传输与框架接入在端到端流程中的耗时占比与性能瓶颈；
-2. 针对 **DeepSeek MLA (FP8, 512B/tok)** 与 **Qwen MHA (FP16, 320KB/tok)** 两种截然不同的 KV 密度模型，测定外接存储池相比纯算力本地重算（Recompute）的端到端 TTFT（Time To First Token，首字生成延迟）净时间节省（即 Saved-Prefill 收益）；
+1. 定位 Mooncake 原生数据传输与框架接入在端到端流程中的耗时占比和主要瓶颈；
+2. 针对 **DeepSeek MLA** 与 **Qwen MHA** 两类 KV 布局，测定外接存储池相比纯算力本地重算（Recompute）的端到端 TTFT（Time To First Token，首字生成延迟）净时间节省。每 Token KV 字节数由运行时布局清单导出，包含层数、KV 头、维度、数据类型、并行切分和对齐；不得把 MLA 潜变量维度 512 直接当作整模型 `512B/token`；
 3. 采用 UBMEM（统一总线内存直通共享协议）相比 URMA（通用远程直接内存访问）/ 标准 RDMA 通信协议，在元数据处理与数据传输阶段带来的性能增益上限。
 
 ### 1.2 最终交付数据与结论产出
@@ -102,16 +104,17 @@ R2: [---------------- 50K Prefix A ----------------][---------------- 50K New B 
 数据集生成命令（支持指定模型类型）：
 ```bash
 # 生成 Qwen MHA 模型数据集 (320KB/tok)
-python3 ./原型验证代码/PVT-00/make_workload.py --model-type mha --prefix-tokens 50000 --unique-tokens 50000 --out workload_mha_50pct.json
+python3 ./原型验证代码/PVT-00/make_workload.py --model-type mha --model-id Qwen2.5-72B --layout-manifest runtime_layout_qwen.json --prefix-tokens 50000 --unique-tokens 50000 --out workload_mha_50pct.json
 
-# 生成 DeepSeek MLA 模型数据集 (512B/tok)
-python3 ./原型验证代码/PVT-00/make_workload.py --model-type mla --prefix-tokens 50000 --unique-tokens 50000 --out workload_mla_50pct.json
+# 生成 DeepSeek MLA 模型数据集；KV 字节由 --layout-manifest 指定的运行时布局清单提供
+python3 ./原型验证代码/PVT-00/make_workload.py --model-type mla --model-id DeepSeek-V3 --layout-manifest runtime_layout_deepseek.json --prefix-tokens 50000 --unique-tokens 50000 --out workload_mla_50pct.json
 ```
 
 ### 3.2 发包器时序编排逻辑
 驱动发包命令：
 ```bash
-python3 ./原型验证代码/PVT-00/traffic_generator.py --workload workload_mha_50pct.json --out run_50pct.log
+python3 ./原型验证代码/PVT-00/traffic_generator.py --endpoint http://recompute:8000 --mode recompute --actual-path recompute --package-id recompute_pkg --config-hash <hash> --hardware-profile <profile> --evidence-level LAB --workload workload_mha_50pct.json --out-csv pvt00_results.csv --out-json recompute_baseline.json
+# 再分别使用原生 Mooncake 与增强版的实际端点、代码包 ID 和配置哈希执行，并通过 --recompute-baseline-json recompute_baseline.json 引用同场次重算基线；正式模式同时提供 --ready-url 或 --ready-file。
 ```
 
 ---
@@ -121,7 +124,7 @@ python3 ./原型验证代码/PVT-00/traffic_generator.py --workload workload_mha
 ### 4.1 实验环境、测试模型基线与源码版本锁定
 - **模型权重基线路径**：
   - 主测 Dense 模型：`/models/Qwen/Qwen2.5-72B-Instruct`（FP16，80 层，GQA 分组查询注意力 $H_{kv}=8$, $D_{head}=128$，单 Token KV 大小为 $320\text{ KB/Token}$，张量并行 TP=8 单卡 $40\text{ KB/Token}$）；
-  - 主测 MLA 压缩态模型：`/models/deepseek-ai/DeepSeek-V3`（FP8 MLA 多头潜变量注意力，$D_{latent}=512$，单 Token 仅 $512\text{ Bytes}$）；
+  - 主测 MLA 压缩态模型：`/models/deepseek-ai/DeepSeek-V3`（FP8 MLA，多头潜变量注意力；单 Token KV 字节数以运行时布局清单为准，必须计入层数、潜变量及旋转位置编码等附加状态、数据类型、张量并行切分与对齐）；
   - 备选长文模型：`/models/meta-llama/Llama-3.1-70B-Instruct`（FP16/FP8）。
 - **推理引擎与存储组件版本锁定**：
   - `vLLM`：Commit: `842dd8fd96650063e1ad32e6075742d457d39773`；
@@ -166,22 +169,22 @@ python3 -m vllm.entrypoints.openai.api_server \
 ### Step 1：编译底层通信 Benchmark 并建立通信基线
 ```bash
 cd ./原型验证代码/PVT-00 && make clean && make -j16
-./proto_bench --iters 1000 --out res_proto_baseline.csv
+./proto_bench --protocol urma --payload-bytes 1048576 --concurrency 4 --iters 1000 --out res_proto_baseline.csv
 ```
 
 ### Step 2：生成受控多模型数据集
 ```bash
 # 生成 Qwen MHA (320KB/tok) 50% 复用率测试集
-python3 ./make_workload.py --model-type mha --prefix-tokens 50000 --unique-tokens 50000 --out workload_mha_50pct.json
+python3 ./make_workload.py --model-type mha --model-id Qwen2.5-72B --layout-manifest runtime_layout_qwen.json --prefix-tokens 50000 --unique-tokens 50000 --out workload_mha_50pct.json
 
-# 生成 DeepSeek MLA (512B/tok) 50% 复用率测试集
-python3 ./make_workload.py --model-type mla --prefix-tokens 50000 --unique-tokens 50000 --out workload_mla_50pct.json
+# 生成 DeepSeek MLA 50% 复用率测试集；不得硬编码整模型 512B/token
+python3 ./make_workload.py --model-type mla --model-id DeepSeek-V3 --layout-manifest runtime_layout_deepseek.json --prefix-tokens 50000 --unique-tokens 50000 --out workload_mla_50pct.json
 ```
 
 ### Step 3：一键拉起开源基线服务集群 (Mooncake + vLLM)
 ```bash
-# 启动 Mooncake Master、Prefill 实例 (端口 8100)、Decode 实例 (端口 8200) 与 PD 代理 (端口 8000)
-cd ../deploy_and_bench_e2e && bash ./deploy_cluster.sh
+# 基于 Mooncake Commit f90ae691f109e49a60920e0c8abbf7e572826d8c，启动 Prefill、Decode 实例与 PD 代理；端口由 topology_profile 记录
+cd ../deploy_and_bench_e2e && EVIDENCE_ENVIRONMENT=W0 bash ./deploy_cluster.sh
 ```
 
 ### Step 4：发起 vLLM benchmark_serving 在线打流
@@ -202,13 +205,15 @@ python3 -m vllm.benchmarks.benchmark_serving \
 ### Step 5：切换为 Unified KV (UBMEM 零拷贝扩展版) 重复打流消融
 ```bash
 # 切换为 UBMEM 驱动与 C++ 描述符扩展版，重新打流
-bash ./run_online_benchmark.sh
+MODE=unified_full RUN_ID=<run_id> PACKAGE_ID=<package_id> CONFIG_HASH=<hash> HARDWARE_PROFILE=<profile> TOPOLOGY_PROFILE=<topology> WORKLOAD_ID=<workload_id> MODEL_ID=Qwen2.5-72B EVIDENCE_LEVEL=LAB bash ../deploy_and_bench_e2e/run_online_benchmark.sh
 ```
 
-### Step 6：自动解析指标并计算 Saved-Prefill 净收益
+### Step 6：解析补充压力测试指标
 ```bash
-python3 ./parse_benchmark_metrics.py --results-dir ./results --output ./results/pvt00_e2e_results.csv
+python3 ../deploy_and_bench_e2e/parse_benchmark_metrics.py --results-dir ../deploy_and_bench_e2e/results/unified_full/<run_id> --output ../deploy_and_bench_e2e/results/unified_full/<run_id>/summary.csv --output-json ../deploy_and_bench_e2e/results/unified_full/<run_id>/summary.json --mode unified_full --run-id <run_id> --package-id <package_id> --config-hash <hash> --hardware-profile <profile> --topology-profile <topology> --workload-id <workload_id> --model-id Qwen2.5-72B --evidence-level LAB
 ```
+
+Saved-Prefill（首字生成预计算节省，即复用已缓存 KVCache 以减少 Prompt 重算）的净收益由第 3.2 节两请求工作流直接计算：`net_saved_ms = recompute_ttft_ms - ttft_ms`。`benchmark_serving` 只补充多请求分位数与吞吐结论，不替代 R1 预热、就绪事件和 R2 复用时序。
 
 ---
 
@@ -216,10 +221,9 @@ python3 ./parse_benchmark_metrics.py --results-dir ./results --output ./results/
 
 ### 6.1 端到端请求时延表 (`pvt00_e2e_results.csv`)
 ```csv
-workload_id,model_name,model_arch,prefix_len,total_len,reuse_pct,mode,protocol,ttft_ms,pure_recompute_ms,dir_query_ms,data_load_ms,attach_ms,net_saved_ms
-WK-01,Qwen2.5-72B,MHA,50000,100000,50,mooncake_native,URMA,82.4,145.2,3.1,42.8,4.5,62.8
-WK-02,Qwen2.5-72B,MHA,50000,100000,50,unified_kv,UBMEM,56.2,145.2,0.8,21.3,1.2,89.0
-WK-03,DeepSeek-V3,MLA,50000,100000,50,unified_kv,UBMEM,28.4,98.6,0.6,3.2,0.8,70.2
+run_id,workload_id,model_id,model_type,kv_bytes_per_token,prefix_tokens,total_r2_tokens,reuse_ratio,mode,protocol,actual_path,package_id,config_hash,hardware_profile,evidence_level,ttft_ms,recompute_ttft_ms,net_saved_ms,status
+<run_id>,<workload_id>,Qwen2.5-72B,mha,<runtime_value>,50000,100000,0.5,mooncake_native,URMA,<measured_path>,<package_id>,<hash>,<profile>,LAB,<measured>,<same_run_recompute>,<calculated>,OK
+<run_id>,<workload_id>,DeepSeek-V3,mla,<runtime_value>,50000,100000,0.5,unified_full,UBMEM,<measured_path>,<package_id>,<hash>,<profile>,LAB,<measured>,<same_run_recompute>,<calculated>,OK
 ```
 
 ---

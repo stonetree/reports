@@ -1,9 +1,11 @@
 # PVT-09：DPU 硬件安全与算力卸载加速与双轨协同验证实施方案设计
-## —— 企业级安全合规与极致性能破局：DPU 硬件 AES/CRC 卸载 vs Raw Direct 软硬双轨协同
+## —— DPU 硬件 AES/CRC 卸载与 Raw Direct 双轨路径验证
 
-> **验证 ID**：PVT-09 (原 CVT-03 升级)  
+> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。统一回退门槛为 `<500µs`。结果必须记录故障触发、检测、切换确认、请求成功率、丢包、完整性和实际路径；无 DPU 时标记 `NOT-SUPPORTED/N/A`。
+
+> **验证 ID**：PVT-09  
 > **验证名称**：DPU 硬件安全与算力卸载加速 vs Raw Direct 软硬双轨协同验证  
-> **穿刺优先级**：**🟡 P1 级（底座支撑项）**  
+> **验证优先级**：**🟡 P1 级（底座支撑项）**  
 > **对应验证阶段**：**E1 核心数据路径与硬件安全加速打通**  
 > **证伪标记**：否（双轨加速效能与无缝降级确认）  
 > **建议周期**：4~5 人日  
@@ -20,7 +22,7 @@
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 待验证核心命题
-在 800Gbps（100GB/s）超高速网络互联下，金融、政企与运营商等企业级客户对传输安全（AES-256-GCM / 国密 SM4）与数据完整性（CRC64 / T10-DIF）具有强制合规要求。若由 Host CPU 承担这些计算，会导致 32+ 核心满载且占满 DDR5 带宽（200GB/s~300GB/s 读写）。
+在高带宽网络互联下，金融、政企与运营商等企业级客户对传输安全（AES-256-GCM / 国密 SM4）与数据完整性（CRC64 / T10-DIF）可能具有明确合规要求。Host CPU 承担这些计算的核数与 DDR 带宽开销随实际链路速率变化，必须在 `hardware_profile` 对应环境中实测，不能预置固定占用结论。
 
 本验证旨在确立**软硬双轨协同 (Dual-Engine Architecture)** 体系并实测证明：
 1. **企业级 DPU 硬件安全加速效能**：在开启全量传输加密与 CRC 校验时，DPU 协处理器能够在线速下（$\ge 80\text{Gbps}$）内联完成加解密，**Host CPU 占用率严格 $< 5\%$**（相比 Host CPU 软算占用 $> 80\%$），彻底释放 CPU 算力与 DDR5 内存带宽；
@@ -71,7 +73,7 @@ flowchart TD
     TryDPU --> Watchdog{"DPU 在 500us 门限内是否返回 CQE?"}
     Watchdog -- "YES" --> DPU_Done["DPU 硬件线速完成加解密与传输 (720 Gbps, CPU 0.2%)"]
     Watchdog -- "NO (超时挂死 / 驱动无响应)" --> TripCircuit["触发熔断保护: dpu_channel_healthy = false<br/>上报 Telemetry 告警事件 E_DPU_TIMEOUT"]
-    TripCircuit --> Fallback["微秒级无缝降级 (< 1ms): 立即重定向至 Raw Direct 路径完成传输"]
+    TripCircuit --> Fallback["故障降级 (<500µs): 重定向至 Raw Direct 路径并记录切换确认事件"]
     Fallback --> Log["记录 Fallback 统计, 业务 0 丢包 0 报错!"]
 ```
 
@@ -83,16 +85,16 @@ flowchart TD
 
 ```
 原型验证代码/PVT-09/
-├── offload_fallback_bench.cc # DPU 硬件卸载 vs CPU 软件加解密/CRC 对比压测工具
+├── offload_fallback_bench.cc # 双轨结果 Schema 脚手架；固定样例标记为 DEMO
 ├── Makefile                  # 编译构建工程 (make -j16)
-└── inject_dpu_fault.py       # DPU 控制通道与硬件超时故障注入脚本
+└── inject_fault.py           # DPU 控制通道与硬件超时故障注入脚本
 ```
 
 编译与测试命令：
 ```bash
 cd ./原型验证代码/PVT-09 && make clean && make
-./offload_fallback_bench --sizes 1M,16M,64M --iterations 1000 --out res_dpu_benchmark.csv
-python3 inject_dpu_fault.py --timeout-us 500
+./offload_fallback_bench --hardware-supported --out res_dpu_benchmark.csv
+python3 inject_fault.py --fault timeout --timeout-us 500 --out fault_event.json
 ```
 
 ---
@@ -121,7 +123,7 @@ dpu_fault_fallback,64,TRUE,85.6,6.8,0.6,TRUE,480.0,TRUE
 ## 6. 重要场景扩展：Fly-in-line 流式在途数据处理双轨技术手段
 
 > **场景定位说明**：随着大模型上下文扩展至 1M+ tokens 及端侧高密部署演进，KV Cache 在传输链路中的 **流式在途处理 (Fly-in-line Pipeline，即数据在网络或存储搬运过程中实时完成量化、压缩与完整性校验，不落盘、不中转)** 成为未来架构的关键演进方向。  
-> **验证要求**：本节作为面向未来的高阶演进场景扩展，明确在“有 DPU 硬件加速”与“无 DPU 纯软+NPU协同”两种条件下的对应关键技术手段。**本次提前验证不强制要求输出全部穿刺实测数据，但必须在架构设计与技术栈中提前给出清晰实现路径。**
+> **验证要求**：本节用于明确“有 DPU 硬件加速”与“无 DPU 的 Raw Direct 主路径”两种条件下的接口、观测和回退方式。本次提前验证不要求取得全部硬件实测数据，但必须给出可执行的工作流和结果字段；无 DPU 环境记录 `NOT-SUPPORTED/N/A`。
 
 ### 6.1 三大 Fly-in-line 流式处理场景定义
 1. **流式在途量化与反量化 (Fly-in-line Quantization / Dequantization)**：
@@ -142,7 +144,7 @@ dpu_fault_fallback,64,TRUE,85.6,6.8,0.6,TRUE,480.0,TRUE
 ┌─────────────────────────┬────────────────────────────────────────────────────────┬────────────────────────────────────────────────────────┐
 │ 处理维度                │ 【方案 A：有 DPU 硬件加速】                            │ 【方案 B：无 DPU 纯软 + NPU 协同主路径】              │
 ├─────────────────────────┼────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┤
-│ **硬件架构与通路**      │ • DPU 专用数据面协处理器 (P4 / FPGA / ASIC 流水线)     │ • 依托标准 800G URMA/RDMA 网卡 + NPU 算力协同          │
+│ **硬件架构与通路**      │ • DPU 专用数据面协处理器 (P4 / FPGA / ASIC 流水线)     │ • 依托现场可用 URMA/RDMA 网卡 + NPU 算力协同          │
 │                         │ • 数据流直接在 PCIe/NIC 内部完成转换并 DMA 至 NPU HBM   │ • 严格绕过 Host CPU，由 NPU 专用 Stream 承担转换       │
 ├─────────────────────────┼────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┤
 │ **1. 量化 / 反量化**    │ • **DPU 硬件内联量化引擎 (Inline Quant Engine)**       │ • **NPU 算子融合 (Fused Dequant-Attention Kernel)**    │
@@ -154,7 +156,7 @@ dpu_fault_fallback,64,TRUE,85.6,6.8,0.6,TRUE,480.0,TRUE
 │                         │   NPU HBM，**Host CPU 与 DDR5 完全零参与**。           │   高权重 Block，从物理源头上削减 60%+ 传输量。         │
 ├─────────────────────────┼────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┤
 │ **3. CRC 校验与加解密** │ • **DPU 硬件 IPsec/TLS 与 CRC64 内联引擎**             │ • **轻量 64B 元数据 Tag 校验 + VPC 边界物理隔离**      │
-│                         │   在 800Gbps 线速下实时计算 CRC 并执行 AES-256 加解密，│   正文 Payload 走纯软零拷贝 DMA；仅对 64B POD 描述符   │
+│                         │   在硬件能力矩阵登记的链路速率下计算 CRC 并执行 AES，  │   正文 Payload 走纯软零拷贝 DMA；仅对 64B POD 描述符   │
 │                         │   **Host CPU 占用率 < 1%，吞吐保持 ≥ 80Gbps**。        │   执行 xxHash64 校验，**CPU 算力与内存带宽开销 < 0.1%**。│
 ├─────────────────────────┼────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┤
 │ **4. 异步流水掩盖机制** │ • **硬件级单阶段直达 (Zero-Stage In-flight)**          │ • **Layerwise 边算边传与 NPU 事件回调双重掩盖**        │

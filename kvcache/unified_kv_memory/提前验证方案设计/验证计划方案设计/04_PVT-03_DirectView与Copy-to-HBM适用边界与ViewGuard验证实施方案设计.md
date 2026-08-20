@@ -1,9 +1,11 @@
 # PVT-03：Direct-View 与 Copy-to-HBM 适用边界与 ViewGuard 验证实施方案设计
 ## —— Mooncake 访问模式扩展：Direct-View 支持、Decode 直读证伪与 ViewGuard 生产级容错
 
+> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。Crossover 必须读取 PVT-01 实测能力输入；性能边界与故障安全分开判定。DEMO 返回值不能作为 SIGBUS 捕获、租约撤销或安全回退证据。
+
 > **验证 ID**：PVT-03  
 > **验证名称**：Direct-View（远端直读）与 Copy-to-HBM（拷贝到本地显存）适用边界及 ViewGuard 安全验证  
-> **穿刺优先级**：**🟡 P1 级（底座支撑项）**  
+> **验证优先级**：**🟡 P1 级（底座支撑项）**  
 > **对应验证阶段**：**E1/E2 路径选择与安全隔离**  
 > **证伪标记**：**是（证伪“Decode 活跃 KV 默认适合 Direct-View 远端读取”）**  
 > **建议周期**：5~6 人日  
@@ -124,13 +126,13 @@ sequenceDiagram
 ├── view_guard.h              # ViewGuard 租约管理与 SIGBUS 恢复头文件
 ├── view_guard.cc             # ViewGuard 异常捕获与 siglongjmp 恢复实现
 ├── Makefile                  # 编译工程 (make -j16)
-└── benchmark_serving_view.py # 在推理服务中测试并证伪 Decode 阶段 View 模式的脚本
+└── benchmark_serving_view.py # DEMO 级结果 Schema 生成脚本；正式服务实测由开发人员接入实际端点
 ```
 
 编译与测试命令：
 ```bash
 cd ./原型验证代码/PVT-03 && make clean && make
-./view_vs_copy_bench --sizes 4M,16M,64M,256M --repeats 1,2,4,8,16,32 --out res_view_vs_copy.csv
+./view_vs_copy_bench --payload-mb 16 --dma-copy-ms <PVT01实测值> --local-read-ms <PVT01实测值> --remote-read-ms <PVT01实测值> --evidence-level LAB --out res_view_vs_copy.csv
 ```
 
 ---

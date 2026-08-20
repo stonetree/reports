@@ -1,9 +1,11 @@
 # PVT-07：前后台混压端到端最小闭环与 SemanticQoS 服务质量保障验证实施方案设计
-## —— 全链路端到端总门禁：原生 Mooncake vs 深度重构增强版混压消融对决
+## —— 全链路端到端总门禁：原生 Mooncake 与深度重构增强版混压消融对账
+
+> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。TTFT/QPS 的主收益基线是原生 Mooncake 混压；TPOT 干扰基线是同一增强代码包的纯前台。各混压模式使用相同目标后台负载并记录实际带宽。
 
 > **验证 ID**：PVT-07  
 > **验证名称**：前后台混压端到端最小闭环 (Vertical Slice) 与 SemanticQoS 服务质量保障验证  
-> **穿刺优先级**：**🔴 P0 级（核心决胜项）**  
+> **验证优先级**：**🔴 P0 级（核心关键项）**  
 > **对应验证阶段**：**E3 全链路前后台混压总门禁**  
 > **证伪标记**：否（全链路系统总门禁）  
 > **建议周期**：6~8 人日  
@@ -22,7 +24,7 @@
 
 ### 1.1 待验证核心命题
 局部单项指标达标不代表在线系统的最终成功。在真实在线推理中，前台 Decode（逐 Token 自回归生成）对显存与总线延迟极其敏感；后台若无节制地进行跨节点拉取、SSD 换出或预取，将严重干扰前台 TPOT（Time Per Output Token，单字生成延迟）尾部延迟。作为系统落地前最后一个“纵向切片（Vertical Slice，端到端最小闭环验证）”总门禁，本验证通过全链路原型消融对比证明：
-1. **端到端全链路净收益**：在真实 2 节点集群、50%~70% 复用率业务流量下，串联 `Prefix Lookup -> QueryPlan -> Descriptor -> UBMEM/URMA Transfer -> Attach` 全流程，深度重构增强版相比官方原生最新主线组合（vLLM `v0.26.1+ (main)` + Mooncake `v0.3.12+`）实现**端到端 P99 TTFT 降低 $\ge 20\%$**，**系统吞吐 QPS 提升 $\ge 10\%$**；
+1. **端到端全链路净收益**：在可用的代表性跨节点环境、50%～70% 复用率业务流量下，串联 `Prefix Lookup -> QueryPlan -> Descriptor -> UBMEM/URMA Transfer -> Attach` 全流程，深度重构增强版相对 Mooncake Commit `f90ae691f109e49a60920e0c8abbf7e572826d8c`、vLLM Commit `842dd8fd96650063e1ad32e6075742d457d39773` 和 vLLM-Ascend Commit `424e27e1fd2b1c6e0d7fe659b489b87c1223a33c` 组成的原生开源基线验证**端到端 P99 TTFT 降低 $\ge 20\%$**、**系统吞吐 QPS 提升 $\ge 10\%$**；
 2. **前后台服务质量保障策略 (SemanticQoS)**：在前后台混压下，SemanticQoS 优先级队列与自适应限速能够将后台对前台 **P99 TPOT 的尾部抖动干扰严格控制在 $< 3\%$**（确保后台换出与拉取时不影响前台在线推理的请求时延），同时保持后台传输带宽利用率 $\ge 70\%$。
 
 ### 1.2 最终交付数据与结论产出
@@ -103,11 +105,15 @@ flowchart TD
 
 ### 3.1 开源基线集群部署与在线打流混压 SOP
 ```bash
-# 1. 一键部署真实双节点推理集群与 Mooncake 存储底座
-cd ../deploy_and_bench_e2e && bash ./deploy_cluster.sh
+# 1. W0 仅验证 localhost 部署流程；W2 代表性跨节点环境由现场编排工具部署，并在 topology_profile 中记录端点
+cd ../deploy_and_bench_e2e && EVIDENCE_ENVIRONMENT=W0 bash ./deploy_cluster.sh
 
-# 2. 启动后台大流量沉淀/预取压测进程 (模拟 400Gbps 吞吐)
-python3 ../PVT-05/tier_storage_bench.cc --device /dev/nvme0n1 --qd 32 &
+# 2. W0 仅核对后台结果字段；当前 tier_storage_bench 不产生持续 I/O 压力
+make -C ../PVT-05
+../PVT-05/tier_storage_bench --device DEMO_DEVICE --block-size 16M --qd 32 --out ./results/background_schema_demo.csv
+
+# W1/W2 必须由现场适配器启动持续后台沉淀/预取负载，并把目标带宽与实际带宽写入 manifest 和原始结果
+# <site_background_io_command> --target-gbps <target> --duration-sec <duration> --out ./results/background_actual.json
 
 # 3. 前台发起真实 ShareGPT 多并发在线打流 (20~50 req/s)
 python3 -m vllm.benchmarks.benchmark_serving \
@@ -121,8 +127,16 @@ python3 -m vllm.benchmarks.benchmark_serving \
     --save-result --result-filename ./results/res_pvt07_e2e_mixed.json
 
 # 4. 执行全套三重消融最小闭环评估与数据对账
-python3 ../PVT-07/run_mixed_bench.py --out ./results/res_pvt07_summary.json
+python3 ../PVT-07/run_mixed_bench.py \
+  --unified-foreground ./results/unified_foreground/summary.json \
+  --mooncake-native-mixed ./results/mooncake_native_mixed/summary.json \
+  --unified-mixed ./results/unified_mixed/summary.json \
+  --target-rate-rps 30 \
+  --background-tolerance-pct 5 \
+  --out ./results/res_pvt07_summary.json
 ```
+
+上述三个 `summary.json` 由公共解析器生成。混压原始结果必须额外写入实际后台带宽 `background_bandwidth_gbps`（或其兼容字段）；缺失时解析器返回 `INVALID_EVIDENCE`，不会用目标带宽代替实测值。
 
 ---
 
@@ -142,7 +156,7 @@ unified_kv_mixed_qos,27.8,380.0,32.1,51.8,12.3,15.2,2.7,5004
 
 - **Go (准入通过)**：
   - 深度重构增强版相比官方原生 Mooncake，全链路 P99 TTFT 降低 $\ge 20\%$，QPS 提升 $\ge 10\%$；
-  - 后台 400G 满载混压下，前台 P99 TPOT 抖动干扰率严格 $< 3\%$；
+  - 后台负载达到运行前冻结的目标且各 A/B 实际带宽偏差不超过约定容差时，前台 P99 TPOT 干扰率严格 $< 3\%$；
 - **Conditional (条件准入)**：
   - TTFT 降幅在 $10\% \sim 20\%$ 之间，TPOT 干扰率 $< 5\%$，需优化 QoS 队列调度；
 - **No-Go (否决关闭)**：

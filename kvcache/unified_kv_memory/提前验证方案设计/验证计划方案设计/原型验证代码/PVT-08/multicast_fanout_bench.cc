@@ -1,65 +1,60 @@
-// multicast_fanout_bench.cc - 1-to-N 组播分发对比微基准 (PVT-08)
-// 对比 1-to-N 单播 vs 软件分层中继 (Staging Fanout) vs 硬件多播 (Hardware Multicast)
-// 覆盖三大场景：热点系统提示词广播、Multi-Agent 共享上下文分发、PD 分离 1P-to-ND 场景
-#include <iostream>
-#include <vector>
-#include <chrono>
-#include <fstream>
+// PVT-08 DEMO 级分发拓扑计算器。开发人员需将公式替换为发送/完成事件实测。
 #include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
-struct FanoutResult {
-    std::string mode;
-    size_t payload_mb;
-    int nodes_count;
-    bool slow_node_injected;
-    double normal_nodes_avg_ready_ms;
-    double all_nodes_done_ms;
-    double slow_node_penalty;
-};
+std::vector<size_t> parse_sizes_mb(const std::string& text) {
+    std::vector<size_t> values;
+    std::stringstream stream(text);
+    std::string item;
+    while (std::getline(stream, item, ',')) {
+        if (!item.empty() && (item.back() == 'M' || item.back() == 'm')) item.pop_back();
+        if (item.empty()) throw std::invalid_argument("empty size in --sizes");
+        values.push_back(std::stoull(item));
+    }
+    if (values.empty()) throw std::invalid_argument("--sizes requires at least one value");
+    return values;
+}
 
 int main(int argc, char** argv) {
-    size_t payload_mb = 16;
     int nodes = 8;
-    std::string out_file = "res_multicast_summary.csv";
-
-    std::cout << "=== PVT-08: 1-to-N Broadcast Multicast vs Software Fanout Benchmark ===\n";
-    std::cout << "Payload: 16 MB, Consumer Nodes: 8\n";
-
-    // 1. 正常网络
-    // 方案 A: 8 次独立单播 -> 串行传输耗时 6.8ms
-    // 方案 B: 软件 Staging Fanout -> 2 级树状并发转发耗时 2.10ms (节省 60%+ 源端网卡带宽)
-    // 方案 C: 硬件 Multicast -> 物理单报文广播耗时 1.95ms (仅快 7.7%)
-    double t_unicast_normal = 6.80;
-    double t_fanout_normal = 2.10;
-    double t_mcast_normal = 1.95;
-
-    // 2. 慢节点扰动 (节点 C8 增加 10ms 延迟)
-    // 硬件多播: 等待慢节点 ACK，导致全部 8 个节点全部卡顿至 12.8ms (木桶效应)
-    // 软件 Fanout: 正常 7 个节点 2.10ms 准时就绪并开始推理，仅慢节点 12.2ms 就绪 (正常节点 0 干扰)
-    double t_mcast_slow_all = 12.80;
-    double t_fanout_slow_normal = 2.10;
-    double t_fanout_slow_all = 12.20;
-
-    std::vector<FanoutResult> results = {
-        {"N_Unicast", payload_mb, nodes, false, t_unicast_normal, t_unicast_normal, 1.0},
-        {"Software_Staging_Fanout", payload_mb, nodes, false, t_fanout_normal, t_fanout_normal, 1.0},
-        {"Hardware_Multicast", payload_mb, nodes, false, t_mcast_normal, t_mcast_normal, 1.0},
-        {"Software_Staging_Fanout", payload_mb, nodes, true, t_fanout_slow_normal, t_fanout_slow_all, 1.0},
-        {"Hardware_Multicast", payload_mb, nodes, true, t_mcast_slow_all, t_mcast_slow_all, 6.56}
-    };
-
-    double perf_gap_pct = ((t_fanout_normal - t_mcast_normal) / t_mcast_normal) * 100.0;
-    std::cout << "\n1. Normal Network Gap: " << perf_gap_pct << "% (Goal: < 10.0%, PASS)\n"
-              << "2. Slow Node Isolation: Software Fanout protects normal nodes with 0 delay vs HW Multicast 6.56x penalty.\n";
-
-    std::ofstream out(out_file);
-    out << "mode,payload_mb,nodes,slow_node_injected,normal_avg_ready_ms,all_done_ms,slow_penalty_ratio\n";
-    for (const auto& r : results) {
-        out << r.mode << "," << r.payload_mb << "," << r.nodes << "," << (r.slow_node_injected ? "YES" : "NO") << ","
-            << r.normal_nodes_avg_ready_ms << "," << r.all_nodes_done_ms << "," << r.slow_node_penalty << "\n";
+    std::vector<size_t> payload_sizes_mb = {16};
+    bool slow_node = false, hardware_supported = false;
+    std::string output = "res_multicast_summary.csv";
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--nodes" && i + 1 < argc) nodes = std::stoi(argv[++i]);
+        else if (arg == "--payload-mb" && i + 1 < argc) payload_sizes_mb = {std::stoull(argv[++i])};
+        else if (arg == "--sizes" && i + 1 < argc) payload_sizes_mb = parse_sizes_mb(argv[++i]);
+        else if (arg == "--slow-node") slow_node = true;
+        else if (arg == "--hardware-supported") hardware_supported = true;
+        else if (arg == "--out" && i + 1 < argc) output = argv[++i];
     }
-
-    std::cout << "Results saved to " << out_file << "\n";
+    std::ofstream stream(output);
+    stream << "mode,payload_mb,nodes,slow_node,source_egress_bytes,normal_nodes_p99_ms,all_nodes_done_ms,retries,evidence_level,status\n";
+    for (size_t payload_mb : payload_sizes_mb) {
+        const uint64_t payload_bytes = payload_mb * 1024ULL * 1024ULL;
+        const uint64_t unicast_egress = payload_bytes * nodes;
+        const uint64_t fanout_egress = payload_bytes * std::min(nodes, 2);
+        const uint64_t hardware_egress = payload_bytes;
+        const double unit_ms = payload_mb / 8.0;
+        const double unicast_ms = unit_ms * nodes;
+        const double fanout_ms = unit_ms * std::ceil(std::log2(std::max(nodes, 1)));
+        const double hardware_ms = unit_ms;
+        stream << "N_UNICAST," << payload_mb << ',' << nodes << ',' << slow_node << ',' << unicast_egress << ',' << unicast_ms << ',' << (unicast_ms + (slow_node ? 10 : 0)) << ",0,DEMO,DEMO_ONLY\n";
+        stream << "SOFTWARE_STAGING_FANOUT," << payload_mb << ',' << nodes << ',' << slow_node << ',' << fanout_egress << ',' << fanout_ms << ',' << (fanout_ms + (slow_node ? 10 : 0)) << ",0,DEMO,DEMO_ONLY\n";
+        stream << "HARDWARE_MULTICAST," << payload_mb << ',' << nodes << ',' << slow_node << ','
+               << (hardware_supported ? std::to_string(hardware_egress) : "") << ','
+               << (hardware_supported ? std::to_string(hardware_ms) : "") << ','
+               << (hardware_supported ? std::to_string(hardware_ms + (slow_node ? 10 : 0)) : "")
+               << ",0,DEMO," << (hardware_supported ? "DEMO_ONLY" : "NOT_SUPPORTED") << '\n';
+    }
+    std::cout << "output=" << output << " evidence_level=DEMO hardware_status="
+              << (hardware_supported ? "DEMO_ONLY" : "NOT_SUPPORTED") << '\n';
     return 0;
 }
