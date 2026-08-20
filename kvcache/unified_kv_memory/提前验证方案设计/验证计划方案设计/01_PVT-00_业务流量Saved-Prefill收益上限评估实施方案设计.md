@@ -26,7 +26,7 @@
 ### 1.1 待验证核心命题
 大模型推理中，输入预计算阶段（Prefill，即首字生成前的 Prompt 计算）计算量大、耗时长。本验证旨在通过受控基准测试与底层网络微基准测试交叉比对，探明在不同前缀复用率（30%、50%、70%、90%、98%）及不同长文本场景下：
 1. 定位 Mooncake 原生数据传输与框架接入在端到端流程中的耗时占比和主要瓶颈；
-2. 针对 **DeepSeek MLA** 与 **Qwen MHA** 两类 KV 布局，测定外接存储池相比纯算力本地重算（Recompute）的端到端 TTFT（Time To First Token，首字生成延迟）净时间节省。每 Token KV 字节数由运行时布局清单导出，包含层数、KV 头、维度、数据类型、并行切分和对齐；不得把 MLA 潜变量维度 512 直接当作整模型 `512B/token`；
+2. 针对 **DeepSeek MLA (~35KB/tok)** 与 **Qwen MHA (320KB/tok)** 两类 KV 布局，测定外接存储池相比纯算力本地重算（Recompute）的端到端 TTFT（Time To First Token，首字生成延迟）净时间节省；
 3. 采用 UBMEM（统一总线内存直通共享协议）相比 URMA（通用远程直接内存访问）/ 标准 RDMA 通信协议，在元数据处理与数据传输阶段带来的性能增益上限。
 
 ### 1.2 最终交付数据与结论产出
@@ -106,7 +106,7 @@ R2: [---------------- 50K Prefix A ----------------][---------------- 50K New B 
 # 生成 Qwen MHA 模型数据集 (320KB/tok)
 python3 ./原型验证代码/PVT-00/make_workload.py --model-type mha --model-id Qwen2.5-72B --layout-manifest runtime_layout_qwen.json --prefix-tokens 50000 --unique-tokens 50000 --out workload_mha_50pct.json
 
-# 生成 DeepSeek MLA 模型数据集；KV 字节由 --layout-manifest 指定的运行时布局清单提供
+# 生成 DeepSeek MLA (~35KB/tok) 模型数据集
 python3 ./原型验证代码/PVT-00/make_workload.py --model-type mla --model-id DeepSeek-V3 --layout-manifest runtime_layout_deepseek.json --prefix-tokens 50000 --unique-tokens 50000 --out workload_mla_50pct.json
 ```
 
@@ -124,7 +124,7 @@ python3 ./原型验证代码/PVT-00/traffic_generator.py --endpoint http://recom
 ### 4.1 实验环境、测试模型基线与源码版本锁定
 - **模型权重基线路径**：
   - 主测 Dense 模型：`/models/Qwen/Qwen2.5-72B-Instruct`（FP16，80 层，GQA 分组查询注意力 $H_{kv}=8$, $D_{head}=128$，单 Token KV 大小为 $320\text{ KB/Token}$，张量并行 TP=8 单卡 $40\text{ KB/Token}$）；
-  - 主测 MLA 压缩态模型：`/models/deepseek-ai/DeepSeek-V3`（FP8 MLA，多头潜变量注意力；单 Token KV 字节数以运行时布局清单为准，必须计入层数、潜变量及旋转位置编码等附加状态、数据类型、张量并行切分与对齐）；
+  - 主测 MLA 压缩态模型：`/models/deepseek-ai/DeepSeek-V3`（FP8 MLA，61 层，潜变量 512 + RoPE 64，单 Token KV 显存占用约为 $35\text{ KB/Token}$，张量并行 TP=8 单卡约为 $4.38\text{ KB/Token}$）；
   - 备选长文模型：`/models/meta-llama/Llama-3.1-70B-Instruct`（FP16/FP8）。
 - **推理引擎与存储组件版本锁定**：
   - `vLLM`：Commit: `842dd8fd96650063e1ad32e6075742d457d39773`；
@@ -177,7 +177,7 @@ cd ./原型验证代码/PVT-00 && make clean && make -j16
 # 生成 Qwen MHA (320KB/tok) 50% 复用率测试集
 python3 ./make_workload.py --model-type mha --model-id Qwen2.5-72B --layout-manifest runtime_layout_qwen.json --prefix-tokens 50000 --unique-tokens 50000 --out workload_mha_50pct.json
 
-# 生成 DeepSeek MLA 50% 复用率测试集；不得硬编码整模型 512B/token
+# 生成 DeepSeek MLA (~35KB/tok) 50% 复用率测试集
 python3 ./make_workload.py --model-type mla --model-id DeepSeek-V3 --layout-manifest runtime_layout_deepseek.json --prefix-tokens 50000 --unique-tokens 50000 --out workload_mla_50pct.json
 ```
 

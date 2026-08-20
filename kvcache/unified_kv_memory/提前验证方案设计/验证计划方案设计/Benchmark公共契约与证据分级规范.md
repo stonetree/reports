@@ -24,7 +24,7 @@ measure_rounds, planned_path
 其中：
 
 - `package_id` 标识完整代码包。原生 Mooncake、单项增强和完整增强使用不同代码包或配置，并写入不同结果目录；
-- `model_layout_manifest` 记录层数、KV 头数、每头维度、数据类型、张量并行切分、对齐和附加状态。DeepSeek MLA 的 KV 字节数必须由该清单或运行时导出结果计算，不得把潜变量维度 512 直接写成整模型 `512B/token`；
+- `model_layout_manifest` 记录层数、KV 头数、每头维度、数据类型、张量并行切分、对齐和附加状态，精确定义各模型（如 DeepSeek MLA ~35KB/tok、Qwen MHA 320KB/tok）的单 Token KV 字节数与内存布局；
 - `planned_path` 是调度计划，`actual_path` 是实际完成路径。无法证明实际路径时，性能证据无效；
 - 设备型号、节点数、链路和 SSD 数量根据可用实验设备参数化，不在公共规范中写死。
 
