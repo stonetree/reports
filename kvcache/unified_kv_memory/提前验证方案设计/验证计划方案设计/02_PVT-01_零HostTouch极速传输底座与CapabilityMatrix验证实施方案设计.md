@@ -1,339 +1,582 @@
 # PVT-01：Host CPU 零数据拷贝传输底座与硬件能力矩阵验证实施方案设计
-## —— Mooncake TransferEngine 深度重构与国产硬件零拷贝底座打通
+## —— Mooncake TransferEngine 数据路径核对与国产硬件直达传输能力验证
 
-> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。DEMO 模式不得按名义 Payload 计算 Direct 路径实测带宽；LAB/MEASURED 必须使用设备实际完成字节和正式探针结果。缺少 bpftrace 或等价探针时结果为 `INVALID-EVIDENCE`。
+> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。每个 `run_id` 必须冻结数据块、路径、代码包、拓扑、队列深度、预热、测量轮数和证据等级；结果必须保留实际完成字节、失败事件、Host CPU 探针原始输出和结论状态。DEMO 模式不得按名义 Payload 计算 Direct 路径实测带宽。
 
-> **验证 ID**：PVT-01  
-> **验证名称**：Host CPU 零数据拷贝极速传输底座与硬件能力矩阵 (CapabilityMatrix) 验证  
-> **验证优先级**：**🟡 P1 级（底座支撑项）**  
-> **对应验证阶段**：**E1 核心数据路径打通**  
-> **证伪标记**：否（底层传输能力确认）  
-> **主关联 IR**：`IR-01-06`, `IR-01-08`, `IR-01-09`, `IR-01-12`  
-> **核心 SRS / SR23 锚点**：  
-> - SRS: `L4-MC-HIER-STORE-001`, `L3-MS-Tiering-038`, `L4-HW-HostPayloadTouchBudget-076`, `L4-FT-PathIntegrityPolicy-077`  
-> - SR23: `SR23-01-06-01`, `SR23-01-07-01`, `SR23-01-08-01`, `SR23-01-09-01`, `SR23-01-12-01`  
-> **开源基线版本与代码仓库**：  
-> - **Mooncake TransferEngine**：[`https://github.com/kvcache-ai/Mooncake.git`](https://github.com/kvcache-ai/Mooncake.git) (Commit: `f90ae691f109e49a60920e0c8abbf7e572826d8c`，子模块路径: `mooncake-transfer-engine/`)  
-> **研发对齐状态**：本方案将复核研发评估报告涉及的 P2P Pinning 接口、io_uring 双模式与用户态探针覆盖范围，并以现场 SDK 和探针结果为准。
+> **验证范围声明**：当前受控工程中的 `raw_trans_bench.cc` 只有 `host_memcpy` 分支真正执行本地 `memcpy`；`urma_direct`、`ubmem_direct`、`nvme_direct` 和 `socket_tcp` 分支目前不提交设备、网络或磁盘操作，统一输出 `DEMO / DEMO_ONLY` 或零实际完成字节。`host_touch_monitor.py` 当前只挂载 `kprobe:memcpy` 与 `kprobe:memmove`，没有代码中描述的完整用户态/内核多锚点覆盖，也不会自动生成 `zero_touch_verified=true`。因此，现有源码只能示范字段和失败关闭流程，不能单独证明 Host CPU 零数据拷贝、真实 DMA 或硬件能力矩阵已经成立。
+
+> **术语速查**：Host CPU 零数据拷贝（Host CPU 仅负责下发控制指令，不参与正文数据搬运）；DMA（Direct Memory Access，直接内存访问，即由设备控制器直接读写目标内存）；P2P DMA（Peer-to-Peer DMA，设备之间直接读写显存或设备内存）；HBM（High Bandwidth Memory，高带宽显存）；eBPF（Extended Berkeley Packet Filter，Linux 内核中的可编程观测机制）；kprobe（内核函数入口探针）；uprobe（用户态函数入口探针）；URMA（通用远程直接内存访问，即用户态高性能远程内存访问接口）；UBMEM（统一总线内存直通共享协议，即支持跨节点与异构设备直接共享内存地址空间的底层通信协议）；NVMe（Non-Volatile Memory Express，面向高速固态存储的设备协议）；io_uring（Linux 异步 I/O 接口，支持批量提交和完成事件）。
+
+> **验证 ID**：PVT-01
+> **验证名称**：Host CPU 零数据拷贝传输底座与硬件能力矩阵验证
+> **验证优先级**：**🟡 P1 级（底座支撑项）**
+> **对应验证阶段**：**E1（核心数据路径打通与多卡状态同步）**
+> **证伪标记**：否（底层传输能力确认）
+> **建议周期**：3~5 人日
+> **主关联 IR**：`IR-01-06`, `IR-01-08`, `IR-01-09`, `IR-01-12`
+> **核心 SRS / SR23 锚点**：
+> - SRS：`L4-MC-HIER-STORE-001`, `L3-MS-Tiering-038`, `L4-HW-HostPayloadTouchBudget-076`, `L4-FT-PathIntegrityPolicy-077`
+> - SR23：`SR23-01-06-01`, `SR23-01-07-01`, `SR23-01-08-01`, `SR23-01-09-01`, `SR23-01-12-01`
+> **配套源码**：[`提前验证方案设计/验证计划方案设计/原型验证代码/PVT-01/`](file:///d:/codes/reports/kvcache/unified_kv_memory/提前验证方案设计/验证计划方案设计/原型验证代码/PVT-01)
+> **开源基线版本**：Mooncake TransferEngine `f90ae691f109e49a60920e0c8abbf7e572826d8c`。正式结果必须另外记录现场驱动、NPU、网卡、NVMe、内核和工具版本，不能只引用本文默认 Commit。
 
 ---
 
-## 0. 架构导读与传统软件系统视角切入
+## 0. 架构导读与核心概念第一性原理剖析
 
-### 0.1 传统系统开发视角：为什么“零拷贝”至关重要？
-在高性能网络编程与存储系统（如 Kafka、Netty、DPDK、SPDK）中，一个重要工程约束是：**不要让 CPU 承担正文字节搬运**。
-- 如果每秒有数十 GB 的数据流经 CPU 进行 `memcpy`，CPU 会把全部算力消耗在从内存读取字节再写入内存的死循环中；
-- 这会增加主板内存总线（DDR 带宽）和 CPU L3 Cache 的争用，可能使同机控制面调度和 API 服务出现明显排队时延（即“CPU 墙 / Memory Wall”）。
+### 0.1 传统系统视角：零数据拷贝约束解决的是什么问题
+
+在 Kafka、Netty、DPDK 或高速存储系统中，数据路径通常包含控制面和数据面：
+
+```text
+控制面：应用下发描述符、队列门铃、地址和长度
+数据面：网卡/SSD/DMA 控制器直接搬运正文数据
+```
+
+如果数据面退化为“设备读入 Host DDR，再由 Host CPU `memcpy` 到目标显存”，CPU 会随着 payload 字节数线性参与搬运。结果不仅是 CPU 利用率升高，还会占用 Host DDR 带宽、共享缓存和内存控制器，影响同机调度、RPC 和在线推理控制面。
+
+所以，“零数据拷贝”不是一句性能口号，而是一个需要同时满足的路径约束：
+
+1. 设备完成量必须证明正文确实由目标 DMA 路径搬运；
+2. Host CPU 不能在被测窗口内执行正文复制；
+3. 探针覆盖范围、被测 PID、采样时间窗和完成事件必须相互对应；
+4. 带宽、时延和 CPU 占用要和同一 payload、队列深度及设备条件下的对照组比较。
 
 ### 0.2 大模型推理中的对应物理场景
-在大模型分布式推理中，节点之间可能需要以 100Gbps~400Gbps 的链路搬运海量 KVCache（大模型注意力键值缓存：大模型自回归生成过程中缓存的历史 Key 与 Value 激活状态张量，用于避免后续 Token 生成时重复计算注意力）：
-- **待复核的开源路径问题**：需要在冻结的 Mooncake 代码包和现场设备上核对数据是否经过 Host DDR、CPU 与 NPU 显存之间的中转；若存在中转，吞吐会受到 CPU 和内存总线争用影响；
-- **面向国产 AI 硬件的软硬件协同方案**：必须实现 **Host CPU 零数据拷贝（CPU 仅负责下发控制指令，不参与正文数据搬运，Host Payload Touch Bytes 严格为 0）**，让数据通过硬件 DMA（直接内存访问）直接在 NPU 显存（HBM）与网卡/SSD 之间直达流转（Peer-to-Peer DMA，P2P）。
 
-### 0.3 什么是硬件能力矩阵 (CapabilityMatrix)？
-在分布式系统中，调度器在决定把数据放到哪里、从哪里拉取之前，必须清楚知道当前服务器底层的各项物理指标（例如：从 NPU 显存写本地 NVMe SSD 的读写带宽是多少？跨节点通过高速网络读远端显存的时延是多少？）。
-我们在运行时通过底层探针自动探测并生成的这张物理参数表，就叫做 **硬件能力矩阵（CapabilityMatrix，即在运行时自动探测各通信链路的带宽、时延等物理参数表，供调度算法使用）**。
+KVCache（大模型注意力键值缓存，即自回归生成过程中保存历史 Key 和 Value 激活状态、避免后续 Token 重复计算注意力）可能在 NPU HBM、远端显存、NVMe SSD 和网络设备之间移动。若每次移动都经过 Host DDR，数据量越大，CPU 和内存总线越容易成为隐性瓶颈。
 
-### 0.4 关键技术手段解惑：什么是 eBPF？为什么需要独立探针？
-很多新进入本领域的工程师会问：“我们既然在代码里写了 DMA 传输，怎么证明 CPU 真的没有悄悄去调用 `memcpy` 拷贝数据呢？为什么需要 eBPF？”
-- **什么是 eBPF？**：eBPF（Extended Berkeley Packet Filter）是 Linux 内核中的一项革命性技术。它允许开发者在不修改内核源码、不重启系统的情况下，在内核的关键函数入口（kprobe）或用户态 C 库函数（uprobe）挂载安全的高性能探针，实时拦截并统计特定函数被谁调用了、调用了多少次、传入了多少字节。
-- **为什么需要 eBPF？**：应用层代码可能遗漏第三方库或驱动引入的隐式拷贝。基于 eBPF 的监控脚本（`host_touch_monitor.py`）同时覆盖内核 `kprobe:memcpy` 与 glibc `uprobe:memcpy` 等探针点，独立记录被测进程的调用次数和字节数；只有在探针覆盖范围、采样窗口和设备完成量均核对无误时，`memcpy_bytes = 0` 才能作为 Host CPU 零数据拷贝的可追溯证据。
+本项要验证的目标路径包括：
+
+- 跨节点 URMA/UBMEM：网卡 DMA 直接访问可注册的 NPU HBM 或设备内存；
+- 本地 NVMe Direct：NVMe 控制器通过 `io_uring`/固定缓冲或现场等价接口直接读写设备内存；
+- 软中转基线：Host DDR 与 CPU `memcpy` 明确参与，量化软件中转成本；
+- TCP/IP 基线：标准 Socket 协议栈作为传统网络路径对照。
+
+这些是目标物理路径，不代表当前 `raw_trans_bench.cc` 已经实现。当前代码必须先完成源码审计，再决定本轮是 DEMO、LAB 还是 MEASURED。
+
+### 0.3 什么是硬件能力矩阵
+
+硬件能力矩阵（CapabilityMatrix，即在运行时记录各通信链路带宽、时延、CPU 负载、完成量和支持状态的参数表）是调度器选择 Direct-View（远端直读，即直接通过高速链路读取远端 KV 数据，不先产生本地显存完整副本）、Copy-to-HBM（拷贝到本地显存，即通过 DMA 将 KV 数据完整搬运到本地 HBM）或本地重算路径的输入。
+
+它至少要回答：
+
+| 物理问题 | 能力矩阵需要的字段 |
+|---|---|
+| 这条路径是否真的完成了数据搬运 | `actual_completed_bytes`、设备完成事件、`actual_path` |
+| 设备搬运速度如何 | 有效带宽、P50/P99、payload、队列深度、方向 |
+| Host CPU 是否参与正文搬运 | 探针覆盖范围、调用次数、搬运字节数、CPU 占用 |
+| 结论适用于什么设备 | 设备型号、驱动、节点、拓扑、代码包和配置哈希 |
+| 这条路径是否可供调度器使用 | `evidence_level`、`status`、`invalid_reason`、有效期 |
+
+没有实际完成量或完整探针证据的能力条目，必须保留 `null` 并标记原因；不能用默认带宽或“未观测到”直接填 0。
+
+### 0.4 eBPF 探针为什么不能只看应用日志
+
+应用层日志只能说明某个函数“计划提交”了传输，不能证明第三方库、驱动或回退路径没有执行隐式复制。eBPF 可以在内核函数入口或用户态库函数入口观察调用，但它也有边界：
+
+- 当前脚本仅有 `kprobe:memcpy`、`kprobe:memmove`，没有挂载 glibc `uprobe`、`copy_to_user` 或设备特定拷贝符号；
+- 即使某个探针窗口内没有事件，也要确认探针加载成功、目标 PID 正确、采样覆盖整个传输、输出解析成功；
+- “探针没有捕获到”不等于“Host Payload Touch Bytes 为 0”；还必须有设备完成量和路径凭证；
+- 当前脚本只在输出中写 `status=OK` 和 `host_touch_bytes`，没有根据字节数自动判断零拷贝，也没有写入完整覆盖证明。
 
 ---
 
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 现实前因痛点与待验证核心命题
-1. **现实痛点**：若开源路径依赖 Host CPU 中转数据，并发拉取 KVCache 可能使 CPU 接近满载并挤占控制面调度与在线推理；实际占用需用同场次基线测量；
-2. **核心命题**：
-   - 证明跨节点 **URMA（通用远程直接内存访问：用户态的高性能 RDMA 驱动接口与通信协议） / UBMEM（统一总线内存直通共享协议：支持跨节点与异构设备间直接共享内存地址空间的底层通信协议）** 传输与本地 **NVMe SSD 直达读写** 过程中，Host CPU 零数据拷贝（Host Payload Touch Bytes 严格为 0）；
-   - 跨节点有效传输带宽达到物理网络线速的 **$\ge 80\%$**，本地 NVMe SSD 直达顺序读带宽达到物理峰值的 **$\ge 80\%$**；
-   - 自动生成并导出标准的《硬件能力矩阵文件 (CapabilityMatrix)》，为上层微秒决策引擎（QueryPlan）提供精准参数。
 
-### 1.2 最终交付数据与结论产出
-1. **《eBPF CPU 数据拷贝检测日志表》**（记录 memcpy 调用次数、搬运字节数、探针覆盖范围与证据状态）；
-2. **《各介质路径裸传输带宽与时延曲线表》**（涵盖 URMA, UBMEM, NVMe Direct, Host Memcpy, TCP/IP 对照）；
-3. **《硬件能力矩阵探针文件》**（`capability_matrix.json`）；
-4. **《GO / CONDITIONAL / NO-GO / NOT-SUPPORTED / INVALID-EVIDENCE 判定结论》**。
+1. **命题一：目标 Direct 路径是否真的绕过 Host CPU 正文搬运**。在 URMA、UBMEM 和 NVMe Direct 路径上，设备完成字节大于 0，Host CPU 正文拷贝字节数在完整探针覆盖窗口内为 0；
+2. **命题二：目标路径的带宽和尾部时延是否优于软件中转**。在相同 payload、队列深度、设备和拓扑下，对比 Host Memcpy、Socket TCP 与 Direct 路径的有效带宽、P50/P99 和 CPU 占用；
+3. **命题三：能力矩阵能否作为调度输入**。每条路径必须同时记录支持状态、物理参数、版本、拓扑、实际路径和有效期；缺少字段的路径不能被调度器当作已验证路径；
+4. **命题四：目标路径是否满足候选工程门槛**。候选门槛为网络有效线速达成率不低于 80%、NVMe 直达顺序带宽不低于设备标称峰值的 80%、Host CPU 正文拷贝字节为 0 且 CPU 占用低于 5%；这些是运行前冻结的判定条件，不是现有代码的预置结果。
+
+### 1.2 交付物与结论边界
+
+每个正式 `run_id` 至少交付：
+
+1. 《Host CPU 正文拷贝探针证据表》：包括探针类型、覆盖符号、目标 PID、采样窗口、调用次数、字节数、解析状态和未覆盖范围；
+2. 《五类传输路径性能对照表》：覆盖 URMA Direct、UBMEM Direct、NVMe Direct、Host Memcpy、Socket TCP 的 payload、队列深度、方向、带宽、P50/P99、CPU 和完成量；
+3. `capability_matrix.json`：每个路径一条或多条带有版本与拓扑绑定的能力条目；
+4. `manifest.json`、`environment.json`、原始 CSV、探针原始 stdout/stderr、原始日志和摘要；
+5. 按路径分别输出 `GO`、`CONDITIONAL`、`NO-GO`、`NOT-SUPPORTED` 或 `INVALID-EVIDENCE`。没有把握关闭的路径不能被其他路径的成绩覆盖。
 
 ---
 
-## 2. 基础/对照 Micro-Benchmark 构建方法
+## 2. 实验方案与测试矩阵设计
 
-### 2.1 底层驱动 SDK 与 P2P 显存锁定规范
+### 2.1 五类路径与公平对照逻辑
 
-为了让网卡或 NVMe 控制器的 DMA 引擎能够直接访问 NPU 的显存（HBM），必须完成两个关键步骤：
-1. **分配支持硬件 P2P 的显存**：调用 CANN 驱动接口分配允许跨设备 DMA 寻址的连续显存页；
-2. **向网络/存储驱动注册内存区域（Memory Region, MR / Pinning）**：将显存的物理地址锁定并提交给网卡/存储控制器，获取本地与远端访问密钥（rkey/lkey），使后续正文数据传输由硬件 DMA 引擎完成，Host CPU 仅保留控制面动作。
+| 路径 | 目标物理含义 | 当前 `raw_trans_bench.cc` 实际行为 | 当前默认证据 |
+|---|---|---|---|
+| `urma_direct` | URMA 网卡直接访问设备内存或 NPU HBM | 不复制、不提交网卡，只执行空汇编占位 | `DEMO / NOT-SUPPORTED` |
+| `ubmem_direct` | UBMEM 统一总线直通访问设备内存 | 不复制、不提交 UBMEM，只执行空汇编占位 | `DEMO / NOT-SUPPORTED` |
+| `nvme_direct` | NVMe 通过 Direct I/O 直接读写设备内存 | 不打开 NVMe、不调用 `io_uring`，实际完成字节为 0 | `DEMO / NOT-SUPPORTED` |
+| `host_memcpy` | Host DDR/CPU `memcpy` 软件中转基线 | 真正执行本地 `memcpy`，输出完成字节和 CPU 时间 | `DEMO`；接入真实源/目标后才可形成对照实测 |
+| `socket_tcp` | 标准 TCP/IP Socket 传统网络基线 | 当前同样走空汇编占位，不创建 Socket | `DEMO / NOT-SUPPORTED` |
 
-```cpp
-#include <urma.h>
-#include <ubmem.h>
-#include <acl/acl.h>
-#include <acl/acl_rt.h>
-#include <liburing.h>
+公平 A/B 只允许改变目标路径或被测代码包；设备、payload、队列深度、循环次数、内存布局、线程绑核、资源配额、预热和统计口径必须一致。仅把 `--mode` 从 `urma_direct` 改为 `ubmem_direct`，并不会切换底层驱动。
 
-// 步骤 1：分配支持跨设备 P2P DMA 的 NPU 显存
-void* npu_hbm_ptr = nullptr;
-aclrtMalloc(&npu_hbm_ptr, payload_size, ACL_MEM_MALLOC_HUGE_FIRST_P2P);
+### 2.2 数据块与队列深度矩阵
 
-// 步骤 2：将 NPU 显存物理地址直接注册至 URMA 网卡控制器 (Pin Memory)
-struct urma_mr* mr = urma_register_dev_mr(
-    qp->dev, npu_hbm_ptr, payload_size, 
-    URMA_ACCESS_LOCAL_WRITE | URMA_ACCESS_REMOTE_READ | URMA_ACCESS_REMOTE_WRITE
-);
+| 维度 | 正式计划取值 | 当前源码支持情况 | 物理目的 |
+|---|---|---|---|
+| payload | 64KB、256KB、1MB、4MB、16MB、64MB、256MB、1GB | `--payload-bytes` 支持任意单值；默认 64MB | 小块观察固定时延，大块观察带宽爬坡和饱和 |
+| queue depth | 1、2、4、8、16、32、64 | `--qd` 支持任意单值 | 正式设备路径中对应并发提交深度；当前程序只是循环执行 |
+| loops | 运行前冻结，建议预热与测量分开 | `--loops` 支持；默认 10 | 形成足够的原始样本和重复轮次 |
+| 方向 | Read、Write、双向 | 当前没有方向参数，代码只构造本地 source/target | 需由真实驱动扩展，并记录完成方向 |
+| 路径 | URMA、UBMEM、NVMe Direct、Host Memcpy、Socket TCP | `--mode` 可接受字符串，但只有 `host_memcpy` 有实际复制 | 不能把字符串支持当成物理能力支持 |
 
-// 步骤 3：NVMe Direct 存储访问（Linux 6.6+ io_uring + O_DIRECT 裸盘直达）
-int fd = open("/dev/nvme0n1", O_RDWR | O_DIRECT);
-io_uring_prep_read_fixed(sqe, fd, npu_hbm_ptr, size, lba_offset, buf_index);
+### 2.3 Host CPU 与设备能力门槛
+
+| 指标 | 候选门槛 | 必须具备的证据 | 当前代码状态 |
+|---|---:|---|---|
+| 网络有效线速达成率 | `>= 80%` | 物理标称线速、实际完成字节、稳定测量时长、实际路径 | 不支持真实网络 |
+| NVMe 直达顺序带宽 | `>= 80%` 设备标称峰值 | 设备型号、读写方向、完成字节、`io_uring`/设备完成事件 | 不支持 NVMe |
+| Host CPU 正文拷贝字节 | `= 0` | 完整 kprobe/uprobe 或等价探针、目标 PID、采样窗口、设备完成量 | 当前探针覆盖不足，不能关闭 |
+| Host CPU 占用 | `< 5%` 候选门槛 | 同场次 CPU 时间、墙上时间、采样工具和绑核信息 | 当前仅进程 CPU 时间，且路径多为占位 |
+
+### 2.4 环境与证据矩阵
+
+| 环境 | 目的 | 最低条件 | 允许形成的结论 |
+|---|---|---|---|
+| W0 单机/本地桩 | 验证参数解析、CSV、探针失败分支和能力矩阵格式 | C++ 编译器、Python、可选 bpftrace | 仅形成 `DEMO` 流程结论 |
+| W1 局部设备实测 | 绑定一台设备或一条链路验证局部路径 | 真实 NPU/网卡/NVMe、驱动、完成事件和探针 | 形成设备绑定的 `LAB` 结论 |
+| W2 跨节点完整路径 | 验证真实网络 Direct 和业务可用能力 | 两节点、真实设备路径、拓扑记录、时钟/事件对齐和重复实验 | 证据闭环后形成 `MEASURED` 结论 |
+
+---
+
+## 3. 物理模型与统计口径
+
+### 3.1 数据路径分解
+
+目标 Direct 路径的期望时序是：
+
+```text
+Host CPU：分配/注册 → 编译描述符 → 提交队列 → 等待完成
+设备数据面：源设备内存 ──DMA──► 目标设备内存
 ```
 
-#### 驱动链接与 P2P 注册接口的保留约束
+软件中转路径则是：
 
-- **库文件链接**：`-lurma -lubmem -luring -lascendcl -lpthread`；实际库路径、驱动版本和设备节点必须写入 `hardware_profile`，不能只写在命令行注释中；
-- **Mooncake 扩展接口对齐**：以固定的 Mooncake `TransferEngine` 版本为接口基线，对齐 `ascend_allocator.h` 与 `TransportType::AscendDirect` / `TransportType::UB` 语义；优先调用支持 P2P DMA 的显存分配与物理句柄导出接口，失败时明确记录错误，不得静默退回 Host DDR；
-- **NVMe 备选路径**：如果现场驱动不支持 `io_uring` 对 NPU HBM 的 P2P 直达，可评估 SPDK 用户态 NVMe 路径（例如将 NVMe PRP/SGL 指向已注册的 NPU HBM 物理地址）。该路径必须单独记录为不同 `actual_path`，不能与 `io_uring` 结果混为一组。
-
-示意接口契约如下，正式实现时需替换为现场 SDK 的真实函数签名：
-
-```cpp
-// 优先使用 Mooncake/现场 NPU VMM 扩展分配可被 DMA 访问的显存。
-void* npu_hbm_ptr = mooncake::ascend_allocate_vmm_memory_direct(payload_size);
-if (!npu_hbm_ptr) {
-    aclrtMalloc(&npu_hbm_ptr, payload_size, ACL_MEM_MALLOC_HUGE_FIRST_P2P);
-}
-
-// 将显存物理 Handle/VA 注册到 URMA 网卡控制器，供 DMA 直接访问。
-aclrtDrvMemHandle drv_handle = mooncake::ascend_get_physical_handle_from_va(npu_hbm_ptr);
-struct urma_mr* mr = urma_register_dev_mr(
-    qp->dev, npu_hbm_ptr, payload_size,
-    URMA_ACCESS_LOCAL_WRITE | URMA_ACCESS_REMOTE_READ | URMA_ACCESS_REMOTE_WRITE);
+```text
+源设备/网卡 → Host DDR → Host CPU memcpy → 目标 HBM/设备内存
 ```
 
-> 上述扩展函数名是接口适配位置说明，不代表当前所有现场 SDK 都提供同名 API；编译前必须以实际头文件和驱动文档核对，并在 `manifest.json` 中记录最终绑定版本。
+可用以下解释模型拆分一次传输时间：
 
-### 2.2 测试工具与源码结构
-源码存放在 `./原型验证代码/PVT-01/` 目录下：
+$$
+T_{path}=T_{submit}+T_{queue}+T_{DMA}+T_{completion}+T_{fence}
+$$
 
-```
+若存在 Host CPU 中转，还要显式记录：
+
+$$
+T_{host\_copy}=T_{read\_DDR}+T_{memcpy}+T_{write\_DDR/HBM}
+$$
+
+模型用于组织观测字段，不允许在没有设备完成事件时用公式推断实际 DMA 已发生。
+
+### 3.2 有效带宽与线速达成率
+
+有效完成字节必须来自设备或协议完成事件，而不是命令行 payload：
+
+$$
+BW_{effective}=\frac{actual\_completed\_bytes\times 8}{T_{measure}\times 10^9}\;\mathrm{Gbps}
+$$
+
+网络线速达成率为：
+
+$$
+\eta_{wire}=\frac{BW_{effective}}{BW_{line\_rate}}\times 100\%
+$$
+
+当前 `raw_trans_bench.cc` 对 Direct 模式输出 `actual_completed_bytes=0`，所以不能用 `payload_bytes × queue_depth × loops` 人工补出带宽。
+
+### 3.3 Host CPU 零数据拷贝的证据条件
+
+Host CPU 正文拷贝为 0 的结论必须同时满足：
+
+1. 探针成功加载并覆盖被测进程实际使用的内核/用户态复制入口；
+2. 目标 PID、采样窗口和传输窗口完全对应；
+3. `host_touch_bytes` 的原始值确实为 0，且不是字段缺失或解析失败后的默认值；
+4. `actual_completed_bytes > 0`，并有设备完成事件或路径凭证证明数据已经实际搬运；
+5. 没有未覆盖的回退路径、第三方库或设备同步复制未被记录。
+
+因此，`host_touch_bytes=null`、探针命令失败、输出缺少字节统计或 Direct 模式实际完成字节为 0，都只能标为 `INVALID-EVIDENCE` 或 `NOT-SUPPORTED`，不能写成零数据拷贝通过。
+
+### 3.4 CPU 占用和尾部时延
+
+进程 CPU 占用可以作如下解释性统计：
+
+$$
+CPU\% = \frac{T_{process\_cpu}}{T_{wall}}\times 100\%
+$$
+
+它只能描述采集窗口内进程使用 CPU 的比例，不能替代系统级内存带宽、核绑定位、后台进程和中断开销。正式报告至少给出 CPU 统计方式、绑核、采样窗口、payload、队列深度及 P50/P99；只给一个平均 CPU 百分比不足以关闭 Host CPU 零拷贝命题。
+
+---
+
+## 4. 测试工具、当前实现边界与正式扩展要求
+
+### 4.1 当前受控工程目录与运行方式
+
+```text
 原型验证代码/PVT-01/
-├── raw_trans_bench.cc         # 测量 URMA/UBMEM/NVMe Direct 零拷贝 vs CPU memcpy 性能的 C++ 压测工具
-├── Makefile                   # 编译 raw_trans_bench 的工程构建文件 (make -j16)
-├── host_touch_monitor.py      # 基于 Linux eBPF (bpftrace) 监控 CPU 触碰的全量内核与用户态探针脚本
-└── export_capability_matrix.py# 自动解析实测吞吐并导出 capability_matrix.json 的工具脚本
+├── Makefile
+├── raw_trans_bench.cc
+├── host_touch_monitor.py
+└── export_capability_matrix.py
 ```
 
-编译方法：
+当前 `Makefile` 只使用 `g++ -O3 -std=c++17 -pthread -Wall`，不链接 URMA、UBMEM、CANN、`liburing` 或 Socket 专用库。可复现的 W0 构建命令为：
+
 ```bash
-cd ./原型验证代码/PVT-01 && make clean && make -j16
+cd ./原型验证代码/PVT-01
+make clean
+make
+./raw_trans_bench --mode host_memcpy --payload-bytes 67108864 --qd 16 --loops 10 --out res_memcpy_demo.csv
+./raw_trans_bench --mode urma_direct --payload-bytes 67108864 --qd 16 --loops 10 --out res_urma_demo.csv
 ```
 
-### 2.3 四组实验路径设计意图与对照逻辑
-为了形成严密的对比证据链，本验证设计了 2 组目标路径和 2 组对照基线。路径 A 包含 URMA 与 UBMEM 两个协议分支，因此最终结果表会展开为 5 类 `mode`：
-- **路径 A（URMA / UBMEM 零拷贝 Direct 模式）**：【目标路径】NPU HBM ↔ 网卡 DMA 裸直达，分别记录 URMA 与 UBMEM 的现场结果，验证跨节点零 CPU 拷贝下的线速传输；
-- **路径 B（NVMe Direct SSD 直达模式）**：【目标路径】`io_uring` + `O_DIRECT` + P2P DMA，验证本地存储直达 NPU 显存时的零 CPU 拷贝与大吞吐；
-- **对照组 C（CPU Memcpy 软中转基准）**：【反面基准】数据先从硬件读入 Host DDR 内存，再由 Host CPU 执行 `memcpy` 拷入 NPU 显存。用于量化“CPU 当搬运工”时的极端算力开销与总线瓶颈；
-- **对照组 D（标准 TCP/IP Socket 基准）**：【传统基准】标准 Linux Socket 协议栈中转，用于量化传统网络协议在面对大模型传输时的性能劣势。
+当前 CLI 只有：
+
+```text
+--mode           传输路径字符串；只有 host_memcpy 分支执行 memcpy
+--payload-bytes  单次本地缓冲区大小
+--qd             内层循环次数，当前不是异步设备队列
+--loops          外层测量循环次数
+--out            输出 CSV 路径
+```
+
+### 4.2 源码实际行为审计
+
+| 代码路径 | 实际行为 | 对证据的影响 |
+|---|---|---|
+| `raw_trans_bench.cc::main` | 解析 `mode`、payload、`qd`、loops 和输出路径；不校验设备、方向或拓扑 | CLI 字符串不等于真实设备绑定 |
+| `raw_trans_bench.cc::worker` 等价主循环 | `host_memcpy` 执行 `std::memcpy`；其他模式只执行空汇编屏障 | Direct/TCP/NVMe 模式没有真实数据搬运 |
+| `actual_completed_bytes` | 只有 `host_memcpy` 写入 `payload × qd × loops`；其他模式固定为 0 | Direct 行不能按名义 payload 计算带宽 |
+| CPU 统计 | 使用 `CLOCK_PROCESS_CPUTIME_ID` 与墙上时间计算进程 CPU 百分比 | 只描述该进程，不覆盖系统级 CPU/中断/内存总线 |
+| `host_touch_monitor.py::BPF_PROGRAM` | 仅挂载 `kprobe:memcpy`、`kprobe:memmove`，按 PID 累加 `arg2` | 没有 uprobe、AVX 符号、内核用户空间拷贝和完整覆盖证明 |
+| `host_touch_monitor.py` 输出 | bpftrace 不存在或缺少 `@memcpy_bytes` 时写 `INVALID_EVIDENCE`；解析成功即写 `OK`，不检查字节是否为 0 | `status=OK` 不等于零拷贝，必须人工核对 `host_touch_bytes` |
+| `export_capability_matrix.py` | 仅当非 DEMO、行状态为 `OK`、探针状态为 `OK` 且完成字节大于 0 时写入有效数值 | 当前行多为 DEMO 或完成量 0，矩阵通常只能保留 `null`/无效状态 |
+| 能力矩阵输出 | 写入 `schema_version=capability_matrix.v2`、探针对象和路径条目 | 没有自动补充设备型号、拓扑、配置哈希和有效期，需要外部 manifest 补齐 |
+
+`host_touch_monitor.py` 的 bpftrace 脚本是按目标 PID 过滤的内核探针。它能够作为一个局部观测工具，但不能因为命令返回成功就宣称“全量五锚点覆盖”。正式实验必须在证据包中记录实际加载的探针列表和未覆盖范围。
+
+### 4.3 面向 LAB/MEASURED 的最小工程扩展
+
+进入真实硬件结论前，至少补齐：
+
+1. **真实设备适配**：分别实现 URMA、UBMEM、NVMe Direct 和 Socket TCP 的真实初始化、地址注册、提交、完成、错误处理和资源释放；现场 SDK 函数名必须以实际头文件为准；
+2. **设备内存路径**：明确 NPU HBM 或设备内存的分配方式、物理句柄/虚拟地址导出、MR（Memory Region，注册给 DMA 设备使用的内存区域）注册、权限和对齐要求；失败时显式报错，不能静默回退 Host DDR；
+3. **异步提交模型**：把当前 `qd` 循环改成真实队列深度，记录每个描述符的提交和完成时间、完成字节、错误码和队列类别；
+4. **Direct I/O 实现**：若采用 `io_uring` 固定缓冲或现场等价 NVMe 接口，记录文件/裸盘、LBA、4KB 对齐、读写方向、完成事件和设备计数器；
+5. **探针覆盖扩展**：在当前 kprobe 基础上，按实际路径补充用户态 `uprobe`、内核拷贝入口、第三方库或设备回退路径，并保留探针加载 stdout/stderr；
+6. **事件与路径凭证**：逐条记录 `planned_path`、`actual_path`、设备完成、Host touch、请求关系、代码包、配置哈希和拓扑；
+7. **能力矩阵 schema**：补齐设备型号、驱动、节点、链路、标称线速、测量窗口、样本量、P50/P99、有效期、证据等级、支持范围和 `invalid_reason`；
+8. **状态归一化**：把脚本内部 `OK`、`DEMO_ONLY`、`INVALID_EVIDENCE` 映射为公共契约的 `GO | CONDITIONAL | NO-GO | NOT-SUPPORTED | INVALID-EVIDENCE`，不能把工具成功当作验证通过。
+
+### 4.4 适配接口示意与边界
+
+下面的接口只表示适配位置，不代表现场 SDK 提供同名 API：
+
+```cpp
+// 伪代码：必须替换成现场 NPU/URMA/UBMEM SDK 的真实接口。
+void* device_buffer = allocate_p2p_device_memory(payload_bytes);
+auto memory_region = register_device_memory(device_buffer, payload_bytes);
+auto descriptor = build_dma_descriptor(memory_region, remote_address, payload_bytes);
+submit_descriptor(descriptor);
+auto completion = wait_for_device_completion();
+record(completion.actual_bytes, completion.status, completion.timestamp_ns);
+```
+
+如果现场不支持设备内存注册或 Direct I/O，结果应记录为 `NOT-SUPPORTED`，不能改用 Host DDR 后继续沿用 `actual_path=urma_direct` 或 `nvme_direct`。
 
 ---
 
-## 3. 业务 Benchmark 构造与流量特征编排
+## 5. 分步执行测试操作规程（SOP）
 
-### 3.1 数据块尺寸梯度设计意图
-- **小数据块（64KB, 256KB, 1MB）**：模拟极短的 System Prompt 或 Manifest 描述符。测试目标是测量链路的固有时延与小包调度开销；
-- **中数据块（4MB, 16MB, 32MB）**：模拟 1K ~ 8K Token 的标准大模型对话前缀。测试目标是观察带宽爬坡与并发吞吐；
-- **大数据块（64MB, 256MB, 1GB）**：模拟 32K ~ 128K 超长上下文（如长文档分析、代码库检索）的超大 KVCache。测试目标是验证硬件总线在饱和打满时的物理吞吐极限。
+### 步骤 0：冻结实验身份、路径、证据等级和采样窗口
 
-### 3.2 队列深度 (Queue Depth) 设计意图
-- **单流时延压测（Queue Depth = 1）**：前一个包完成再发下一个，测量单次 DMA 往返的微秒级物理延迟；
-- **并发吞吐压测（Queue Depth = 4, 16, 32, 64）**：同时向硬件提交多个并发描述符，测试硬件多通道并行时的峰值吞吐（衡量是否能喂饱 100G/400G 网卡）。
+- **操作意图**：先区分 W0/DEMO、W1/LAB 和 W2/MEASURED，防止把当前占位路径的数值写成真实设备结论。
+- **执行动作**：填写 `run_id`、`package_id`、`baseline_commit`、`config_hash`、`hardware_profile`、`topology_profile`、`evidence_environment`、`evidence_level`、路径、payload、`qd`、loops、方向、预热和门槛；列出探针覆盖范围。
+- **应观察现象**：能明确知道本轮实际完成字节的来源、Host touch 探针覆盖的函数和未支持项；没有真实设备或完成事件时提前标记 `NOT-SUPPORTED`。
 
----
+### 步骤 1：编译并审计当前 W0 工具
 
-## 4. 软硬件环境与 eBPF 全量探针插桩方案
-
-### 4.1 硬件拓扑与驱动要求
-- **系统要求**：Linux Kernel 6.6+，开启 `CONFIG_BPF_SYSCALL=y` 与 `io_uring`，安装 `bpftrace` 工具；
-- **设备要求**：已挂载 UBMEM / URMA 驱动模块与 CANN NPU 驱动，至少一块 NVMe 固态硬盘（如 `/dev/nvme0n1`）；
-- **拓扑记录要求**：节点数、NPU 型号与卡数、HBM 容量、URMA 网卡速率、NVMe 型号与数量均按现场设备填写 `hardware_profile`；形成跨节点结论时至少记录两个实际端点及其时钟同步方式。
-
-### 4.2 eBPF 全量防漏报探针设计与工作原理 (`host_touch_monitor.py`)
-
-`host_touch_monitor.py` 在后台启动时，会自动向系统的 5 个关键锚点注入探针：
-
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                        eBPF 内核态 + 用户态防漏报探针矩阵                              │
-├───────────────────┬───────────────────────────────────┬────────────────────────────────┤
-│ 探针类型          │ 挂载符号与探针点                  │ 监测防护目标（防漏报机制）     │
-├───────────────────┼───────────────────────────────────┼────────────────────────────────┤
-│ 内核 kprobe       │ kprobe:memcpy / kprobe:memmove    │ 捕获内核空间数据拷贝调用       │
-│ 内核 kprobe       │ kprobe:copy_user_generic_string   │ 捕获内核态与用户态间跨空间拷贝 │
-│ 内核 Tracepoint   │ tracepoint:exceptions:page_fault  │ 监测用户显存访问触发的缺页中断 │
-│ glibc uprobe      │ uprobe:/lib64/libc.so.6:memcpy    │ 捕获通用 C 库 memcpy 入口      │
-│ glibc AVX uprobe  │ uprobe:/lib64/libc.so.6:__memcpy_*│ 捕获 AVX512/AVX2 向量加速拷贝  │
-└───────────────────┴───────────────────────────────────┴────────────────────────────────┘
-```
-**探针运行机制**：脚本接收被测进程的 PID 作为参数，仅对该进程发起的数据拷贝进行精确统计。若被测进程在传输期间调用了上述任何函数，探针会累加记录拷贝次数与字节数；若全程为 0，则在生成的 JSON 报告中打上 `zero_touch_verified: true` 标记。
-
-探针未成功加载、符号未解析、采样时间覆盖不足或 DMA 完成量缺失时，必须输出 `INVALID-EVIDENCE` 并记录 `invalid_reason`，不得把“没有观测到事件”解释为 `memcpy_bytes = 0`。`zero_touch_verified: true` 只能在探针覆盖范围、目标 PID、采样窗口和设备完成量都经过核对后写入。
-
----
-
-## 5. 分步执行测试操作规程 (SOP)
-
-开发人员在执行验证时，请严格按照以下 9 个步骤逐步执行，并理解每一步的操作意图：
-
-### 步骤 1：启动 eBPF 内核与用户态独立监控器
-- **操作意图**：在压测开始前加载 eBPF 探针，覆盖操作系统内核与 C 库中的约定拷贝入口，独立记录被测进程的 CPU 内存操作。探针加载失败时不得继续生成有效性能结论。
+- **操作意图**：确认 Makefile、CLI、CSV schema 和状态输出与源码一致，避免使用版本二中不存在的 SDK/参数。
 - **执行命令**：
+
 ```bash
-# 启动监控脚本，监听目标进程（传入 PID 或设为全系统监听），采样时长设为 30 秒，输出为证据 JSON
-python3 ./原型验证代码/PVT-01/host_touch_monitor.py $$ 30 --out host_touch_evidence.json --evidence-level LAB &
-MONITOR_PID=$!
+cd ./原型验证代码/PVT-01
+make clean
+make
+./raw_trans_bench --mode host_memcpy --payload-bytes 67108864 --qd 16 --loops 10 --out res_memcpy_demo.csv > raw_memcpy_stdout.txt 2>&1
 ```
 
-### 步骤 2：运行对照组 C（CPU Memcpy 软中转基准测试）
-- **操作意图**：测量采用传统“CPU 内存拷贝”搬运 64MB 数据时的耗时、吞吐与 CPU 占用率，并核对 eBPF 是否记录到对应的 `memcpy_bytes`。该组数据作为 Direct 模式的基线对照，实际占用不能预先填写。
+- **应观察现象**：CSV 有 `path_mode`、`payload_bytes`、`queue_depth`、`actual_completed_bytes`、带宽、P50/P99、CPU、`evidence_level` 和状态；`host_memcpy` 的完成字节大于 0，Direct 占位路径不应被误认为已完成设备搬运。
+- **判定边界**：本步骤只证明工具流程可以运行，不关闭任何 Direct 或零数据拷贝结论。
+
+### 步骤 2：运行 Host Memcpy 对照基线
+
+- **操作意图**：得到明确参与 Host CPU 的软件中转参考，检查 CPU 统计和 eBPF 观测链路是否能捕获已知的复制动作。
+- **执行命令**：在步骤 1 的同一 payload、`qd` 和 loops 下运行，并把真实被测 PID 传给探针：
+
+```bash
+./raw_trans_bench --mode host_memcpy --payload-bytes 67108864 --qd 16 --loops 10 --out res_memcpy.csv > raw_memcpy_stdout.txt 2>&1 &
+BENCH_PID=$!
+python3 ./host_touch_monitor.py ${BENCH_PID} 30 --out host_touch_memcpy.json --evidence-level LAB
+wait ${BENCH_PID}
+```
+
+- **应观察现象**：若探针加载并解析成功，`host_memcpy` 的已知复制动作应能形成非零观测；若进程在探针启动前已结束、bpftrace 不存在或输出缺少字节字段，记录 `INVALID-EVIDENCE`。
+- **判定边界**：本组是软件中转对照，不是目标 Direct 路径；探针测到非零是预期现象，不能用它反向修改目标组的结果。
+
+### 步骤 3：运行当前 Direct/TCP/NVMe 占位路径并确认停止条件
+
+- **操作意图**：完整记录当前代码对五类 `mode` 的行为，把“命令可执行”和“设备数据已经搬运”明确分开。
 - **执行命令**：
+
 ```bash
-./raw_trans_bench --mode host_memcpy --payload-bytes 67108864 --qd 16 --loops 10 --out res_memcpy.csv
+./raw_trans_bench --mode urma_direct --payload-bytes 67108864 --qd 16 --loops 10 --out res_urma_demo.csv > raw_urma_stdout.txt 2>&1
+./raw_trans_bench --mode ubmem_direct --payload-bytes 67108864 --qd 16 --loops 10 --out res_ubmem_demo.csv > raw_ubmem_stdout.txt 2>&1
+./raw_trans_bench --mode nvme_direct --payload-bytes 67108864 --qd 32 --loops 10 --out res_nvme_demo.csv > raw_nvme_stdout.txt 2>&1
+./raw_trans_bench --mode socket_tcp --payload-bytes 67108864 --qd 16 --loops 10 --out res_tcp_demo.csv > raw_tcp_stdout.txt 2>&1
 ```
 
-### 步骤 3：运行对照组 D（标准 TCP/IP Socket 网络基准测试）
-- **操作意图**：测量采用标准 Linux Socket 传输时的网络时延与吞吐。用于展示传统网络栈在微秒级高并发场景下的性能瓶颈。
+- **应观察现象**：Direct、NVMe 和 TCP 占位路径的 `actual_completed_bytes` 为 0，状态为 `DEMO_ONLY`；这些输出只能用于检查 schema 和失败边界。
+- **停止条件**：到此为止不能导出真实能力矩阵性能条目。若没有完成第 4.3 节扩展，应把目标路径标为 `NOT-SUPPORTED`，不要继续执行“80% 线速”判定。
+
+### 步骤 4：启动探针并执行真实路径 A/B（条件步骤）
+
+- **前置条件**：真实 URMA/UBMEM/NVMe/TCP 代码包已就绪；设备完成事件可采集；探针覆盖范围已由现场验证；`actual_path` 可审计；硬件和拓扑已冻结。
+- **操作意图**：在相同 payload、队列深度、设备和负载下，对比 Host Memcpy 与 Direct 路径，验证完成量、CPU、Host touch 和尾部时延。
+- **执行动作**：沿用当前工具的 CLI 形状或现场扩展后的真实 CLI；每条路径独立 `run_id`，不能只改 mode 标签。探针必须在被测传输窗口前启动，并在窗口结束后保留原始输出。
+- **应观察现象**：目标路径 `actual_completed_bytes > 0`；有效带宽可由完成量和测量时间复算；探针覆盖完整且 `host_touch_bytes=0`；失败、重试、设备错误和 CPU 统计均可回溯。
+
+### 步骤 5：停止探针并生成硬件能力矩阵
+
+- **操作意图**：把各路径 CSV 与探针 JSON 聚合为可供 QueryPlan 使用的能力参数，但只把证据完整的条目写成有效数据。
 - **执行命令**：
+
 ```bash
-./raw_trans_bench --mode socket_tcp --payload-bytes 67108864 --qd 16 --loops 10 --out res_tcp.csv
+python3 ./host_touch_monitor.py <target_pid> 30 --out host_touch_evidence.json --evidence-level LAB
+
+python3 ./export_capability_matrix.py \
+  res_memcpy.csv res_tcp.csv res_urma.csv res_ubmem.csv res_nvme.csv \
+  --host-touch-evidence host_touch_evidence.json \
+  --out capability_matrix.json
 ```
 
-### 步骤 4：运行路径 A（URMA / UBMEM 跨节点 Direct RDMA 零拷贝模式）
-- **操作意图**：启动 NPU HBM 与网卡 DMA 直达传输，记录实际有效字节、带宽、CPU 占用率和 eBPF `memcpy_bytes`。是否达到物理线速的 80%、CPU 占用率低于 5% 以及零数据拷贝门限，统一由结果表判定。
+- **应观察现象**：JSON 的 `schema_version` 为 `capability_matrix.v2`，每个路径条目能回指源 CSV 和探针 JSON；无效路径的有效带宽、时延和 Host touch 字段为 `null`，而不是 0。
+- **判定边界**：当前导出脚本不会自动补设备、拓扑、配置哈希和有效期，必须由外部 `manifest.json` 关联；脚本输出 `entries` 不等于有多少条路径通过。
+
+### 步骤 6：核对字段、状态和能力矩阵可消费性
+
+- **操作意图**：确认能力矩阵不会把 `DEMO_ONLY`、探针不完整或完成量为 0 的路径交给上层调度器。
 - **执行命令**：
-```bash
-./raw_trans_bench --mode urma_direct --payload-bytes 67108864 --qd 16 --loops 10 --out res_urma.csv
-./raw_trans_bench --mode ubmem_direct --payload-bytes 67108864 --qd 16 --loops 10 --out res_ubmem.csv
-```
-
-### 步骤 5：运行路径 B（NVMe Direct SSD 裸盘直达模式）
-- **操作意图**：通过 `io_uring` FIXED Direct I/O 从本地 NVMe 裸盘直接将数据读取到 NPU 显存，验证绕过 Host DDR 时本地存储层的大吞吐直达能力。
-- **执行命令**：
-```bash
-./raw_trans_bench --mode nvme_direct --payload-bytes 67108864 --qd 32 --loops 10 --out res_nvme.csv
-```
-
-### 步骤 6：停止 eBPF 监控并导出标准化《硬件能力矩阵》
-- **操作意图**：停止监控脚本，调用解析工具将各组结果 CSV 与 eBPF 证据聚合，生成标准的 `capability_matrix.json`。该文件只有在字段完整且证据状态有效时，才能作为 PVT-04（QueryPlan 决策引擎）的物理输入配置。
-- **执行命令**：
-```bash
-wait $MONITOR_PID
-python3 ./原型验证代码/PVT-01/export_capability_matrix.py \
-    res_memcpy.csv res_tcp.csv res_urma.csv res_ubmem.csv res_nvme.csv \
-    --host-touch-evidence host_touch_evidence.json \
-    --out capability_matrix.json
-```
-
-### 步骤 7：分别核对路径 A 与路径 B 的 Host Touch 证据
-
-- **操作意图**：路径 A（URMA/UBMEM）和路径 B（NVMe Direct）必须分别检查 eBPF 输出，不能只看汇总文件中的一个总数。确认 `memcpy_calls`、`memcpy_bytes`、DMA 完成量和 `actual_path` 一一对应；
-- **判定约束**：缺少正式探针、路径凭证或设备完成量时标记 `INVALID-EVIDENCE`，不得填 0 或输出 PASS。
-
-### 步骤 8：验证能力矩阵 JSON 的字段完备性
 
 ```bash
 python3 -m json.tool capability_matrix.json > capability_matrix.pretty.json
 ```
 
-- **操作意图**：确认每条介质链路都包含带宽、时延、设备标识、拓扑、测试包、证据等级和状态字段，并能被后续 PVT-04 的 `CostEvaluator` 读取；
-- **失败处理**：字段缺失或 JSON 解析失败时，结果状态为 `INVALID-EVIDENCE`，不能用默认带宽/时延补齐。
+- **应观察现象**：JSON 可解析；每个有效条目含 payload、队列深度、实际完成量、版本、拓扑、证据等级和状态；字段缺失时写 `INVALID-EVIDENCE`，不使用默认带宽或时延。
 
-### 步骤 9：归档原始数据与结果清单
+### 步骤 7：归档原始数据并完成重复实验对账
 
-```bash
-mkdir -p ./results/evidence_pack_pvt01
-cp res_*.csv host_touch_evidence.json capability_matrix.json ./results/evidence_pack_pvt01/
-```
-
-归档目录还必须包含 `manifest.json`、执行命令、代码包标识、`hardware_profile`、`topology_profile`、原始日志哈希和最终 `GO | CONDITIONAL | NO-GO | NOT-SUPPORTED | INVALID-EVIDENCE` 状态。
+- **操作意图**：保留探针原始输出、失败请求和运行环境，避免只根据能力矩阵摘要做不可复核的性能结论。
+- **执行动作**：按 `results/PVT-01/<mode>/<run_id>/` 建立目录，保存 CSV、探针 JSON、stdout/stderr、`capability_matrix.json`、`manifest.json`、`environment.json` 和摘要；每个条件至少完成 3 次独立重复。
+- **应观察现象**：每个有效带宽、P50/P99、CPU、Host touch 和状态都能回指原始事件；无法采集的字段使用 `null` 与 `invalid_reason`。
 
 ---
 
 ## 6. 数据采集清单与记录格式
 
-### 6.1 传输性能数据表 (`pvt01_trans_results.csv`)
-每个测试路径运行完成后，会输出包含以下字段的标准 CSV 表格：
+### 6.1 传输原始事件字段
+
+公共事件字段之外，本项至少记录：
+
+```text
+run_id, validation_id, trace_id, event_name,
+path_mode, planned_path, actual_path, direction,
+payload_bytes, queue_depth, loop_id, descriptor_id,
+submit_start_ns, submit_end_ns, device_complete_ns,
+actual_completed_bytes, latency_ns, bandwidth_gbps,
+host_touch_calls, host_touch_bytes, probe_scope, probe_pid,
+cpu_process_us, wall_duration_us, cpu_pct,
+device_id, driver_version, kernel_version,
+package_id, baseline_commit, config_hash,
+hardware_profile, topology_profile, evidence_environment, evidence_level,
+status, error_code, invalid_reason
+```
+
+字段约束：
+
+- `actual_completed_bytes` 必须来自设备/协议完成事件；当前占位 Direct 路径填写 0 只说明“代码没有完成搬运”，不能把它当作 0 字节正常成功；
+- `host_touch_bytes=null` 表示未获得有效探针证据，不表示零数据拷贝；
+- `probe_scope` 必须列出实际挂载的符号和未覆盖范围；
+- `cpu_pct` 只有 CPU 时间和墙上时间、采样窗口与绑核信息齐全时才可用于门槛判定；
+- `status` 使用 `GO | CONDITIONAL | NO-GO | NOT-SUPPORTED | INVALID-EVIDENCE`；脚本内部 `OK` 需要经过证据规则归一化。
+
+### 6.2 传输结果 CSV 模板
+
+以下是字段模板，不是性能成绩：
 
 ```csv
-path_id,mode,payload_size,queue_depth,bandwidth_gbps,latency_p50_us,latency_p99_us,cpu_usage_pct,memcpy_calls,memcpy_bytes,evidence_level,status,invalid_reason
-<path_id>,urma_direct,<payload_bytes>,<queue_depth>,<measured>,<measured>,<measured>,<measured>,<measured>,<measured>,<LAB_OR_DEMO>,<status>,<null_or_reason>
-<path_id>,ubmem_direct,<payload_bytes>,<queue_depth>,<measured>,<measured>,<measured>,<measured>,<measured>,<measured>,<LAB_OR_DEMO>,<status>,<null_or_reason>
-<path_id>,nvme_direct,<payload_bytes>,<queue_depth>,<measured>,<measured>,<measured>,<measured>,<measured>,<measured>,<LAB_OR_DEMO>,<status>,<null_or_reason>
-<path_id>,host_memcpy,<payload_bytes>,<queue_depth>,<measured>,<measured>,<measured>,<measured>,<measured>,<measured>,<LAB_OR_DEMO>,<status>,<null_or_reason>
-<path_id>,socket_tcp,<payload_bytes>,<queue_depth>,<measured>,<measured>,<measured>,<measured>,<measured>,<measured>,<LAB_OR_DEMO>,<status>,<null_or_reason>
+validation_id,run_id,path_mode,payload_bytes,queue_depth,direction,actual_completed_bytes,bandwidth_gbps,latency_p50_us,latency_p99_us,cpu_process_us,wall_duration_us,cpu_pct,host_touch_calls,host_touch_bytes,probe_scope,actual_path,package_id,baseline_commit,config_hash,hardware_profile,topology_profile,evidence_environment,evidence_level,status,invalid_reason
+<PVT-01>,<run_id>,<urma_direct_or_ubmem_direct_or_nvme_direct_or_host_memcpy_or_socket_tcp>,<bytes>,<qd>,<read_or_write>,<measured_or_null>,<measured_or_null>,<measured_or_null>,<measured_or_null>,<measured_or_null>,<measured_or_null>,<measured_or_null>,<count_or_null>,<bytes_or_null>,<scope_or_null>,<actual_path_or_null>,<package_id>,<baseline_commit>,<config_hash>,<hardware_profile>,<topology_profile>,<W0_OR_W1_OR_W2>,<DEMO_OR_LAB_OR_MEASURED>,<status>,<null_or_reason>
 ```
 
-> 上述内容是结果字段模板，不是性能样例。若某条链路在现场不支持，使用 `NOT-SUPPORTED` 并填写原因；探针或完成量缺失使用 `INVALID-EVIDENCE`，不得用 0 代替。
+### 6.3 硬件能力矩阵 JSON 约束
 
----
+目标输出至少包含：
 
-## 7. 数据交叉组合与运算推导逻辑
+```json
+{
+  "schema_version": "capability_matrix.v2",
+  "run_id": "<run_id>",
+  "hardware_profile": "<hardware_profile>",
+  "topology_profile": "<topology_profile>",
+  "probe": {
+    "scope": ["<actual_probe_symbol>"],
+    "target_pid": "<pid>",
+    "host_touch_bytes": null,
+    "status": "<status>",
+    "invalid_reason": "<null_or_reason>"
+  },
+  "paths": [
+    {
+      "mode": "<path_mode>",
+      "payload_bytes": "<bytes>",
+      "queue_depth": "<qd>",
+      "actual_completed_bytes": "<measured_or_null>",
+      "effective_bw_gbps": "<measured_or_null>",
+      "latency_p50_us": "<measured_or_null>",
+      "latency_p99_us": "<measured_or_null>",
+      "host_cpu_pct": "<measured_or_null>",
+      "actual_path": "<actual_path_or_null>",
+      "evidence_level": "<DEMO_OR_LAB_OR_MEASURED>",
+      "status": "<status>",
+      "invalid_reason": "<null_or_reason>"
+    }
+  ]
+}
+```
 
-### 7.1 线速达成率计算公式
-$$\eta_{\text{wire\_speed}} = \frac{\text{实测吞吐带宽 (Gbps)}}{\text{物理标称线速 (Gbps)}} \times 100\%$$
-- **物理意义**：衡量传输底座是否完全消除了软件协议栈开销，是否充分发挥了网卡与总线的硬件极限。
+当前 `export_capability_matrix.py` 输出的是最小 `capability_matrix.v2`，不能替代上述版本、拓扑和有效期等公共字段；正式结果需要在证据包中补齐。
 
-### 7.2 Host Payload Touch Bytes 判定
-$$\text{Host Payload Touch Bytes} = \text{eBPF 捕获的 memcpy 搬运总字节数} \equiv 0$$
-- **物理意义**：证明在传输全过程中，Host CPU 仅负责下发几条微秒级控制描述符，没有参与任何正文字节的数据搬移。
+### 6.4 证据包目录
 
----
-
-## 8. 多维扩展与扫参矩阵
-
-| 参数维度 | 扫描范围 | 测试目标与意图 |
-|---|---|---|
-| **数据包尺寸** | 64KB, 256KB, 1MB, 4MB, 16MB, 64MB, 256MB, 1GB | 绘制各介质带宽饱和曲线，找出带宽拐点与小包时延惩罚 |
-| **队列深度** | 1, 2, 4, 8, 16, 32, 64 | 探明物理网卡与 NVMe 控制器的最佳并发深度 |
-| **介质链路** | UBMEM, URMA, NVMe Direct, Memcpy, TCP | 建立完备的硬件能力矩阵，为上层调度提供全景物理画像 |
-
----
-
-## 9. GO / CONDITIONAL / NO-GO / NOT-SUPPORTED / INVALID-EVIDENCE 判定规则与交付报告模板
-
-- **GO（准入通过）**：
-  - 网络有效线速达成率 $\ge 80\%$；
-  - NVMe SSD 直达顺序读带宽达到设备峰值 $\ge 80\%$；
-  - 传输期间 Host CPU 零数据拷贝（`Host Payload Touch Bytes` 严格为 0，CPU 占用率 $< 5\%$）。
-- **CONDITIONAL（条件准入）**：线速达成率在 $70\% \sim 80\%$ 之间，且零拷贝证据成立；
-- **NO-GO（暂不准入）**：存在已由探针和设备完成量共同确认的 Host CPU 内存拷贝，或有效带宽 $< 70\%$ 物理线速；
-- **NOT-SUPPORTED（当前不支持）**：现场链路、驱动或设备不支持目标传输模式，不能把未具备条件的路径判成性能失败；
-- **INVALID-EVIDENCE（证据无效）**：探针未覆盖完整进程/时间窗、设备完成事件缺失、硬件能力矩阵字段不全或 A/B 包与配置不一致。缺失字段必须使用 `null` 并填写 `invalid_reason`。
-
----
-
-## 10. 零 AI 基础工程师借助 AI Agent 开展工作实战 SOP
-
-### 10.1 研发任务拆解与分工
-- **工程师职责**：
-  1. 检查测试机环境（Linux 6.6+、网卡驱动、NVMe 裸盘权限）；
-  2. 按照第 5 节的 SOP 顺序执行 6 个测试步骤；
-  3. 观察 `top` 中的 CPU 占用率与 eBPF 输出的 `host_touch_evidence.json`；
-- **AI Agent 职责**：
-  1. 负责 `raw_trans_bench.cc` 中 DMA 与 `io_uring` 固定缓冲区调用逻辑核对；
-  2. 调试 `host_touch_monitor.py` 中的 bpftrace 脚本，确保探针无报错；
-  3. 自动解析 CSV 表格并生成美观的性能对比折线图。
-
-### 10.2 专属 Prompt 模板（可直接复制给 AI Agent）
 ```text
-我是一名系统底层开发工程师，正在开展 PVT-01 验证（验证 Host CPU 零数据拷贝传输底座与导出硬件能力矩阵）：
-1. 请阅读 ./原型验证代码/PVT-01/raw_trans_bench.cc 与 host_touch_monitor.py；
-2. 检查 raw_trans_bench.cc 中对 urma_register_dev_mr 与 io_uring_prep_read_fixed 的调用，确保显存物理地址被正确锁定且避开 Host DDR 拷贝；
-3. 为我生成一个自动化测试脚本 run_trans_pvt01.sh，按顺序执行 6 个 SOP 步骤（启动 eBPF 探针、跑 Memcpy/TCP 对照组、跑 URMA/UBMEM/NVMe Direct 组、导出能力矩阵）；
-4. 运行 export_capability_matrix.py，自动解析生成的 CSV 并输出 capability_matrix.json；
-5. 输出结果汇总表格，并验证 Host Payload Touch Bytes 是否严格为 0。
+results/PVT-01/<mode>/<run_id>/
+├── manifest.json
+├── environment.json
+├── raw_events.jsonl
+├── raw_metrics.*
+├── raw_stdout/
+├── host_touch_evidence.json
+├── res_*.csv
+├── capability_matrix.json
+├── summary.json
+├── summary.csv
+└── logs/
 ```
 
-### 10.3 常见排错指南
-- **eBPF 报错无法加载内核探针**：确保当前内核已开启 `CONFIG_BPF_SYSCALL=y`，或使用 `sudo` 权限运行；若在容器中运行，需以 `--privileged` 启动并挂载 `/sys/kernel/debug`；
-- **NVMe Direct 报错 `EINVAL`**：`O_DIRECT` 要求读写缓冲区与磁盘偏移必须严格按 4096 字节（4KB）对齐，请检查内存是否由 `posix_memalign` 分配；
-- **URMA 注册显存报错权限不足**：检查 NPU 驱动是否支持 P2P 模式，需确保调用了 `ACL_MEM_MALLOC_HUGE_FIRST_P2P` 标志。
+`manifest.json` 至少记录代码包、基线 Commit、配置哈希、设备/驱动/内核、探针范围、执行命令、原始文件哈希、证据等级、支持范围、未支持项、候选门槛和结论状态。
+
+---
+
+## 7. GO / CONDITIONAL / NO-GO / NOT-SUPPORTED / INVALID-EVIDENCE 判定规则
+
+### 7.1 Host CPU 零数据拷贝
+
+- **GO（零数据拷贝证据闭环）**：目标 Direct 路径实际完成字节大于 0；探针成功加载并覆盖完整传输窗口及实际复制入口；`host_touch_bytes=0`；设备完成事件、实际路径、版本和拓扑齐全；CPU 占用满足运行前冻结门槛。该结论只适用于记录的路径和设备。
+- **CONDITIONAL（探针或路径覆盖有限）**：只覆盖了部分内核/用户态入口，或只在局部设备组合上形成证据；结论限定为“已覆盖范围内未观测到正文复制”，不能写成全路径零拷贝。
+- **NOT-SUPPORTED**：当前仍是空汇编占位、设备不支持内存注册、探针无法加载或没有设备完成事件；该状态不等于目标架构失败。
+- **NO-GO（真实复制已确认）**：在有效 Direct 路径中探针和设备事件共同确认 Host CPU 正文拷贝，或 CPU 负载超过运行前冻结门槛且无可接受解释。
+
+### 7.2 传输性能与能力矩阵
+
+- **GO（路径达到候选门槛）**：网络 Direct 有效线速达成率 `>=80%`，NVMe Direct 顺序带宽达到设备标称峰值的 `>=80%`；P50/P99、失败、重试、CPU 和 Host touch 证据完整；能力矩阵可由原始文件复算。
+- **CONDITIONAL（局部支持）**：只有 W1/LAB、部分 payload/队列/方向或局部设备满足门槛；结论绑定这些条件，不外推到未测路径。
+- **NO-GO（真实路径未达门槛）**：在有效的设备完成事件和公平 A/B 中，带宽低于门槛，或性能提升伴随不可接受的失败、重试、CPU 或尾部时延退化。
+- **NOT-SUPPORTED**：现场没有目标设备、驱动、真实 DMA 或有效路径，不能用占位程序输出替代。
+
+### 7.3 统一无效证据规则
+
+以下任一情况将对应路径标为 `INVALID-EVIDENCE`，不得输出 `GO`：
+
+- 用 `--mode` 字符串替代真实驱动或设备数据面切换；
+- Direct/NVMe/TCP 实际完成字节为 0，却按名义 payload 计算带宽；
+- 探针未加载、目标 PID 不符、采样窗口未覆盖、输出缺少字节统计或符号覆盖范围不明；
+- `host_touch_bytes=null` 或解析失败，却写成 0；
+- 缺少设备完成事件、实际路径、版本、拓扑、原始样本或失败事件；
+- A/B 改变了 payload、队列深度、设备、绑核、资源配额、循环次数或统计口径；
+- 能力矩阵缺字段却用默认带宽、时延或 CPU 值补齐；
+- 把脚本内部 `OK`、`DEMO_ONLY` 或 `INVALID_EVIDENCE` 未经归一化直接写成 `GO`。
+
+---
+
+## 8. 执行阶段与交付闭环
+
+| 阶段 | 工作内容 | 必须交付 | 退出条件 |
+|---|---|---|---|
+| 阶段 A：工具审计与 W0 流程 | 核对当前 C++/Python 实际行为，完成 Host Memcpy、占位 Direct、探针失败分支和矩阵格式验证 | 源码审计记录、W0 CSV、探针 JSON、`DEMO` manifest | 明确当前完成量、探针覆盖和未支持项 |
+| 阶段 B：设备路径与探针闭环 | 接入真实 URMA/UBMEM/NVMe/TCP，完成设备完成量、Host touch、CPU 和尾部时延采集 | 原始事件、设备计数器、探针日志、重复实验汇总 | 每个有效数据字段能回指原始证据 |
+| 阶段 C：能力矩阵准入 | 生成带版本、拓扑和有效期的矩阵，按路径做 GO/CONDITIONAL/NO-GO 判定 | `capability_matrix.json`、对照表、摘要和未支持说明 | 公共契约通过，未把占位结果写成硬件能力 |
+
+本项的最终作用是为后续多介质分层和动态选路提供真实物理参数，并验证 Host CPU 只负责控制面、正文数据由设备数据面搬运的工程边界。没有真实完成事件和完整探针覆盖时，能力矩阵只能作为未验证输入，不能驱动生产决策。
+
+---
+
+## 9. 零 AI 基础工程师借助 AI Agent 开展工作实战 SOP
+
+### 9.1 工程师与 Agent 的职责边界
+
+- **工程师负责**：
+  1. 确认现场 NPU、网卡、NVMe、内核、驱动、节点、拓扑和权限；
+  2. 冻结路径、payload、队列深度、循环次数、绑核、采样窗口、探针覆盖和判定门槛；
+  3. 启动/停止被测进程和探针，保留原始 stdout/stderr、完成事件和失败事件；
+  4. 判断 `host_touch_bytes=0` 是否真的具备完整探针和设备完成量支撑；
+  5. 对能力矩阵是否可交给上层调度器承担现场复核责任。
+- **AI Agent 负责**：
+  1. 先阅读方案、公共契约和四个实际源码文件，列出真实 CLI、探针范围和未实现路径；
+  2. 编写原始 CSV/JSON 解析、分位数计算、设备完成量核对、能力矩阵补充和证据包工具；
+  3. 检查 `actual_completed_bytes`、Host touch、CPU、线速达成率和状态枚举的逻辑一致性；
+  4. 不凭空增加 SDK 函数、探针覆盖或 Direct 性能数据，不把占位路径输出改写成零拷贝通过。
+
+### 9.2 可直接复制给 Coding Agent 的 Prompt 模板
+
+```text
+我正在执行 PVT-01：Host CPU 零数据拷贝传输底座与硬件能力矩阵验证。
+
+请先阅读：
+1. ./提前验证方案设计/验证计划方案设计/02_PVT-01_零HostTouch极速传输底座与CapabilityMatrix验证实施方案设计.md
+2. ./提前验证方案设计/验证计划方案设计/Benchmark公共契约与证据分级规范.md
+3. ./提前验证方案设计/验证计划方案设计/原型验证代码/PVT-01/Makefile
+4. ./提前验证方案设计/验证计划方案设计/原型验证代码/PVT-01/raw_trans_bench.cc
+5. ./提前验证方案设计/验证计划方案设计/原型验证代码/PVT-01/host_touch_monitor.py
+6. ./提前验证方案设计/验证计划方案设计/原型验证代码/PVT-01/export_capability_matrix.py
+
+约束：
+- 先列出当前真实 CLI 和源码行为；确认 raw_trans_bench.cc 只有 host_memcpy 执行 memcpy，其余路径不提交设备操作，不能把 mode 字符串当成真实路径。
+- 确认 host_touch_monitor.py 当前只覆盖 kprobe:memcpy/memmove，不能声称已经覆盖完整用户态、内核和 AVX 拷贝入口。
+- 将当前输出标为 DEMO/NOT-SUPPORTED 或 INVALID-EVIDENCE；Direct/NVMe/TCP 的实际完成字节为 0 时不得按名义 payload 计算带宽。
+- 设计真实路径扩展时，要求记录设备完成量、actual_path、探针范围、目标 PID、采样窗口、代码包、配置哈希和拓扑。
+- Host CPU 零数据拷贝只有在“完整探针成功 + host_touch_bytes=0 + actual_completed_bytes>0 + 路径凭证完整”同时满足时才允许判定。
+- 缺失字段使用 null 并填写 invalid_reason；保留失败事件；把脚本内部 OK/INVALID_EVIDENCE 归一化为公共契约状态。
+- 最后输出：源码能力矩阵、实际运行命令、五类路径对照表、证据字段、未支持项、无效证据项和下一步最小代码改动建议。
+```
+
+### 9.3 常见排错指南
+
+- **`bpftrace` 不存在或权限不足**：先记录 `INVALID-EVIDENCE`，不要用空 JSON 或 `host_touch_bytes=0` 代替；现场需核对内核 BPF、权限和容器能力。
+- **探针输出没有 `@memcpy_bytes`**：当前脚本会写 `INVALID_EVIDENCE`；检查 PID、采样窗口和 bpftrace 输出，同时记录当前仅覆盖两个 kprobe 的事实。
+- **探针状态为 `OK` 但字节数大于 0**：工具当前只检查是否解析到字段，不会自动拒绝非零值；由证据审查层将该路径标为非零 Host touch，不能写成零拷贝。
+- **Direct CSV 的带宽为 0**：这是当前占位分支的实际行为，不是设备“零带宽”成绩；先检查 `actual_completed_bytes` 和真实驱动是否已接入。
+- **`export_capability_matrix.py` 把条目写成 `INVALID_EVIDENCE`**：检查行是否为 DEMO、状态是否为 `OK`、探针是否为 `OK`、完成字节是否大于 0；同时补齐外部 manifest 的设备和拓扑字段。
+- **NVMe Direct 返回 `EINVAL`**：核对 O_DIRECT/固定缓冲的内存地址、LBA、长度和 4KB 对齐；若现场不能让 NVMe 直接访问设备内存，改记 `NOT-SUPPORTED`，不要回退 Host DDR 后沿用 Direct 标签。
+- **URMA/UBMEM 注册设备内存失败**：核对现场驱动的 P2P 支持、内存注册权限、设备句柄和地址生命周期；失败路径必须显式记录，不能静默复制到 Host DDR。
+- **CPU 占用低但 Host touch 没有证据**：低 CPU 不能证明零数据拷贝；先修复探针覆盖和设备完成事件，再重新运行。
+- **跨节点时间无法直接相减**：使用同一节点单调时钟或记录 PTP/其他同步方式及误差上限；无法对齐时，不计算跨节点单向时延。
