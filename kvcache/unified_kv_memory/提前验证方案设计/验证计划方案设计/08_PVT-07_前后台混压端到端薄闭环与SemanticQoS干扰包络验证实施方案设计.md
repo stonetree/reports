@@ -8,7 +8,6 @@
 > **验证优先级**：**🔴 P0 级（核心关键项）**  
 > **对应验证阶段**：**E3 全链路前后台混压总门禁**  
 > **证伪标记**：否（全链路系统总门禁）  
-> **建议周期**：6~8 人日  
 > **主关联 IR**：`IR-01-04`, `IR-01-11`, `IR-02-06`  
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L3-QO-SemanticQoS-045`, `L3-MS-StateAwarePrefetch-081`, `L3-OB-PerPathTelemetry-047`, `L4-FT-PathIntegrityPolicy-077`  
@@ -16,7 +15,7 @@
 > **开源基线版本与代码仓库**：  
 > - **Mooncake**：[`https://github.com/kvcache-ai/Mooncake.git`](https://github.com/kvcache-ai/Mooncake.git) (Commit: `f90ae691f109e49a60920e0c8abbf7e572826d8c`)  
 > - **vLLM**：[`https://github.com/vllm-project/vllm.git`](https://github.com/vllm-project/vllm.git) (Commit: `842dd8fd96650063e1ad32e6075742d457d39773`)  
-> **研发对齐状态**：已闭环研发评估报告 7, 13 项与 QoS 映射规范（明确 RoCE TC0/TC1 硬件队列映射、vLLM Worker.step() 行级事件感知回调）  
+> **研发对齐状态**：本方案将复核研发评估报告涉及的 RoCE TC0/TC1 硬件队列映射与 vLLM `Worker.step()` 行级事件回调，并以现场网卡和服务行为为准。
 
 ---
 
@@ -26,8 +25,8 @@
 
 在传统企业级存储（如 Ceph / Lustre）与操作系统（Linux cgroups blkio）中，前后台 I/O 争用是一个经典难题：
 - **前台实时请求（Client Reads）**：在线用户发起的数据库查询，要求响应时间在毫秒级（P99 Latency 极度敏感）；
-- **后台异步任务（Background Scrubbing / Backup）**：后台的数据校验、垃圾回收（GC）和冷数据备份，数据吞吐量极大（高达数百 Gbps）；
-- **无隔离时的灾难**：如果不对后台大流量进行流控，后台数据包会瞬间把交换机队列、PCIe 总线和内存带宽全部占满。前台在线请求被严重堵塞，尾部延迟飙升数十倍！
+- **后台异步任务（Background Scrubbing / Backup）**：后台的数据校验、垃圾回收（GC）和冷数据备份，可能产生较大的持续吞吐；具体目标带宽由 `hardware_profile` 和本次混压配置冻结；
+- **无隔离时的风险**：如果不对后台流量进行流控，后台数据包可能与前台请求争用交换机队列、PCIe 总线和内存带宽，尾部时延变化必须由同场次基线测量。
 
 ---
 
@@ -35,15 +34,15 @@
 
 在大模型生产服务集群中：
 - **前台在线 Decode 流**：在线用户正在与大模型对话，模型正在逐字吐出 Token。由于用户是实时阅读的，单字生成耗时（TPOT, Time Per Output Token）哪怕只要从 15ms 抖动到 30ms，用户就能明显感觉到打字机停顿卡死；
-- **后台存储搬运流**：统一异构存储池在后台高频执行冷 KV 换出到 SSD、或者从远端节点拉取下一个会话的超长 Prompt KVCache，瞬时搬运带宽高达 **400 Gbps**！
-- **开源 Mooncake 的致命缺陷**：开源方案缺乏细粒度网络与计算流控。一旦后台 400Gbps 大流量搬运启动，前台用户的单字生成延迟（TPOT P99）恶化超 **50%**，严重违反生产 SLA；
-- **我们的原厂重构方案**：建立 **SemanticQoS（前后台服务质量保障策略）**：
+- **后台存储搬运流**：统一异构存储池在后台执行冷 KV 换出到 SSD、或从远端节点拉取下一个会话的超长 Prompt KVCache；400Gbps 是本方案可配置的混压目标示例，实际值以现场设备为准。
+- **待验证风险**：若开源方案缺乏细粒度网络与计算流控，后台大流量搬运可能使前台 TPOT P99 明显恶化；恶化幅度必须由同场次原始样本计算，不能预置为某个百分比；
+- **软硬件协同方案**：建立 **SemanticQoS（前后台服务质量保障策略）**：
   1. **硬件层 RoCE 优先级队列映射**：
      - 前台在线流打上 DSCP 26 / CoS 3 标记，映射到网卡最高优先级无损队列 **TC0**；
      - 后台搬运流打上 DSCP 0 / CoS 0 标记，映射到尽力而为队列 **TC1**；
   2. **应用层 `Worker.step()` 微秒级自适应退避**：
      - 在 vLLM 执行单步 Decode 计算（`Worker.step`）的微秒时间内，后台搬运流主动暂停让出总线；
-     - 将后台对前台 **TPOT P99 的尾部抖动干扰严格控制在 $< 3\%$**！
+     - 将后台对前台 **TPOT P99 的尾部抖动干扰控制在 `<3%` 的验证门限内**，实际结果由混压样本确认。
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
@@ -57,7 +56,7 @@
 │                 ▼ (应用层 Worker.step 感知回调)                                        │
 │  当检测到前台进入 Decode Step ──► 后台搬运流微秒级主动暂停 ──► 前台 NPU 独占计算        │
 │                                                                                        │
-│ 收益：后台满载 400Gbps 搬运下，前台单字生成延迟 (TPOT P99) 干扰率严格 < 3%！           │
+│ 待验证门限：在冻结的后台目标负载下，前台 TPOT P99 干扰率是否 < 3% 由实测确认。       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -75,7 +74,7 @@
 1. **《前台独立 vs 混压无隔离 vs 混压开启 QoS 的端到端性能对比表》**；
 2. **《原生 Mooncake vs 深度重构增强版 (Unified KV) 混压性能对决表》**；
 3. **《前后台混压下 TPOT 尾部抖动分布与服务质量保障分析曲线》**；
-4. **《Go / No-Go 判定结论》**。
+4. **《GO / CONDITIONAL / NO-GO / NOT-SUPPORTED / INVALID-EVIDENCE 判定结论》**。
 
 ---
 
@@ -108,6 +107,33 @@ struct DynamicThrottleBudget {
 };
 ```
 
+### 2.2 `Worker.step()` 行级事件感知与自适应退避算法
+
+前台 Decode 每一步都要有开始/结束事件。开始事件只负责让后台流让路，结束事件根据本步 TPOT 更新预算；后台恢复必须有上限和步长，避免前台负载短暂下降后立即再次打满链路。
+
+```cpp
+void on_foreground_step_begin(uint64_t step_seq) {
+    SemanticQoSController::instance().pause_background_traffic();
+}
+
+void on_foreground_step_end(uint64_t step_seq, double step_tpot_ms) {
+    SemanticQoSController::instance().update_tpot_and_resume(step_tpot_ms);
+}
+```
+
+```mermaid
+flowchart TD
+    FgEvent["前台 Decode Step 开始 (Worker.step 入口)"] --> NotifyQoS["触发 on_foreground_step_begin()"]
+    NotifyQoS --> ThrottleBG["后台队列 is_throttled=true\n暂停后台大流量 DMA"]
+    ThrottleBG --> NpuCompute["NPU 使用高优先级资源执行 Attention"]
+    NpuCompute --> FgDone["Decode Step 结束\n触发 on_foreground_step_end(tpot)"]
+    FgDone --> CheckSLA{"TPOT 是否超过冻结的 SLA?"}
+    CheckSLA -- "YES" --> Penalize["缩小后台带宽预算\nBW *= backoff_factor"]
+    CheckSLA -- "NO" --> Restore["按固定步长恢复后台预算\n不得超过上限"]
+    Penalize --> ResumeBG["解除暂停或按预算恢复后台队列"]
+    Restore --> ResumeBG
+```
+
 ---
 
 ## 3. 测试工具与工程构建规范
@@ -120,6 +146,30 @@ struct DynamicThrottleBudget {
 ├── semantic_qos_controller.py # 前台高优先级保证 (RoCE TC0) 与后台微秒级自适应退避流控器
 └── run_mixed_bench.py         # 自动化执行全套混流最小闭环并计算 TPOT 干扰率与 TTFT 降幅的脚本
 ```
+
+### 3.1 开源基线集群部署与在线打流前置条件
+
+```bash
+# W0 仅用于验证 localhost 部署流程；跨节点结论必须使用现场拓扑并记录 topology_profile。
+cd ../deploy_and_bench_e2e && EVIDENCE_ENVIRONMENT=W0 bash ./deploy_cluster.sh
+
+# W0 可用脚手架核对后台结果字段，但不产生持续 I/O 性能证据。
+make -C ../PVT-05
+../PVT-05/tier_storage_bench --device DEMO_DEVICE --block-size 16M \
+    --qd 32 --out ./results/background_schema_demo.csv --evidence-level DEMO
+
+# W1/W2 由现场适配器启动持续后台沉淀/预取负载，必须把目标带宽和实际带宽都写入 manifest。
+<site_background_io_command> --target-gbps <target> --duration-sec <duration> \
+    --out ./results/background_actual.json
+
+# 前台真实 ShareGPT 或已冻结的等价数据集打流。
+python3 -m vllm.benchmarks.benchmark_serving \
+    --backend vllm --model <model_path> --dataset-name sharegpt \
+    --dataset-path <dataset_path> --num-prompts 1000 --request-rate 30 \
+    --port <port> --save-result --result-filename ./results/foreground.json
+```
+
+> 三组消融必须使用相同目标后台负载，并记录实际后台带宽。实际带宽偏离运行前冻结的容差、原始结果缺少 `background_bandwidth_gbps` 或模式未切换实际代码包时，解析器必须返回 `INVALID-EVIDENCE`，不能用目标带宽代替实测值。
 
 ---
 
@@ -166,21 +216,25 @@ python3 ./run_mixed_bench.py \
 
 ### 5.1 全链路混压测试结果表 (`pvt07_e2e_results.csv`)
 ```csv
-workload_mode,foreground_qps,bg_io_gbps,ttft_p50_ms,ttft_p99_ms,tpot_p50_ms,tpot_p99_ms,tpot_jitter_pct,served_requests_total
-pure_foreground,24.5,0.0,42.5,65.2,12.1,14.8,0.0,4410
-mooncake_native_mixed,22.1,420.0,68.4,112.5,14.8,22.4,51.4,3980
-unified_kv_mixed_qos,27.8,380.0,32.1,51.8,12.3,15.2,2.7,5004
+workload_mode,foreground_qps,bg_io_gbps,ttft_p50_ms,ttft_p99_ms,tpot_p50_ms,tpot_p99_ms,tpot_jitter_pct,served_requests_total,evidence_level,status,invalid_reason
+pure_foreground,<measured_qps>,0.0,<measured>,<measured>,<measured>,<measured>,<calculated>,<measured_requests>,<LAB_OR_DEMO>,<status>,<null_or_reason>
+mooncake_native_mixed,<measured_qps>,<measured_actual_bg_gbps>,<measured>,<measured>,<measured>,<measured>,<calculated>,<measured_requests>,<LAB_OR_DEMO>,<status>,<null_or_reason>
+unified_kv_mixed_qos,<measured_qps>,<measured_actual_bg_gbps>,<measured>,<measured>,<measured>,<measured>,<calculated>,<measured_requests>,<LAB_OR_DEMO>,<status>,<null_or_reason>
 ```
+
+> 这是字段模板，不是预置成绩。正式结果必须保留每个请求的原始 TTFT/TPOT 样本、失败请求、实际后台带宽、模式代码包、配置哈希和证据等级；没有这些字段时状态为 `INVALID-EVIDENCE`。
 
 ---
 
-## 6. Go / Conditional / No-Go 判定规则
+## 6. GO / CONDITIONAL / NO-GO / NOT-SUPPORTED / INVALID-EVIDENCE 判定规则
 
-- **Go (准入通过)**：
+- **GO（准入通过）**：
   - 深度重构增强版相比官方原生 Mooncake，全链路 P99 TTFT 降低 $\ge 20\%$，QPS 提升 $\ge 10\%$；
   - 后台负载满载时，前台 P99 TPOT 干扰率严格 $< 3\%$；
-- **Conditional (条件准入)**：TTFT 降幅在 $10\% \sim 20\%$ 之间，TPOT 干扰率 $< 5\%$；
-- **No-Go (否决关闭)**：混压下前台 TPOT 发生严重恶化（干扰率 $\ge 10\%$），或 TTFT 无显著收益。
+- **CONDITIONAL（条件准入）**：TTFT 降幅在 $10\% \sim 20\%$ 之间，TPOT 干扰率 $< 5\%$；
+- **NO-GO（暂不准入）**：现场有效数据确认混压下前台 TPOT 干扰率 $\ge 10\%$，或 TTFT 无显著收益；
+- **NOT-SUPPORTED（当前不支持）**：现场不具备 RoCE、硬件 QoS 或两节点对照条件，无法执行对应混压路径；
+- **INVALID-EVIDENCE（证据无效）**：缺少同版本包/配置对照、背景带宽匹配、前台完成请求数、P99 指标或设备 QoS 证据。缺失字段必须使用 `null` 并填写 `invalid_reason`。
 
 ---
 

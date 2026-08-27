@@ -8,7 +8,6 @@
 > **验证优先级**：**🔴 P0 级（核心关键项）**  
 > **对应验证阶段**：**E1 核心数据路径打通**  
 > **证伪标记**：否（关键执行链确认）  
-> **建议周期**：6~8 人日  
 > **主关联 IR**：`IR-01-02`, `IR-01-04`  
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L3-SE-DescriptorFromManifest-079`, `L3-MC-LayoutTransformPlan-078`, `L2-OL-BulkDescriptor-025`, `L2-OL-LayoutNegotiation-024`  
@@ -16,7 +15,7 @@
 > **开源基线版本与代码仓库**：  
 > - **Mooncake**：[`https://github.com/kvcache-ai/Mooncake.git`](https://github.com/kvcache-ai/Mooncake.git) (Commit: `f90ae691f109e49a60920e0c8abbf7e572826d8c`，子模块: `mooncake-transfer-engine/`, `mooncake-integration/`)  
 > - **vLLM**：[`https://github.com/vllm-project/vllm.git`](https://github.com/vllm-project/vllm.git) (Commit: `842dd8fd96650063e1ad32e6075742d457d39773`，模块: `vllm/core/block_manager_v1.py`)  
-> **研发对齐状态**：已闭环研发评估报告 4 项与 NPU Stream 异步流水规范（明确共享内存 64B POD 协议、vLLM/SGLang 适配器与 CANN Stream 驱动）  
+> **研发对齐状态**：本方案将复核研发评估报告涉及的共享内存 64B POD 协议、vLLM/SGLang 适配器与 CANN Stream 驱动，并以实际编译和时间线为准。
 
 ---
 
@@ -24,7 +23,7 @@
 
 ### 0.1 到底什么是“描述符 (Descriptor)”？（通俗类比与系统底层本质）
 
-对于刚接触 AI 推理框架与硬件加速的工程师来说，“描述符”这个词往往令人感到抽象。我们可以从生活中的物流系统和计算机体系结构两个层次来彻底搞懂它：
+对于刚接触 AI 推理框架与硬件加速的工程师来说，“描述符”这个词往往令人感到抽象。下面从生活中的物流系统和计算机体系结构两个层次建立直观理解：
 
 #### 1. 生活中的通俗类比：快递货运的“发货提单 (Shipping Manifest)”
 - 假设你要搬迁一个巨大的图书馆，里面有 2,000 本书（对应 2,000 个 KVCache 数据块）。这些书分散在仓库各个不同的货架上。
@@ -52,10 +51,10 @@
 
 ### 0.2 为什么需要“描述符编译器 (DescriptorCompiler)”？
 
-在大模型分布式推理中，我们面临一个极其严重的工程痛点：
+在大模型分布式推理中，需要重点处理一个常见的工程痛点：
 
 #### 1. 显存分页碎片问题（PagedAttention 带来的离散块）
-- 现代大模型推理框架（如 vLLM / SGLang）为了彻底消除显存内部碎片，采用了类似于操作系统虚拟内存分页的机制（PagedAttention），将连续的 Token 序列切分为一个个极小的物理块（Block，通常每个 Block 仅容纳 16 个 Token）。
+- 现代大模型推理框架（如 vLLM / SGLang）为降低显存碎片，采用了类似于操作系统虚拟内存分页的机制（PagedAttention），将连续的 Token 序列切分为较小的物理块（Block，每个 Block 的 Token 数量以实际配置为准）。
 - 当一个用户的输入提示词（Prompt）达到 32K Token 时，在显存中会被打散成多达 **2,000 个相互独立的物理 Block**。
 - 这 2,000 个 Block 在物理显存（HBM）中，可能一部分在物理地址 `0x1000`，一部分在 `0x5000`，还有一部分在 `0x9000`。
 
@@ -64,14 +63,14 @@
   1. Python 代码遍历这 2,000 个 Block 的内存指针，将它们组装成一个巨大的 Python 字典；
   2. 使用 JSON / Pickle / ZMQ 将 Python 字典序列化为字符串并通过网络发送；
   3. 接收端反序列化字符串，然后再一次性向底层的传输引擎发起 2,000 次独立的 DMA 传输请求。
-- **实测性能灾难**：
-  - Python 序列化与反序列化耗时高达 **3 ~ 5 毫秒**；
-  - 向底层网卡连续敲 2,000 次寄存器门铃（Doorbell Register），导致 Host CPU 产生沉重的微秒级中断风暴，CPU 占用率飙升，控制面严重阻塞。
+- **需要实测确认的开销风险**：
+  - Python 序列化与反序列化会引入额外时延，具体量级必须按冻结代码包、消息大小和现场环境记录；文中的毫秒级数值仅用于说明量纲，不是本项实测结果；
+  - 对离散物理块逐项提交描述符会增加 Doorbell Register（网卡/设备提交队列的通知寄存器）次数，可能抬高 Host 控制面开销，CPU 占用与提交时延必须由 PVT-02 的原始样本确认。
 
-#### 3. 我们的原厂重构方案：C++ 描述符编译器
+#### 3. 软硬件协同方案：C++ 描述符编译器
 - 我们在 C++ 底层实现高性能 **描述符编译器（DescriptorCompiler）**，专门解决上述瓶颈：
-  - **职责一：跨进程零拷贝 POD 协议**：摒弃 Python 字典与 JSON，采用 64 字节内存对齐的纯 C 结构体（`ExtentManifest`），直接通过共享内存（`/dev/shm`）传递，序列化耗时归零；
-  - **职责二：贪心连续物理块合并（Greedy Extent Merge）**：大模型显存分配虽然逻辑上是 16 Token 一块，但在实际连续申请时，往往有连续数十个 Block 在物理显存上是首尾相连的！编译器在 $O(N)$ 时间内单遍扫描，将物理地址相连的 Block 自动合并为一个大区间描述符。**将 2,000 个小描述符瞬间压缩成几十个大描述符（压缩率 $\ge 50\%$）**，极大减少硬件 DMA 的提交次数；
+  - **职责一：跨进程固定字段协议**：摒弃 Python 字典与 JSON，采用 64 字节内存对齐的固定字段结构体（`ExtentManifest`），通过共享内存（`/dev/shm`）传递地址和长度等元数据；避免完整对象序列化，但固定字段处理开销仍需实测；
+  - **职责二：贪心连续物理块合并（Greedy Extent Merge）**：编译器在 $O(N)$ 时间内单遍扫描，将物理地址相连的 Block 合并为一个大区间描述符。合并数量、描述符压缩率和 DMA 提交次数必须按真实布局测量，不能预先假定“2,000 个变成几十个”或某个压缩比例；
   - **职责三：编译为硬件执行描述符**：将合并后的区间直接转换为硬件 DMA 网卡能直接读取的 Scatter-Gather 描述符数组，实现微秒级提交。
 
 ```
@@ -87,7 +86,7 @@
 │ │ 描述符 1 (Descriptor 1):             │ 描述符 2 (Descriptor 2):                    │ │
 │ │ 源: 0x1000, 目的: 0x8000, 长度: 15KB │ 源: 0x6000, 目的: 0xB000, 长度: 10KB        │ │
 │ └──────────────────────────────────────┴─────────────────────────────────────────────┘ │
-│ 结果：提交给硬件 DMA 的指令条数从 2,000 次骤降至几十次，CPU 提交耗时下降 40% 以上！    │
+│ 结果：提交条数与 CPU 提交耗时由编译前后同条件实测对账，不预置收益比例。             │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -102,18 +101,18 @@
   - 利用国产 NPU 提供的**双 Stream 硬件多流机制**（计算流 Compute Stream 与 DMA 传输流 Transfer Stream 独立并发运行）：
   - 当 Prefill 节点算完 Layer 0 时，立刻向 Transfer Stream 派发 Layer 0 描述符开始跨节点网络传输；
   - 与此同时，Compute Stream 毫不等待，立即并发启动 Layer 1 的矩阵乘法计算！
-  - **物理收益**：当最后一层 Layer 79 计算完成时，前面的 78 层数据早在网络上并行传输完毕，整网传输耗时被 NPU 计算完全掩盖（计算-传输重叠率 $\ge 60\%$），端到端首字延迟（TTFT）大幅缩短！
+  - **待验证的物理收益**：当计算流与传输流满足依赖条件时，前面的 Layer 数据可以在网络上并行传输；计算-传输重叠率和端到端首字延迟（TTFT）必须由时间线与同场次基线实测确认。
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                   Layerwise 边算边传 (计算与传输 100% 异步重叠流水)                    │
+│                   Layerwise 边算边传 (计算与传输异步流水示意)                          │
 ├────────────────────────────────────────────────────────────────────────────────────────┤
 │ 计算流 (Compute Stream):  [ 计算 Layer 0 ] ──► [ 计算 Layer 1 ] ──► [ 计算 Layer 2 ]   │
 │                                  │                   │                   │             │
 │                                  ▼ 触发 DMA          ▼ 触发 DMA          ▼ 触发 DMA    │
 │ 传输流 (DMA Copy Stream):         [ 传输 Layer 0 ] ──► [ 传输 Layer 1 ] ──► [ 传输 L2 ]│
 │                                                                                        │
-│ 收益：当最后一层神经网络计算完成时，整网数据传输也同步结束，传输时间被完全掩盖！       │
+│ 待验证关系：若依赖条件满足，计算与传输可重叠；是否完全掩盖由时间线实测确认。       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -128,10 +127,10 @@
    - **异步 DAG 流水调度引擎**实现 NPU 算力计算流（Compute Stream）与 DMA 传输流（Transfer Stream）的高效重叠，**计算-传输重叠率（Overlap Ratio）达到 $\ge 60\%$**。
 
 ### 1.2 最终交付数据与结论产出
-1. **《Descriptor 编译器耗时与 Scatter-Gather 压缩率实测表》**；
+1. **《Descriptor 编译器耗时与 Scatter-Gather 压缩率实测表》**（覆盖 16～1024 个离散段）；
 2. **《CPU 提交时延基线 vs 批量编译优化对比表》**；
-3. **《NPU Compute 与 DMA Transfer 异步流水 Timeline 重叠率分析表》**；
-4. **《Go / No-Go 判定结论》**。
+3. **《NPU Compute 与 DMA Transfer 异步流水 Timeline 重叠率分析表》**（附 Profiler Trace）；
+4. **《GO / CONDITIONAL / NO-GO / NOT-SUPPORTED / INVALID-EVIDENCE 判定结论》**。
 
 ---
 
@@ -176,6 +175,66 @@ struct alignas(64) HardwareSGEntry {
     uint16_t flags;               // 控制位: 0x01=Notify, 0x02=Fence Barrier, 0x04=LastSegment
 };
 ```
+
+### 2.1.1 批量描述符包头与跨进程边界
+
+`HardwareSGEntry` 是硬件执行条目；批量编译结果还需要一个控制面包头记录批次标识、条目数量、总字节数和完成屏障。包头中的 `entries` 是 Host 侧容器，不属于跨进程固定长度的 wire header，序列化时只传递固定字段和紧随其后的条目数组。
+
+```cpp
+struct alignas(64) BatchDescriptorHeader {
+    uint32_t batch_id;
+    uint32_t total_entries;        // 编译合并后的 SG Entry 数量
+    uint64_t total_payload_bytes;  // 本批次总正文字节数
+    uint64_t completion_fence_id;  // 完成屏障 Fence ID
+    std::vector<HardwareSGEntry> entries; // Host 侧动态容器，不直接作为 wire layout
+};
+```
+
+### 2.1.2 跨框架内存布局向 ExtentManifest 的转换适配器
+
+不同推理框架的显存布局不能直接把指针或 Python 对象交给 DMA。适配器负责把 vLLM 的 BlockTable、vLLM V1 `KVCacheManager` 以及 SGLang Radix Tree 的连续 Span，转换为统一的 `LogicalBlockExtent` 数组；只传递地址、长度和布局元数据，不复制 KVCache 正文。
+
+```cpp
+// vLLM V0/V1 BlockTable 适配器
+void adapt_vllm_blocks(const std::vector<uint64_t>& block_ids,
+                       uint32_t tokens_per_block,
+                       uint32_t bytes_per_block,
+                       std::vector<LogicalBlockExtent>& out) {
+    out.reserve(block_ids.size());
+    for (size_t i = 0; i < block_ids.size(); ++i) {
+        LogicalBlockExtent ext{};
+        ext.logical_token_start = i * tokens_per_block;
+        ext.token_count = tokens_per_block;
+        ext.phys_base_addr = block_ids[i] * bytes_per_block;
+        ext.stride_bytes = 0;
+        ext.block_bytes = bytes_per_block;
+        out.push_back(ext);
+    }
+}
+
+// SGLang Radix Tree 动态连续 Span 适配器
+struct SGLangSpan {
+    uint64_t token_start;
+    uint32_t len;
+    uint64_t phys_addr;
+    uint32_t bytes;
+};
+
+void adapt_sglang_spans(const std::vector<SGLangSpan>& spans,
+                        std::vector<LogicalBlockExtent>& out) {
+    out.reserve(spans.size());
+    for (const auto& sp : spans) {
+        LogicalBlockExtent ext{};
+        ext.logical_token_start = sp.token_start;
+        ext.token_count = sp.len;
+        ext.phys_base_addr = sp.phys_addr;
+        ext.block_bytes = sp.bytes;
+        out.push_back(ext);
+    }
+}
+```
+
+> 适配器只定义转换契约；`block_ids` 到物理地址的映射必须由现场框架分配器提供，不能把逻辑 Block ID 直接当成真实物理地址写入生产路径。
 
 ### 2.2 物理连续块贪心合并算法 (Greedy SG Extent Merger)
 编译器核心算法在 $O(N)$ 时间复杂度下，一次性遍历输入数组，若发现相邻两个物理块在物理显存地址上是连续的（`src[i].addr == cur.addr + cur.len` 且 `dst[i].addr == cur.dst + cur.len`），则直接合并累加 `len_bytes`，仅在物理断开时才生成新的描述符条目：
@@ -245,6 +304,31 @@ BatchDescriptorHeader DescriptorCompiler::compile_and_merge(
 cd ./原型验证代码/PVT-02 && make clean && make -j16
 ```
 
+### 3.1 单元基准与在线消融对照
+
+先在脱离推理框架的 Harness 中确认编译器的条目数量、编译耗时和地址正确性，再进入 vLLM-Ascend `MooncakeLayerwiseConnector` 在线消融。两种模式必须使用同一模型、同一输入数据集、同一请求率和同一设备拓扑。
+
+```bash
+# 单元基准：确认离散块合并与异步 DAG 的基本字段。
+./async_dag_bench --block-count 1024 --fragmentation 0.5 \
+    --chunks 16 --compute-ms <compute_ms> --dma-ms <dma_ms> \
+    --loops 1000 --evidence-level LAB --out res_compiler_dag.csv
+
+# 原生 vLLM-Ascend LayerwiseConnector 对照；端点与模型路径按现场环境替换。
+export VLLM_ASCEND_ENABLE_LAYERWISE=1
+python3 -m vllm.entrypoints.openai.api_server \
+    --model <model_path> --tensor-parallel-size 8 \
+    --kv-transfer-config '{"kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_producer"}' \
+    --port <native_port> &
+
+python3 -m vllm.benchmarks.benchmark_serving \
+    --backend vllm --model <model_path> --dataset-name sharegpt \
+    --num-prompts 100 --request-rate 10 --port <native_port> \
+    --save-result --result-filename ./res_dag_native.json
+```
+
+> `<compute_ms>`、端口、模型路径和结果值均为输入占位符；W0/DEMO 可以验证命令与 Schema，不能替代真实在线消融证据。
+
 ---
 
 ## 4. 分步执行测试操作规程 (SOP)
@@ -286,27 +370,37 @@ python3 ./eval_descriptor_pipeline.py --compile-csv res_descriptor_compile.csv -
 
 ### 5.1 描述符编译与压缩性能表 (`pvt02_compile_results.csv`)
 ```csv
-workload_id,tokens,fragmentation_pct,raw_blocks_count,merged_sg_entries,compression_ratio_pct,python_ser_us,cpp_compile_us,cpu_reduction_pct
-TC-01,32768,10.0,2048,128,93.75,3420.0,18.5,99.46
-TC-02,32768,50.0,2048,890,56.54,3450.0,32.1,99.07
-TC-03,32768,100.0,2048,2048,0.00,3480.0,45.0,98.71
+workload_id,tokens,fragmentation_pct,raw_blocks_count,merged_sg_entries,compression_ratio_pct,python_ser_us,cpp_compile_us,cpu_reduction_pct,evidence_level,status,invalid_reason
+<workload_id>,<tokens>,<fragmentation_pct>,<raw_blocks_count>,<merged_sg_entries>,<calculated_compression_ratio_pct>,<measured_python_ser_us>,<measured_cpp_compile_us>,<calculated_cpu_reduction_pct>,<LAB_OR_DEMO>,<status>,<null_or_reason>
 ```
 
 ### 5.2 NPU 异步流水重叠率实测表 (`pvt02_dag_results.csv`)
 ```csv
-layer_count,tokens,t_pure_compute_ms,t_pure_transfer_ms,t_serial_total_ms,t_pipelined_total_ms,overlap_ratio_pct,is_pass
-80,32768,48.2,36.5,84.7,52.1,67.4,TRUE
+layer_count,tokens,t_pure_compute_ms,t_pure_transfer_ms,t_serial_total_ms,t_pipelined_total_ms,overlap_ratio_pct,is_pass,evidence_level,status,invalid_reason
+<layer_count>,<tokens>,<measured_compute_ms>,<measured_transfer_ms>,<calculated_serial_total_ms>,<measured_pipeline_total_ms>,<calculated_overlap_ratio_pct>,<TRUE_OR_FALSE>,<LAB_OR_DEMO>,<status>,<null_or_reason>
 ```
+
+### 5.3 数据交叉组合与运算推导逻辑
+
+描述符和流水两类证据必须从同一 `run_id` 的原始样本计算：
+
+$$\text{描述符压缩率} = 1.0 - \frac{\text{合并后描述符条目数}}{\text{原始离散 Block 数量}}$$
+
+$$\text{计算-传输重叠率} = \frac{(T_{\text{compute}} + T_{\text{transfer}}) - T_{\text{total\_pipeline}}}{\min(T_{\text{compute}}, T_{\text{transfer}})} \times 100\%$$
+
+若 `actual_path`、Profiler Timeline、原始样本或代码包标识缺失，不能仅凭公式推导出 LAB/MEASURED 结论，应标记 `INVALID-EVIDENCE`。
 
 ---
 
-## 6. Go / Conditional / No-Go 判定规则
+## 6. GO / CONDITIONAL / NO-GO / NOT-SUPPORTED / INVALID-EVIDENCE 判定规则
 
-- **Go (准入通过)**：
+- **GO（准入通过）**：
   - 在典型碎片率（50%）下，描述符数量压缩率 $\ge 50\%$，C++ 编译耗时 $< 50\mu s$；
   - 异步 DAG 流水计算-传输重叠率 $\ge 60\%$；
-- **Conditional (条件准入)**：重叠率在 $45\% \sim 60\%$ 之间，需优化 Stream 事件同步粒度；
-- **No-Go (否决关闭)**：描述符编译产生内存泄露或段错误，或者重叠率 $< 45\%$。
+- **CONDITIONAL（条件准入）**：重叠率在 $45\% \sim 60\%$ 之间，需优化 Stream 事件同步粒度；
+- **NO-GO（暂不准入）**：现场证据确认描述符编译产生内存泄露或段错误，或者重叠率 $< 45\%$；
+- **NOT-SUPPORTED（当前不支持）**：现场框架适配器、NPU Event 或目标异步接口不可用，无法执行对应路径；
+- **INVALID-EVIDENCE（证据无效）**：缺少跨框架输入、编译输出、NPU Timeline、资源释放记录或完整重复场次。缺失字段必须使用 `null` 并填写 `invalid_reason`。
 
 ---
 

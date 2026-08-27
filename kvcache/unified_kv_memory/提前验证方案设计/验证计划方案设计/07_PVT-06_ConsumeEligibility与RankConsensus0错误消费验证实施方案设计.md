@@ -8,7 +8,6 @@
 > **验证优先级**：**🔴 P0 级（核心关键项）**  
 > **对应验证阶段**：**E1 多卡状态同步与消费正确性**  
 > **证伪标记**：否（可消费性安全底线确认）  
-> **建议周期**：5~7 人日  
 > **主关联 IR**：`IR-01-10`, `IR-01-11`, `IR-02-01`, `IR-02-05`  
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L2-KV-AttachHandle-034`, `L2-KV-PartialAttachPlan-038`, `L3-MS-ConsumeEligibility-060`, `L3-CO-VisibilityReadyBitmap-064`, `L1-PD-RankConsensus-013`  
@@ -16,7 +15,7 @@
 > **开源基线版本与代码仓库**：  
 > - **Mooncake 元数据**：[`https://github.com/kvcache-ai/Mooncake.git`](https://github.com/kvcache-ai/Mooncake.git) (Commit: `f90ae691f109e49a60920e0c8abbf7e572826d8c`，子模块: `mooncake-store/`, `mooncake-common/`)  
 > - **vLLM 分布式通信**：[`https://github.com/vllm-project/vllm.git`](https://github.com/vllm-project/vllm.git) (Commit: `842dd8fd96650063e1ad32e6075742d457d39773`，模块: `vllm/distributed/communication_op.py`)  
-> **研发对齐状态**：已闭环研发评估报告 5, 9 项与多卡共识规范（明确 xxHash64 标准哈希、/dev/shm 8卡共享内存 Bitmap 与 NCCL/HCCL 协同防死锁协议）  
+> **研发对齐状态**：本方案将复核研发评估报告涉及的 `xxHash64` 哈希、`/dev/shm` 共享内存位图与 NCCL/HCCL 集合通信协同规则，并以现场通信栈行为为准。
 
 ---
 
@@ -41,7 +40,7 @@
 
 ### 0.2 大模型推理中的“胡言乱语”根因与 6 维语义校验 (ConsumeEligibility)
 
-在大模型推理中，KVCache 本质上是神经网络每一层激活状态的中间张量。如果错误消费了不匹配的 KVCache，大模型会直接吐出完全乱码的乱语：
+在大模型推理中，KVCache 本质上是神经网络每一层激活状态的中间张量。错误消费不匹配的 KVCache 可能导致输出错误、质量下降或后续校验失败，因此需要在消费前校验语义元数据：
 
 #### 6 维语义校验维度详解：
 1. **维度 1：模型架构与权重版本（Model Version）**：模型从 `qwen2.5-72b` 升级为 `qwen2.5-72b-instruct` 时，KV 空间完全不兼容；
@@ -49,24 +48,24 @@
 3. **维度 3：Prompt 模板哈希（Chat Template Hash）**：System Prompt 模板中的 `<|im_start|>` 等特殊标记变更；
 4. **维度 4：LoRA 适配器标识（Adapter ID）**：不同的微调 LoRA 权重产生的 KV 张量不可混用；
 5. **维度 5：租约有效性（Lease Validity）**：远端节点是否还在正常运行，租约是否已过期；
-6. **维度 6：全局写入完成屏障位（Ready Bit）**：后台 Prefill 写入是否已完全结束并 Flush 到物理介质，彻底杜绝读取到“只写了一半的半写脏块”。
+6. **维度 6：全局写入完成屏障位（Ready Bit）**：后台 Prefill 写入是否已结束并 Flush 到约定介质；未就绪时必须拒绝消费，避免读取半写数据。
 
 - **底层哈希工具选型：`xxHash64`**：
-  - 为什么不用 MD5 / SHA256？MD5/SHA256 是加密哈希，计算单次需要数百微秒，太慢；
-  - 采用业界极速的 `xxHash64`（单核吞吐超过 10GB/s，单次计算仅需 2~5 纳秒，且哈希碰撞概率极低），将 6 维语义校验耗时压缩在 **$< 5\mu s$** 以内！
+  - 为什么不直接使用 MD5 / SHA256？本项首先关注微秒级元数据校验路径，非加密哈希通常更适合低开销比较；最终算法、碰撞处理和时延必须由现场基准确认；
+  - 采用 `xxHash64` 作为候选快速哈希，6 维语义校验耗时 **`<5µs`** 是验证门限，不是预置实测结果。
 
 ---
 
 ### 0.3 TP=8 多卡张量并行共享内存共识机制 (RankConsensus)
 
 大模型通常由 8 张 NPU 卡协同运行（张量并行 TP=8）。
-- **痛点**：开源 Mooncake 中每张卡独立向存储池查询缓存。一旦发生网络抖动导致卡 0 查到了去拉取、而卡 7 没查到去重算，8 张卡在进入随后的集合通信（AllReduce）时将永久死锁！
-- **我们的原厂重构方案**：在 Linux POSIX 共享内存（`/dev/shm`）建立 8-bit 原子状态位图（`RankConsensus`）：
+- **痛点**：开源 Mooncake 中每张卡独立向存储池查询缓存。若网络抖动导致卡 0 查到并拉取、而卡 7 未命中并重算，8 张卡进入后续集合通信（AllReduce）时可能发生等待不一致甚至死锁。
+- **软硬件协同方案**：在 Linux POSIX 共享内存（`/dev/shm`）建立 8-bit 原子状态位图（`RankConsensus`）：
   - 8 张卡独立校验完成后，原子写入各自的比特位；
   - 8 张卡在执行后续操作前，共同读取全局位图：
     - 若 `Global_Bitmap == 0xFF`（8 卡全命中），8 卡同步加载远端 KV；
     - 若任意卡未命中（如 `Global_Bitmap != 0xFF`），**8 张卡在进入集合通信前统一回退到本地重算（Coordinated Fallback）**！
-  - 彻底杜绝步调分歧，实现 **0 集合通信死锁、0 服务挂死**！
+  - 目标是让所有卡在进入集合通信前使用同一决策；是否能避免死锁和服务挂起，由故障注入与进程状态监控确认。
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
@@ -82,7 +81,7 @@
 │                                           │                                            │
 │                                           ▼                                            │
 │      [ 8 卡统一回退分支 ]: 8 张卡全部放弃拉取，统一进入本地重算并对齐 AllReduce!        │
-│      收益：彻底消除多卡张量并行集合通信死锁，业务 100% 稳定运行！                     │
+│      待验证目标：分歧时统一回退，并由监控确认集合通信是否继续完成。                 │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -91,16 +90,16 @@
 ## 1. 验证目标与交付结论定义
 
 ### 1.1 现实前因痛点与待验证核心命题
-1. **现实痛点**：缺乏严格语义版本校验导致大模型产生脏读与输出乱码，且多卡并行时缺乏同步机制极易引发集合通信死锁；
+1. **现实痛点**：缺乏严格语义版本校验可能导致大模型读取不匹配的缓存，且多卡并行时缺乏同步机制容易引发集合通信死锁；
 2. **核心命题**：
-   - **ConsumeEligibility 6 维语义校验引擎** 能够在 $< 5\mu s$ 内完成完整校验，在 8 类冲突注入下实现 **错误消费数严格为 0**，冲突拦截率 **100%**；
-   - **RankConsensus 多卡状态同步机制** 在 $TP=8$ 张量并行下，多卡状态同步耗时 **$P99 < 100\mu s$**；在发生分歧时 100% 协同 Fallback 本地重算，杜绝死锁。
+   - **待验证目标一**：ConsumeEligibility 6 维语义校验引擎在 $< 5\mu s$ 内完成完整校验，并在 8 类冲突注入下记录错误消费数与冲突拦截率；验收门限为错误消费数为 0、冲突拦截率 100%，不能预置为测试结果；
+   - **待验证目标二**：RankConsensus 多卡状态同步机制在 $TP=8$ 张量并行下的同步耗时满足 **$P99 < 100\mu s$**；发生分歧时记录协同回退结果和集合通信完成状态，不能预先宣称已消除死锁。
 
 ### 1.2 最终交付数据与结论产出
 1. **《8 大冲突与故障用例注入与拦截结果对账表》**；
 2. **《TP=8 多卡 RankConsensus 共识时延分布表》**；
 3. **《多卡状态分歧下协同 Fallback 与正确性验证报告》**；
-4. **《Go / No-Go 判定结论》**。
+4. **《GO / CONDITIONAL / NO-GO / NOT-SUPPORTED / INVALID-EVIDENCE 判定结论》**。
 
 ---
 
@@ -143,6 +142,46 @@ struct PartialAttachPlan {
 };
 ```
 
+### 2.2 TP=8 多卡共享内存状态同步与集合通信协同协议
+
+8 张卡必须在进入 AllReduce/HCCL 等集合通信前完成统一分支。共享内存位图只表示各 Rank 的资格校验结果，不承载 KV 正文；写入和读取需要使用明确的原子内存序与超时策略。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R0 as Rank 0 Worker
+    participant R1_7 as Rank 1~7 Workers
+    participant Shm as /dev/shm/kv_consensus_bitmap
+
+    Note over R0,R1_7: 8 张卡独立执行 ConsumeEligibility 六维校验
+    R0->>Shm: 原子写入 Rank 0 Ready Bit
+    R1_7->>Shm: 并发写入 Rank 1~7 Ready Bits
+    Note over R0,R1_7: 等待位图收敛或达到超时
+    alt Global_Bitmap == 0xFF
+        Shm-->>R0: ALL_HIT
+        Shm-->>R1_7: ALL_HIT
+        Note over R0,R1_7: 8 卡统一加载远端 KV 并进入相同集合通信序列
+    else 位图不完整、语义冲突或超时
+        Shm-->>R0: DIVERGENCE_DETECTED
+        Shm-->>R1_7: DIVERGENCE_DETECTED
+        Note over R0,R1_7: 8 卡统一回退本地重算，禁止一部分加载、一部分重算
+        Note over R0,R1_7: 集合通信序列保持一致，避免死锁
+    end
+```
+
+核心判定逻辑必须在超时路径也保持一致：
+
+```cpp
+uint8_t bitmap = consensus_bitmap.load(std::memory_order_acquire);
+if (bitmap == 0xFF) {
+    action = ALL_RANKS_LOAD;
+} else if (deadline_expired || bitmap != expected_bitmap) {
+    action = ALL_RANKS_FALLBACK_RECOMPUTE;
+}
+```
+
+这里的 `expected_bitmap`、超时值、Rank 数量和共享内存名称必须由 `manifest.json` 固定并记录；不得让不同 Rank 使用不同版本的位图协议。
+
 ---
 
 ## 3. 测试工具与工程构建规范
@@ -171,7 +210,7 @@ cd ./原型验证代码/PVT-06 && make clean && make -j16
 开发人员在执行 PVT-06 时，请严格按照以下 4 个步骤逐步执行，并理解每一步的操作意图：
 
 ### 步骤 1：运行 8 类语义冲突注入与正确性拦截测试
-- **操作意图**：启动 Python 测试脚本，分别注入模型不匹配、词表篡改、Prompt 模板修改、LoRA 不一致、未就绪写脏块、租约过期、单卡分歧等 8 类极端冲突用例，验证校验引擎是否 100% 成功拦截且错误消费严格为 0。
+- **操作意图**：启动 Python 测试脚本，按受控清单执行 8 类用例：`model_version`、`tokenizer_hash`、`template_hash`、`lora_adapter`、`ready_bit`、`lease_expired`、`partial_match` 和 `rank_state_mismatch`。验证被测接口是否返回独立 Oracle 预期结果；拦截率和错误消费数必须由实际输出计算。
 - **执行命令**：
 ```bash
 python3 ./test_correctness.py --out res_correctness.json
@@ -185,7 +224,7 @@ python3 ./test_correctness.py --out res_correctness.json
 ```
 
 ### 步骤 3：注入单卡分歧故障，验证 8 卡协同回退重算
-- **操作意图**：人为让 Rank 7 报告校验失败（模拟单卡网络丢包），观察 Rank 0~6 是否在共享内存中感知到分歧并 100% 统一回退到本地重算，验证集合通信（AllReduce）是否发生死锁挂死。
+- **操作意图**：人为让 Rank 7 报告校验失败（模拟单卡网络丢包），观察 Rank 0~6 是否在共享内存中感知到分歧并统一回退到本地重算；同时记录所有进程的退出状态和集合通信是否完成，不能预先假定回退成功。
 - **执行命令**：
 ```bash
 ./rank_consensus_bench --ranks 8 --inject-divergence rank7 --out res_fallback_test.csv
@@ -204,25 +243,21 @@ python3 ./eval_consensus.py --correctness res_correctness.json --latency res_con
 
 ### 5.1 冲突拦截与共识时延数据表 (`pvt06_correctness_results.csv`)
 ```csv
-conflict_type,injected_value,expected_result,actual_result,is_intercepted_ok,consensus_latency_p99_us,deadlock_occurred
-MODEL_MISMATCH,llama-3-70b,REJECT_MODEL_MISMATCH,REJECT_MODEL_MISMATCH,TRUE,12.4,FALSE
-TOKENIZER_MISMATCH,0x12345678,REJECT_TOKENIZER_MISMATCH,REJECT_TOKENIZER_MISMATCH,TRUE,14.1,FALSE
-TEMPLATE_MISMATCH,0xABCDEF01,REJECT_TEMPLATE_MISMATCH,REJECT_TEMPLATE_MISMATCH,TRUE,11.8,FALSE
-READY_NOT_SET,false,REJECT_NOT_READY,REJECT_NOT_READY,TRUE,9.5,FALSE
-LEASE_EXPIRED,epoch_past,REJECT_LEASE_EXPIRED,REJECT_LEASE_EXPIRED,TRUE,10.2,FALSE
-RANK_DIVERGENCE,rank7_fail,ALL_RANKS_FALLBACK,ALL_RANKS_FALLBACK,TRUE,48.2,FALSE
+conflict_type,injected_value,expected_result,actual_result,is_intercepted_ok,consensus_latency_p99_us,deadlock_occurred,evidence_level,status,invalid_reason
+<conflict_type>,<injected_value>,<expected_result>,<actual_result>,<TRUE_OR_FALSE>,<measured_p99_us_or_null>,<TRUE_OR_FALSE_OR_NULL>,<LAB_OR_DEMO>,<status>,<null_or_reason>
 ```
+
+> 这是结果字段模板，不是预置通过样例。正式用例必须覆盖模型、Tokenizer、Prompt 模板、LoRA、Ready、Lease、Partial Attach Plan 和 Rank 状态分歧等 8 类定义用例。共识耗时或死锁状态未采集时不得用 0/FALSE 代替；被测接口未执行时应标记 `DEMO` 或 `INVALID-EVIDENCE`。
 
 ---
 
-## 6. Go / Conditional / No-Go 判定规则
+## 6. GO / CONDITIONAL / NO-GO / NOT-SUPPORTED / INVALID-EVIDENCE 判定规则
 
-- **Go (准入通过)**：
-  - 8 大冲突场景下，**错误消费数、过期消费数、越权消费数严格为 0**，冲突拦截率 100%；
-  - $TP=8$ 多卡状态同步耗时 $P99 < 100\mu s$；
-  - 发生分歧时 8 卡 100% 协同回滚至本地重算，0 死锁，0 挂起。
-- **Conditional (条件准入)**：拦截率 100%，但共识耗时在 $100\mu s \sim 200\mu s$ 之间；
-- **No-Go (否决关闭)**：发生任意 1 起错误消费或多卡集合通信死锁。
+- **GO（满足当前准入门限）**：8 类用例均有实际被测输出和独立 Oracle 判定，错误消费数为 0，$TP=8$ 多卡状态同步耗时 $P99 < 100\mu s$，且分歧回退与集合通信完成记录完整；
+- **CONDITIONAL（条件准入）**：正确性和分歧回退证据完整，但共识耗时处于 $100\mu s \sim 200\mu s$，或仅满足限定规模/拓扑；必须写明限制条件；
+- **NO-GO（当前路径不满足）**：出现任意可复现的错误消费、分歧决策不一致、集合通信死锁或进程挂起；
+- **NOT-SUPPORTED（环境不支持）**：测试环境不具备 TP=8 硬件、共享内存能力或约定集合通信接口，不能把缩小规模的 DEMO 结果当作 TP=8 结论；
+- **INVALID-EVIDENCE（证据无效）**：被测接口未执行、Oracle 缺失、8 类用例不完整、时间线/进程状态不完整或用固定值代替实测。
 
 ---
 

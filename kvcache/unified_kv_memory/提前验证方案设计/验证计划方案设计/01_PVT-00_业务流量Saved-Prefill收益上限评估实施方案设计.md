@@ -8,7 +8,6 @@
 > **验证优先级**：**🟡 P1 级（底座支撑项）**  
 > **对应验证阶段**：**E0 业务收益前提确认**  
 > **证伪标记**：否（业务收益前提确认）  
-> **建议周期**：4~6 人日  
 > **主关联 IR**：`IR-02-11`, `IR-02-12`  
 > **核心 SRS / SR23 锚点**：  
 > - SRS: `L3-OB-PerPathTelemetry-047`, `L1-OB-SemanticMetrics-016`, `SE-MONITOR-001`, `SE-PERF-001`  
@@ -17,7 +16,7 @@
 > - **Mooncake**：[`https://github.com/kvcache-ai/Mooncake.git`](https://github.com/kvcache-ai/Mooncake.git) (Commit: `f90ae691f109e49a60920e0c8abbf7e572826d8c`，涵盖 `mooncake-transfer-engine`, `mooncake-integration`)  
 > - **vLLM**：[`https://github.com/vllm-project/vllm.git`](https://github.com/vllm-project/vllm.git) (Commit: `842dd8fd96650063e1ad32e6075742d457d39773`)  
 > - **vLLM-Ascend**：[`https://github.com/vllm-project/vllm-ascend.git`](https://github.com/vllm-project/vllm-ascend.git) (Commit: `424e27e1fd2b1c6e0d7fe659b489b87c1223a33c`)  
-> **研发对齐状态**：已闭环研发评估报告 1, 12, 13 项（明确驱动 SDK、模型基准与行级源码插桩位置）  
+> **研发对齐状态**：本方案将复核研发评估报告涉及的驱动 SDK、模型基准与行级源码插桩位置，并以冻结代码包和现场模型布局为准。
 
 ---
 
@@ -28,7 +27,7 @@
 但是，**引入缓存并不总是划算的**：如果从缓存拉取数据的网络时延和反序列化开销，比本地直接重新计算一次还要慢，那么缓存就带来了严重的“负收益”。
 
 ### 0.2 大模型推理中的对应物理场景
-大模型在生成第一个字之前，需要对用户输入的 Prompt 提示词进行**首字预计算（Prefill，输入理解阶段）**。这个过程本质是海量矩阵乘法，极度消耗 NPU/GPU 算力，导致**首字生成延迟（TTFT, Time To First Token，首字响应时间）**极高（长文本下可达数秒）。
+大模型在生成第一个字之前，需要对用户输入的 Prompt 提示词进行**首字预计算（Prefill，输入理解阶段）**。这个过程本质是海量矩阵乘法，通常受 NPU/GPU 算力和输入长度影响，首字生成延迟（TTFT, Time To First Token，首字响应时间）可能明显增加，具体时延必须按现场模型和请求测量。
 - **什么是 KVCache？** 大模型在 Prefill 阶段会为每个 Token 生成 Key 和 Value 特征张量（KVCache，大模型注意力键值缓存：大模型自回归生成过程中缓存的历史 Key 与 Value 激活状态张量，用于避免后续 Token 生成时重复计算注意力）。
 - **什么是 Saved-Prefill？** 如果后续请求带有相同的提示词前缀（如系统提示词、知识库文档、多轮历史对话），我们可以把之前算好的 KVCache 从外接存储池直接拉回显存，**跳过耗时的矩阵重算**，这就是 **Saved-Prefill（首字生成预计算节省）**。
 
@@ -43,14 +42,14 @@
 ### 1.1 现实前因痛点与待验证核心命题
 1. **现实痛点**：开源 Mooncake 在拉取 KVCache 时存在元数据查询与传输开销。如果网络带宽不足或传输协议低效，拉取开销将超过算力重算耗时，导致业务变慢；
 2. **核心命题**：
-   - 针对 **DeepSeek MLA (~35KB/tok)** 与 **Qwen MHA (320KB/tok)** 两类典型模型，测定外接存储池相比纯算力本地重算（Recompute）的端到端 TTFT 净时间节省；
+   - 针对 **DeepSeek MLA（约 35KB/tok）** 与 **Qwen MHA（约 320KB/tok）** 两类典型模型，测定外接存储池相比纯算力本地重算（Recompute）的端到端 TTFT 净时间节省；上述字节数只是输入构造的初始布局估算，最终以运行时 `model_layout_manifest` 为准；
    - 采用 **UBMEM（统一总线内存直通共享协议）** 相比 **URMA（通用远程直接内存访问）** / 标准 RDMA 通信协议，在元数据处理与数据传输阶段带来的性能增益上限。
 
 ### 1.2 最终交付数据与结论产出
 1. **《URMA vs UBMEM 协议传输性能基准表》**（覆盖 4KB~64MB 包大小、1~64 并发）；
 2. **《vLLM + Mooncake 前缀复用实测打点时延表》**（包含源码插桩微秒级打点）；
 3. **《MLA vs MHA 双模型不同复用率下的 TTFT 收益交叉对账表与对比图》**；
-4. **《Go / No-Go 判定结论》**：依据净收益公式计算是否满足 $\text{Saved-Prefill 净收益} \ge 2.0\times \text{总开销}$ 门槛。
+4. **《GO / CONDITIONAL / NO-GO / NOT-SUPPORTED / INVALID-EVIDENCE 判定结论》**：依据净收益公式和证据状态计算是否满足 $\text{Saved-Prefill 净收益} \ge 2.0\times \text{总开销}$ 门槛。
 
 ---
 
@@ -87,6 +86,25 @@
 cd ./原型验证代码/PVT-00 && make clean && make -j16
 ```
 
+### 2.3 测试参数网格
+
+协议微基准必须先把传输层的物理边界测出来，再进入在线推理对账。以下参数是测试输入网格，不是预置性能结论：
+
+- **数据包大小**：4KB、64KB、256KB、1MB、4MB、16MB、64MB、128MB；
+- **并发线程数**：1、4、16、32、64；
+- **传输模式**：单向 Write、单向 Read、双向混流；
+- **测试轮次**：每个组合预热 10 秒、正式测量 30 秒、独立重复 3 次，保存原始样本并按公共契约计算分位数。
+
+### 2.4 协议基线输出格式 (`proto_benchmark_results.csv`)
+
+```csv
+protocol,payload_bytes,concurrency,direction,bandwidth_gbps,latency_avg_us,latency_p99_us,evidence_level,status,invalid_reason
+URMA,<payload_bytes>,<concurrency>,write,<measured>,<measured>,<measured>,LAB,<status>,<null_or_reason>
+UBMEM,<payload_bytes>,<concurrency>,write,<measured>,<measured>,<measured>,LAB,<status>,<null_or_reason>
+```
+
+> 表中 `<measured>`、`<status>` 等占位符必须由实际 Harness 输出替换；固定样例只能标记为 `DEMO`，不能作为 E0 的关闭依据。
+
 ---
 
 ## 3. 业务 Benchmark 构造与流量特征编排
@@ -109,12 +127,36 @@ R2: [---------------- 50K Prefix A ----------------][---------------- 50K New B 
 
 数据集生成命令（支持指定模型类型）：
 ```bash
-# 生成 Qwen MHA 模型数据集 (320KB/tok)
+# 生成 Qwen MHA 模型数据集（初始布局估算约 320KB/tok，最终以 manifest 为准）
 python3 ./原型验证代码/PVT-00/make_workload.py --model-type mha --model-id Qwen2.5-72B --layout-manifest runtime_layout_qwen.json --prefix-tokens 50000 --unique-tokens 50000 --out workload_mha_50pct.json
 
-# 生成 DeepSeek MLA (~35KB/tok) 模型数据集
+# 生成 DeepSeek MLA 模型数据集（初始布局估算约 35KB/tok，最终以 manifest 为准）
 python3 ./原型验证代码/PVT-00/make_workload.py --model-type mla --model-id DeepSeek-V3 --layout-manifest runtime_layout_deepseek.json --prefix-tokens 50000 --unique-tokens 50000 --out workload_mla_50pct.json
 ```
+
+### 3.2 发包器时序编排与同场次重算基线
+
+R1 预热、缓存就绪事件和 R2 复用请求必须属于同一测试场次。不能用固定休眠时间代替就绪事件，也不能拿另一轮运行的重算时间充当本轮基线。
+
+```bash
+# 先执行同场次本地重算，输出后续对账使用的基线；正式环境必须绑定真实端点和实际代码包。
+python3 ./原型验证代码/PVT-00/traffic_generator.py \
+    --endpoint http://recompute:8000 --mode recompute --actual-path recompute \
+    --package-id <recompute_package_id> --config-hash <recompute_config_hash> \
+    --hardware-profile <hardware_profile> --evidence-level LAB \
+    --workload workload_mha_50pct.json --out-csv pvt00_recompute.csv \
+    --out-json recompute_baseline.json --ready-file <recompute_ready_file>
+
+# 再分别使用原生 Mooncake 与 Unified KV 实际端点执行；--recompute-baseline-json 只引用同场次基线。
+python3 ./原型验证代码/PVT-00/traffic_generator.py \
+    --endpoint <native_or_unified_endpoint> --mode <mooncake_native_or_unified_full> \
+    --actual-path <actual_path> --package-id <package_id> --config-hash <config_hash> \
+    --hardware-profile <hardware_profile> --evidence-level LAB \
+    --workload workload_mha_50pct.json --recompute-baseline-json recompute_baseline.json \
+    --out-csv pvt00_results.csv --ready-url <ready_url_or_null>
+```
+
+**操作意图**：把“命中缓存但实际更慢”的负收益与协议加速收益拆开。`traffic_generator.py` 负责记录 R1/R2 的请求关系、就绪事件和实际路径；`benchmark_serving` 可补充多请求吞吐与分位数，但不能替代上述同场次重算基线。
 
 ---
 
@@ -122,14 +164,30 @@ python3 ./原型验证代码/PVT-00/make_workload.py --model-type mla --model-id
 
 ### 4.1 实验环境、测试模型基线与源码版本锁定
 - **模型权重基线路径**：
-  - 主测 Dense 模型：`/models/Qwen/Qwen2.5-72B-Instruct`（FP16，80 层，GQA 分组查询注意力 $H_{kv}=8$, $D_{head}=128$，单 Token KV 大小为 $320\text{ KB/Token}$，张量并行 TP=8 单卡 $40\text{ KB/Token}$）；
+  - 主测 Dense 模型：`/models/Qwen/Qwen2.5-72B-Instruct`（FP16，80 层，GQA 分组查询注意力 $H_{kv}=8$, $D_{head}=128$；单 Token KV 大小按运行时 manifest 校准，$320\text{ KB/Token}$ 与 TP=8 单卡 $40\text{ KB/Token}$ 仅作为初始布局估算）；
   - 主测 MLA 压缩态模型：`/models/deepseek-ai/DeepSeek-V3`（FP8 MLA，61 层，潜变量 512 + RoPE 64，单 Token KV 显存占用约为 $35\text{ KB/Token}$，张量并行 TP=8 单卡约为 $4.38\text{ KB/Token}$）；
 - **推理引擎与存储组件版本锁定**：
   - `vLLM`：Commit: `842dd8fd96650063e1ad32e6075742d457d39773`；
   - `vLLM-Ascend`：Commit: `424e27e1fd2b1c6e0d7fe659b489b87c1223a33c`；
   - `Mooncake`：Commit: `f90ae691f109e49a60920e0c8abbf7e572826d8c`。
 
-### 4.2 关键路径行级插桩打点位置与测量意图
+### 4.2 隔离与控制变量启动参数
+
+原生基线与 Unified KV 消融必须保持模型、TP、数据集、请求率、预热、统计口径和硬件拓扑一致；只切换待验证代码包或配置。下面的命令是启动模板，端口、端点和配置哈希必须写入 `topology_profile` 与 `manifest.json`。
+
+```bash
+# vLLM 启动参数配置示例：禁用本地 Prefix Caching，使用外接 KV 存储连接器。
+python3 -m vllm.entrypoints.openai.api_server \
+    --model /models/Qwen/Qwen2.5-72B-Instruct \
+    --tensor-parallel-size 8 \
+    --no-enable-prefix-caching \
+    --kv-transfer-config '{"kv_connector": "MooncakeConnector", "kv_role": "kv_both"}' \
+    --port 8000
+```
+
+> 该命令只说明控制变量和接口位置；实际测试仍需由现场部署脚本绑定真实代码包、设备和就绪事件。
+
+### 4.3 关键路径行级插桩打点位置与测量意图
 
 为了精确将请求时延拆解为“网络传输耗时”、“元数据查询耗时”与“算力计算耗时”，我们在推理引擎关键代码行注入了 6 个微秒级时钟打点：
 
@@ -171,10 +229,10 @@ cd ./原型验证代码/PVT-00 && make clean && make -j16
 - **操作意图**：使用 `make_workload.py` 分别针对 Qwen MHA (320KB/tok) 和 DeepSeek MLA (35KB/tok) 生成 30%~98% 五档复用率的请求，确保测试输入完全受控且可复现。
 - **执行命令**：
 ```bash
-# 生成 Qwen MHA (320KB/tok) 50% 复用率测试集
+# 生成 Qwen MHA（初始布局估算约 320KB/tok）50% 复用率测试集
 python3 ./make_workload.py --model-type mha --model-id Qwen2.5-72B --layout-manifest runtime_layout_qwen.json --prefix-tokens 50000 --unique-tokens 50000 --out workload_mha_50pct.json
 
-# 生成 DeepSeek MLA (~35KB/tok) 50% 复用率测试集
+# 生成 DeepSeek MLA（初始布局估算约 35KB/tok）50% 复用率测试集
 python3 ./make_workload.py --model-type mla --model-id DeepSeek-V3 --layout-manifest runtime_layout_deepseek.json --prefix-tokens 50000 --unique-tokens 50000 --out workload_mla_50pct.json
 ```
 
@@ -182,11 +240,12 @@ python3 ./make_workload.py --model-type mla --model-id DeepSeek-V3 --layout-mani
 - **操作意图**：启动包含 2 个节点的官方原生 Mooncake + vLLM 推理服务集群，验证基线配置下的端点可用性。
 - **执行命令**：
 ```bash
+# W0 仅用于验证部署流程；形成跨节点结论时必须切换到实际拓扑并记录 topology_profile。
 cd ../deploy_and_bench_e2e && EVIDENCE_ENVIRONMENT=W0 bash ./deploy_cluster.sh
 ```
 
 ### Step 4：发起在线打流并采集原生基线时延
-- **操作意图**：向官方原生 Mooncake 发起打流压测，记录在各个复用率下的 TTFT 与源码插桩时延，作为对照基线。
+- **操作意图**：向官方原生 Mooncake 发起打流压测，记录在各个复用率下的 TTFT 与源码插桩时延，作为对照基线；R2 的 `recompute_ttft_ms` 必须引用同场次重算结果。
 - **执行命令**：
 ```bash
 python3 -m vllm.benchmarks.benchmark_serving \
@@ -202,7 +261,7 @@ python3 -m vllm.benchmarks.benchmark_serving \
 ```
 
 ### Step 5：切换为 Unified KV (UBMEM 零拷贝扩展版) 重复打流消融
-- **操作意图**：在相同硬件与数据集下，将通信驱动切换为 UBMEM 统一总线直通协议，验证原厂软硬件协同对拉取延迟的进一步压缩。
+- **操作意图**：在相同硬件与数据集下，将通信驱动切换为 UBMEM 统一总线直通协议，验证面向国产 AI 硬件的软硬件协同方案对拉取延迟的影响。
 - **执行命令**：
 ```bash
 MODE=unified_full RUN_ID=run_pvt00_01 PACKAGE_ID=pkg_pvt00 CONFIG_HASH=hash01 HARDWARE_PROFILE=hw_2node TOPOLOGY_PROFILE=topo_p2p WORKLOAD_ID=workload_mha_50pct MODEL_ID=Qwen2.5-72B EVIDENCE_LEVEL=LAB bash ../deploy_and_bench_e2e/run_online_benchmark.sh
@@ -227,10 +286,12 @@ python3 ../deploy_and_bench_e2e/parse_benchmark_metrics.py \
 
 ### 6.1 端到端请求时延表 (`pvt00_e2e_results.csv`)
 ```csv
-run_id,workload_id,model_id,model_type,kv_bytes_per_token,prefix_tokens,total_r2_tokens,reuse_ratio,mode,protocol,actual_path,package_id,config_hash,hardware_profile,evidence_level,ttft_ms,recompute_ttft_ms,net_saved_ms,status
-run01,w01,Qwen2.5-72B,mha,327680,50000,100000,0.5,mooncake_native,URMA,remote_urma,pkg01,hash01,hw_2n,LAB,38.5,125.0,86.5,OK
-run02,w02,DeepSeek-V3,mla,35840,50000,100000,0.5,unified_full,UBMEM,remote_ubmem,pkg02,hash02,hw_2n,LAB,14.2,65.0,50.8,OK
+run_id,workload_id,model_id,model_type,kv_bytes_per_token,prefix_tokens,total_r2_tokens,reuse_ratio,mode,protocol,actual_path,package_id,config_hash,hardware_profile,evidence_level,ttft_ms,recompute_ttft_ms,net_saved_ms,status,invalid_reason
+<run_id>,<workload_id>,Qwen2.5-72B,mha,<runtime_value>,50000,100000,0.5,mooncake_native,URMA,<measured_actual_path>,<package_id>,<config_hash>,<hardware_profile>,LAB,<measured_ttft>,<same_run_recompute_ttft>,<calculated_net_saved>,<GO_OR_CONDITIONAL_OR_NO-GO_OR_INVALID-EVIDENCE>,<null_or_reason>
+<run_id>,<workload_id>,DeepSeek-V3,mla,<runtime_value>,50000,100000,0.5,unified_full,UBMEM,<measured_actual_path>,<package_id>,<config_hash>,<hardware_profile>,LAB,<measured_ttft>,<same_run_recompute_ttft>,<calculated_net_saved>,<GO_OR_CONDITIONAL_OR_NO-GO_OR_INVALID-EVIDENCE>,<null_or_reason>
 ```
+
+> 上述两行是字段模板，不是实测样例。正式结果必须保留失败请求、`actual_path`、代码包与配置哈希；字段缺失时使用 `null` 并填写 `invalid_reason`，不得用 `0` 代替。
 
 ---
 
@@ -258,11 +319,13 @@ $$\text{UBMEM 相比 URMA 加速比} = \frac{T_{\text{URMA\_total}}}{T_{\text{UB
 
 ---
 
-## 9. Go / Conditional / No-Go 判定规则
+## 9. GO / CONDITIONAL / NO-GO / NOT-SUPPORTED / INVALID-EVIDENCE 判定规则
 
-- **Go (准入通过)**：在 $\ge 50\%$ 复用率下，Saved-Prefill 净收益 $\ge 2.0\times$ 总开销，且 UBMEM 协议加速比 $\ge 1.30\times$；
-- **Conditional (条件准入)**：仅在 $\ge 70\%$ 高复用率或超长文本（$\ge 64\text{K}$）下满足收益要求，后续系统需设定场景白名单准入；
-- **No-Go (否决关闭)**：在全部复用率下加载总开销均大于本地直接重算耗时（净收益为负），判定外接 KVCache 方案不成立。
+- **GO（准入通过）**：在 $\ge 50\%$ 复用率下，现场同场次数据证明 Saved-Prefill 净收益 $\ge 2.0\times$ 总开销，且 UBMEM 协议加速比 $\ge 1.30\times$；
+- **CONDITIONAL（条件准入）**：仅在 $\ge 70\%$ 高复用率或超长文本（$\ge 64\text{K}$）下满足收益要求，后续系统需设定场景白名单准入；
+- **NO-GO（暂不准入）**：在全部复用率下，现场同场次数据均显示加载总开销大于本地直接重算耗时（净收益为负）；
+- **NOT-SUPPORTED（当前不支持）**：现场缺少 UBMEM 或其他目标协议，无法形成对应的目标路径对照；该状态不等同于性能失败；
+- **INVALID-EVIDENCE（证据无效）**：缺少同场次重算基线、复用率覆盖、协议完成事件、配置/模型清单或有效原始样本。缺失字段必须使用 `null` 并填写 `invalid_reason`，不得用 0 代替。
 
 ---
 
@@ -270,7 +333,7 @@ $$\text{UBMEM 相比 URMA 加速比} = \frac{T_{\text{URMA\_total}}}{T_{\text{UB
 
 ### 10.1 研发任务拆解与分工
 - **工程师职责**：
-  1. 部署测试机环境并准备模型权重路径；
+  1. 部署测试机环境并准备真实模型权重路径；
   2. 按照第 5 节的 6 个步骤依次执行打流；
   3. 观察客户端输出的 TTFT 数值并检查是否达成 2 倍净收益；
 - **AI Agent 职责**：
@@ -289,5 +352,5 @@ $$\text{UBMEM 相比 URMA 加速比} = \frac{T_{\text{URMA\_total}}}{T_{\text{UB
 ```
 
 ### 10.3 常见排错指南
-- **找不到 liburma.so / libubmem.so**：若当前机器没有原厂驱动，可让 Agent 增加 `-DMOCK_DRIVER` 编译宏，在单机内存中模拟传输时延，优先打通数据流与上层逻辑；
-- **权重文件缺失**：若缺少 Qwen-72B 本地权重，可使用轻量 Qwen2.5-7B 或通过 `--dummy-weights` 启动虚构权重进行吞吐流控测试。
+- **找不到 liburma.so / libubmem.so**：若当前机器没有原厂驱动，可使用项目支持的 Mock/DEMO 模式先打通数据流与字段校验；该模式只能输出 `DEMO` 或 `NOT-SUPPORTED`，不能形成协议性能结论；
+- **权重文件缺失**：不能用虚构权重冒充真实模型性能。可改用现场已具备且在 `manifest.json` 中明确记录的轻量模型，但结果只对该模型和拓扑负责。
