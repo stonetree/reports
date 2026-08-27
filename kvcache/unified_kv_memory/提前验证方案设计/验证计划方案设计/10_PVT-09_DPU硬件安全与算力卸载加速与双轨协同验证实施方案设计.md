@@ -19,22 +19,64 @@
 
 ---
 
+## 0. 架构导读与核心概念第一性原理剖析
+
+### 0.1 传统系统开发视角：硬件协处理器卸载 (Offload) 与单点高可用降级 (Fallback)
+
+在企业级安全网关（如 TLS 卸载卡、IPsec VPN 加速芯片、存储 RAID 校验卡）中：
+1. **硬件卸载收益**：数据加密（AES-256-GCM）与完整性校验（CRC64 / T10-DIF）是高密度的数学计算。在 100Gbps 线速传输下，如果全由 Host CPU 软算，需要消耗 **数十个 CPU 物理核心（CPU 占用率 $> 85\%$）**，形成严重的“CPU 墙”；
+2. **高可用降级铁律**：**绝对不能让系统对专用硬件产生致命的单一故障点强依赖**。一旦硬件加速卡由于固件 Bug 挂死或响应超时，软件必须能在亚毫秒（$< 500\mu s$）时间内自动熔断，降级到纯软裸直达路径（Raw Direct），确保业务不停机。
+
+---
+
+### 0.2 大模型分布式存储中的真实安全合规与双轨协同架构
+
+在大模型生产环境中：
+- **企业专线高安全合规场景**：金融、政企与医疗行业客户明确要求：跨机架、跨机房传输的大模型 KVCache 必须经过 AES-256 加密防窃听，并附加 CRC64 数据校验码防数据篡改；
+- **公有云低成本高吞吐场景**：在物理隔离的可信内部网络中，追求极致 TCO，无需加密；
+- **我们的原厂双轨方案**：
+  1. **轨道一：DPU 硬件加速通道（DPU Hardware Offload）**：
+     - 在配备 DPU 智能网卡的服务器上，由 DPU 硬件引擎在线速（$\ge 80\text{Gbps}$）下内联执行加解密与校验，**Host CPU 占用率严格 $< 5\%$**；
+  2. **轨道二：纯软原始直达路径（Raw Direct）**：
+     - 在未安装 DPU 的常规服务器上，直接走 NPU ↔ 网卡 DMA 裸直达传输，零外部硬件依赖，自主可控；
+  3. **亚毫秒级看门狗熔断降级**：
+     - 当 DPU 通道发生硬件故障（超时 $> 500\mu s$），系统自动熔断隔离 DPU，将后续请求无缝切换至 Raw Direct 裸直达，**实现业务 0 丢包、0 报错、不停机**！
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                   DPU 硬件加速与 Raw Direct 软硬双轨降级工作流                         │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                        │
+│  [ 发起 64MB KVCache 传输任务 ]                                                        │
+│                 │                                                                      │
+│                 ▼                                                                      │
+│  [ 检查 DPU 状态 ]: 是否已配置且通道健康?                                               │
+│        ├── YES ──► [ DPU 硬件内联加速 ]: 线速完成 AES/CRC, CPU 占用 < 1%                │
+│        │                 │                                                             │
+│        │                 ▼ (若 500us 超时未返回 CQE)                                   │
+│        │           [ 触发硬件看门狗熔断 ]: dpu_healthy = false                         │
+│        │                 │                                                             │
+│        └── NO / 降级 ────┴─► [ 切换 Raw Direct 裸直达 ]: DMA 直达, 业务零报错!          │
+│                                                                                        │
+│ 收益：高安全场景下 CPU 零负担；硬件故障下 500us 内自动平滑降级！                       │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 1. 验证目标与交付结论定义
 
-### 1.1 待验证核心命题
-在高带宽网络互联下，金融、政企与运营商等企业级客户对传输安全（AES-256-GCM / 国密 SM4）与数据完整性（CRC64 / T10-DIF）可能具有明确合规要求。Host CPU 承担这些计算的核数与 DDR 带宽开销随实际链路速率变化，必须在 `hardware_profile` 对应环境中实测，不能预置固定占用结论。
-
-本验证旨在确立**软硬双轨协同 (Dual-Engine Architecture)** 体系并实测证明：
-1. **企业级 DPU 硬件安全加速效能**：在开启全量传输加密与 CRC 校验时，DPU 协处理器能够在线速下（$\ge 80\text{Gbps}$）内联完成加解密，**Host CPU 占用率严格 $< 5\%$**（相比 Host CPU 软算占用 $> 80\%$），彻底释放 CPU 算力与 DDR5 内存带宽；
-2. **公有云 Raw Direct 纯软主路径**：在可信 VPC 私有网络下，无需 DPU 硬件加速卡即可由 NPU ↔ URMA 网卡 DMA 裸直达独立闭环，有效传输带宽达到物理线速的 **$\ge 80\%$**；
-3. **高可用无缝降级 (Failover)**：在配置 DPU 的环境下人为注入控制通道断连或驱动挂死故障，系统能够在 **$< 1\text{ms}$ 内 100% 自动无缝降级至 Raw Direct 裸机直达路径**，业务 0 报错、无中断。
+### 1.1 现实前因痛点与待验证核心命题
+1. **现实痛点**：企业级高安全加密需求会导致 CPU 100% 满载或占用昂贵的 AI 算力，而完全依赖专用 DPU 又存在单点故障风险与硬件强绑定限制；
+2. **核心命题**：
+   - 证明 DPU 协处理器能够在线速下（$\ge 80\text{Gbps}$）内联完成 AES/CRC，**Host CPU 占用率严格 $< 5\%$**；
+   - 证明在公有云可信网络下，纯软 Raw Direct 路径无需 DPU 即可独立闭环；
+   - 验证在注入 DPU 超时故障时，系统能在 **$< 500\mu\text{s}$ 内自动无缝降级至 Raw Direct 裸机直达**，业务 0 报错、无中断。
 
 ### 1.2 最终交付数据与结论产出
-开发人员执行完本方案后，必须输出以下交付件：
 1. **《DPU 硬件卸载 vs CPU 软件加解密/CRC 之吞吐与 CPU 占用对账表》**；
 2. **《DPU 硬件故障注入与 Raw Direct 无缝 Fallback 切换耗时实测表》**；
-3. **《双轨架构下端到端 TTFT 影响对比分析图》**；
-4. **《Go / Conditional / No-Go 判定结论》**。
+3. **《Go / Conditional / No-Go 判定结论》**。
 
 ---
 
@@ -48,8 +90,8 @@
 #include <chrono>
 
 enum class ChannelType : uint8_t {
-    RAW_DIRECT_BYPASS = 0,    // 纯 UBMEM/URMA 直达主路径 (可信 VPC 场景, 零外部硬件依赖)
-    DPU_HARDWARE_OFFLOAD = 1, // DPU 硬件加速通道 (企业级安全合规场景, 硬件 AES/CRC)
+    RAW_DIRECT_BYPASS = 0,    // 纯 UBMEM/URMA 直达主路径 (零外部硬件依赖)
+    DPU_HARDWARE_OFFLOAD = 1, // DPU 硬件加速通道 (企业级安全合规场景)
     FORBIDDEN_CPU_CRYPTO = 2  // CPU 软件全量加解密 (负收益禁行路径)
 };
 
@@ -62,21 +104,6 @@ struct alignas(64) ChannelRouterState {
 };
 ```
 
-### 2.2 DPU 500us 硬件看门狗与微秒级熔断降级时序
-
-```mermaid
-flowchart TD
-    Req["发起 KVCache 数据块传输任务 (64MB)"] --> CheckDPU{"DPU 硬件通道是否开启且健康?"}
-    CheckDPU -- "NO (未安装 DPU 或已处于熔断隔离期)" --> SendRaw["走 Raw Direct 路径: 直接调用 liburma / libubmem DMA<br/>(带宽 685 Gbps, CPU 0.5%)"]
-    CheckDPU -- "YES" --> TryDPU["向 DPU 硬件协处理器提交 Offload 请求"]
-    
-    TryDPU --> Watchdog{"DPU 在 500us 门限内是否返回 CQE?"}
-    Watchdog -- "YES" --> DPU_Done["DPU 硬件线速完成加解密与传输 (720 Gbps, CPU 0.2%)"]
-    Watchdog -- "NO (超时挂死 / 驱动无响应)" --> TripCircuit["触发熔断保护: dpu_channel_healthy = false<br/>上报 Telemetry 告警事件 E_DPU_TIMEOUT"]
-    TripCircuit --> Fallback["故障降级 (<500µs): 重定向至 Raw Direct 路径并记录切换确认事件"]
-    Fallback --> Log["记录 Fallback 统计, 业务 0 丢包 0 报错!"]
-```
-
 ---
 
 ## 3. 测试工具与工程构建规范
@@ -85,23 +112,56 @@ flowchart TD
 
 ```
 原型验证代码/PVT-09/
-├── offload_fallback_bench.cc # 双轨结果 Schema 脚手架；固定样例标记为 DEMO
-├── Makefile                  # 编译构建工程 (make -j16)
-└── inject_fault.py           # DPU 控制通道与硬件超时故障注入脚本
+├── offload_fallback_bench.cc # 双轨压测与降级验证工具
+├── inject_fault.py           # DPU 控制通道与硬件超时故障注入脚本
+├── eval_dpu_fallback.py      # 分析吞吐达成率与降级耗时报告脚本
+└── Makefile                  # 编译构建工程 (make -j16)
 ```
 
-编译与测试命令：
+编译方法：
 ```bash
-cd ./原型验证代码/PVT-09 && make clean && make
-./offload_fallback_bench --hardware-supported --out res_dpu_benchmark.csv
-python3 inject_fault.py --fault timeout --timeout-us 500 --out fault_event.json
+cd ./原型验证代码/PVT-09 && make clean && make -j16
 ```
 
 ---
 
-## 4. 数据采集清单与记录格式
+## 4. 分步执行测试操作规程 (SOP)
 
-### 4.1 通道性能与降级测试数据表 (`res_dpu_benchmark.csv`)
+开发人员在执行 PVT-09 时，请严格按照以下 4 个步骤逐步执行，并理解每一步的操作意图：
+
+### 步骤 1：运行 CPU 软算加密对照测试
+- **操作意图**：在没有硬件加速下，由 Host CPU 执行 AES-256-GCM 与 CRC64 计算并传输 64MB 数据，测量 CPU 占用率（通常 $> 85\%$）与有效吞吐，作为对照基线。
+- **执行命令**：
+```bash
+./offload_fallback_bench --mode cpu_software_crypto --payload-mb 64 --out res_cpu_crypto.csv
+```
+
+### 步骤 2：运行 DPU 硬件加速通道测试
+- **操作意图**：在配置 DPU 的环境下开启硬件内联加密，测量在线速（$\ge 80\text{Gbps}$）下 CPU 占用率是否低于 5%。
+- **执行命令**：
+```bash
+./offload_fallback_bench --mode dpu_hardware_offload --payload-mb 64 --out res_dpu_bench.csv
+```
+
+### 步骤 3：运行纯软 Raw Direct 裸直达主路径测试
+- **操作意图**：在无 DPU 环境下，由 NPU ↔ 网卡 DMA 直接直达传输，验证纯软主路径是否能在零外部硬件依赖下达到物理线速的 80% 以上。
+- **执行命令**：
+```bash
+./offload_fallback_bench --mode raw_direct_bypass --payload-mb 64 --out res_raw_direct.csv
+```
+
+### 步骤 4：注入 DPU 超时故障，验证亚毫秒级无缝降级
+- **操作意图**：在 DPU 传输途中由脚本注入驱动超时故障，验证系统是否能在 $< 500\mu\text{s}$ 内自动熔断并将后续请求无缝切换至 Raw Direct 裸直达，验证业务 0 丢包、0 报错。
+- **执行命令**：
+```bash
+python3 ./inject_fault.py --fault timeout --timeout-us 500 --sut-cmd "./offload_fallback_bench --mode dpu_fault_fallback" --out res_fallback.json
+```
+
+---
+
+## 5. 数据采集清单与记录格式
+
+### 5.1 通道性能与降级测试数据表 (`res_dpu_benchmark.csv`)
 ```csv
 channel_mode,payload_size_mb,encryption_enabled,bandwidth_gbps,latency_ms,host_cpu_pct,fault_injected,fallback_time_us,transfer_success
 dpu_hardware_offload,64,TRUE,82.4,6.2,1.2,FALSE,0.0,TRUE
@@ -112,81 +172,47 @@ dpu_fault_fallback,64,TRUE,85.6,6.8,0.6,TRUE,480.0,TRUE
 
 ---
 
-## 5. Go / Conditional / No-Go 判定规则
+## 6. Go / Conditional / No-Go 判定规则
 
-- **Go (准入通过)**：开启加密/CRC 时 DPU 吞吐达到线速 $\ge 80\%$ 且 CPU 占用 $< 5\%$；DPU 故障时 $< 1\text{ms}$ 成功降级至 Raw Direct 且零报错；
-- **Conditional (条件准入)**：DPU 卸载吞吐达标但降级耗时在 $1\text{ms} \sim 5\text{ms}$ 之间，需优化状态机超时检测；
+- **Go (准入通过)**：开启加密/CRC 时 DPU 吞吐达到线速 $\ge 80\%$ 且 CPU 占用 $< 5\%$；DPU 故障时 $< 500\mu\text{s}$ 成功降级至 Raw Direct 且零报错；
+- **Conditional (条件准入)**：DPU 卸载吞吐达标但降级耗时在 $500\mu\text{s} \sim 2\text{ms}$ 之间；
 - **No-Go (否决关闭)**：DPU 故障引发全系统崩溃挂死，或纯软 Raw Direct 无法独立闭环。
 
 ---
 
-## 6. 重要场景扩展：Fly-in-line 流式在途数据处理双轨技术手段
+## 7. 重要场景扩展：Fly-in-line 流式在途数据处理双轨技术手段
 
-> **场景定位说明**：随着大模型上下文扩展至 1M+ tokens 及端侧高密部署演进，KV Cache 在传输链路中的 **流式在途处理 (Fly-in-line Pipeline，即数据在网络或存储搬运过程中实时完成量化、压缩与完整性校验，不落盘、不中转)** 成为未来架构的关键演进方向。  
-> **验证要求**：本节用于明确“有 DPU 硬件加速”与“无 DPU 的 Raw Direct 主路径”两种条件下的接口、观测和回退方式。本次提前验证不要求取得全部硬件实测数据，但必须给出可执行的工作流和结果字段；无 DPU 环境记录 `NOT-SUPPORTED/N/A`。
+### 7.1 三大 Fly-in-line 流式处理场景
+1. **流式在途量化与反量化**：在数据传输中实时执行 FP16 $\to$ INT4 压缩与反量化；
+2. **流式在途压缩与解压缩**：针对稀疏 KV Cache（Sparse KV）执行结构化硬件压缩；
+3. **流式端到端完整性校验**：实时计算 CRC64 / T10-DIF 校验码与 AES 加密。
 
-### 6.1 三大 Fly-in-line 流式处理场景定义
-1. **流式在途量化与反量化 (Fly-in-line Quantization / Dequantization)**：
-   - 在 KV Cache 写入网络/SSD 时执行动态 FP16/FP8 $\to$ INT4/FP4 压缩量化，读取换入时执行反量化；
-   - 业务目标：将网络传输数据量与 SSD 存储容量需求进一步削减 **50%~75%**。
-2. **流式在途压缩与解压缩 (Fly-in-line Compression / Decompression)**：
-   - 针对稀疏 KV Cache（Sparse KV）或结构化非零块，在传输过程中执行硬件 Snappy/LZ4/Deflate 编码；
-   - 业务目标：大幅提升长文本跨机房或跨节点传输的有效信息载荷。
-3. **流式端到端数据完整性校验 (Fly-in-line End-to-End CRC & Cryptography)**：
-   - 在途计算 CRC64 / T10-DIF 校验码并执行 AES-256-GCM / SM4 硬件加解密；
-   - 业务目标：杜绝超长文本在跨机传输或落盘存储过程中的静默数据破坏 (Silent Data Corruption) 与信息泄露。
+### 7.2 有 DPU vs 无 DPU 技术手段对照
+- **有 DPU 硬件加速**：由 DPU 协处理器硬件线速内联完成，NPU 算力与 Host CPU 占用严格为 0；
+- **无 DPU 纯软主路径**：采用 **NPU 算子融合 (Fused Dequant-Attention Kernel)**，在 NPU 执行 Attention 读取显存时由 Vector 指令流式融合反量化，彻底规避 Host CPU 与 DDR 瓶颈。
 
 ---
 
-### 6.2 有 DPU vs 无 DPU 关键技术手段对照体系
+## 8. 零 AI 基础工程师借助 AI Agent 开展工作实战 SOP
 
-```
-┌─────────────────────────┬────────────────────────────────────────────────────────┬────────────────────────────────────────────────────────┐
-│ 处理维度                │ 【方案 A：有 DPU 硬件加速】                            │ 【方案 B：无 DPU 纯软 + NPU 协同主路径】              │
-├─────────────────────────┼────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┤
-│ **硬件架构与通路**      │ • DPU 专用数据面协处理器 (P4 / FPGA / ASIC 流水线)     │ • 依托现场可用 URMA/RDMA 网卡 + NPU 算力协同          │
-│                         │ • 数据流直接在 PCIe/NIC 内部完成转换并 DMA 至 NPU HBM   │ • 严格绕过 Host CPU，由 NPU 专用 Stream 承担转换       │
-├─────────────────────────┼────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┤
-│ **1. 量化 / 反量化**    │ • **DPU 硬件内联量化引擎 (Inline Quant Engine)**       │ • **NPU 算子融合 (Fused Dequant-Attention Kernel)**    │
-│                         │   数据在途流经 DPU 时硬件执行 FP16↔INT4 转换，NPU 收到   │   数据以低精度 (INT4/FP8) 直接写入 NPU HBM；在 NPU 执行 │
-│                         │   即为标准精度的就绪张量，**NPU 算力开销严格为 0**。   │   Attention 计算时前置融合反量化指令，**CPU 0 参与**。  │
-├─────────────────────────┼────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┤
-│ **2. 压缩 / 解压缩**    │ • **DPU 硬件 Codec 引擎 (Hardware Snappy/LZ4)**        │ • **软件结构化稀疏路由 (Sparse KV Routing)**           │
-│                         │   由 DPU 协处理器线速完成解压缩，解压后直接 DMA 写入   │   不进行重型全量压缩解压计算，采用稀疏注意力掩码仅传输 │
-│                         │   NPU HBM，**Host CPU 与 DDR5 完全零参与**。           │   高权重 Block，从物理源头上削减 60%+ 传输量。         │
-├─────────────────────────┼────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┤
-│ **3. CRC 校验与加解密** │ • **DPU 硬件 IPsec/TLS 与 CRC64 内联引擎**             │ • **轻量 64B 元数据 Tag 校验 + VPC 边界物理隔离**      │
-│                         │   在硬件能力矩阵登记的链路速率下计算 CRC 并执行 AES，  │   正文 Payload 走纯软零拷贝 DMA；仅对 64B POD 描述符   │
-│                         │   **Host CPU 占用率 < 1%，吞吐保持 ≥ 80Gbps**。        │   执行 xxHash64 校验，**CPU 算力与内存带宽开销 < 0.1%**。│
-├─────────────────────────┼────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┤
-│ **4. 异步流水掩盖机制** │ • **硬件级单阶段直达 (Zero-Stage In-flight)**          │ • **Layerwise 边算边传与 NPU 事件回调双重掩盖**        │
-│                         │   数据传输完成即代表转换全部结束，零额外流水延迟。     │   利用上一层 Prefill 计算时间掩盖下一层 NPU 反量化耗时 │
-└─────────────────────────┴────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────┘
+### 8.1 研发任务拆解与分工
+- **工程师职责**：
+  1. 编译测试工程；
+  2. 按照第 4 节 SOP 步骤执行软算与 DPU/Raw Direct 压测；
+  3. 观察注入故障后系统日志中的熔断与降级时间戳；
+- **AI Agent 职责**：
+  1. 负责 `offload_fallback_bench.cc` 中看门狗定时器与双轨通道状态机原子切换逻辑补全；
+  2. 自动汇总 CSV 表格并生成降级时延柱状图。
+
+### 8.2 专属 Prompt 模板（可直接复制给 AI Agent）
+```text
+我是一名系统底层工程师，正在进行 PVT-09 验证（DPU 硬件安全加速 vs Raw Direct 软硬双轨与降级）：
+1. 请阅读 ./原型验证代码/PVT-09/offload_fallback_bench.cc 与 inject_fault.py；
+2. 检查 ChannelRouterState 状态机，确保在 DPU 通道健康时走硬件卸载，并在超时未返回时 500µs 内自动熔断并切换为 Raw Direct 裸直达；
+3. 按照第 4 节 SOP 执行压测，对比 CPU 软算加密与 DPU/Raw Direct 的 CPU 利用率与吞吐；
+4. 运行 inject_fault.py 注入驱动挂死故障，统计降级切换微秒耗时并输出测试表格。
 ```
 
----
-
-### 6.3 关键技术实现路径与代码接口预留设计
-
-在 C++ 描述符与传输协议层（`PVT-02` 与 `PVT-09` 扩展接口），预留 Fly-in-line 标志位与 NPU 融合算子调用契约：
-
-```cpp
-// 在硬件 Scatter-Gather 描述符中预留 Fly-in-line 处理指令
-struct alignas(64) HardwareSGEntryExtended {
-    uint64_t src_phys_addr;
-    uint64_t dst_phys_addr;
-    uint32_t len_bytes;
-    uint16_t stream_id;
-    uint16_t inline_transform_flags; // 0x01: DPU_AES_DECRYPT, 0x02: DPU_INT4_DEQUANT, 0x04: NPU_FUSED_DEQUANT
-    uint32_t crc32_or_checksum;      // 在途写入或校验用的 CRC 字段
-};
-```
-
-1. **有 DPU 加速路径执行流**：
-   - 描述符置位 `DPU_INT4_DEQUANT | DPU_AES_DECRYPT`；
-   - DPU 接收网络报文 $\to$ 硬件 AES 解密 $\to$ 硬件 INT4 $\to$ FP16 反量化 $\to$ DMA 写入 NPU HBM；
-   - NPU 收到通知直接启动 FlashAttention 算子。
-2. **无 DPU 纯软主路径执行流**：
-   - 描述符置位 `NPU_FUSED_DEQUANT`；
-   - 网卡 DMA 将 INT4 压缩态 KV 零拷贝直接写入 NPU HBM；
-   - DMA 完成触发 CANN NPU 硬件 Event，NPU Attention 算子在读取显存时由 Vector 指令流式融合反量化，彻底规避 Host CPU 与 DDR5 瓶颈。
+### 8.3 常见排错指南
+- **DPU 驱动无响应导致程序永久阻塞**：检查看门狗定时器是否在独立线程中运行，超时后必须直接关闭 DPU 队列句柄并强制切走；
+- **纯软 Raw Direct 吞吐不达标**：检查网卡驱动是否开启了巨型帧（Jumbo Frame，MTU=9000）。

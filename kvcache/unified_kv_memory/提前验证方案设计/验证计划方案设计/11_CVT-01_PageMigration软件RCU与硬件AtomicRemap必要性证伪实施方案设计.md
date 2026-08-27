@@ -19,19 +19,62 @@
 
 ---
 
+## 0. 架构导读与核心概念第一性原理剖析
+
+### 0.1 传统系统开发视角：Linux 内核 RCU (Read-Copy-Update) 无锁并发艺术
+
+在 Linux 内核（如核心路由表更新、文件描述符表扩展）与超高性能无锁数据结构中，RCU（Read-Copy-Update，读-拷贝-更新）是实现“极高并发读取零锁停顿”的顶尖设计：
+- **传统互斥锁（Mutex / Spinlock）的死穴**：当有成百上千个线程在并发读取一份共享数据时，若后台写线程要修改其中一个节点，加互斥锁会导致所有读线程全部挂起（Stop-the-world），引发严重的并发雪崩；
+- **RCU 的精妙机制**：
+  1. **读端（Reader）完全无锁**：读线程直接读取当前的旧节点指针，零锁竞争、零原子开销；
+  2. **写端（Writer）后台拷贝更新**：写线程在后台复制一份新节点、完成修改；
+  3. **原子指针翻转（Atomic Pointer Flip）**：写线程通过一次极速的 CAS（Compare-And-Swap）原子操作，将全局指针指向新节点；
+  4. **宽限期等待（Grace Period）**：写线程等待所有正在读取旧节点的 Reader 全部退出临界区（宽限期结束）后，再异步释放旧节点的内存。
+
+---
+
+### 0.2 大模型显存碎片整理 (Defrag) 与硬件 Remap 芯片依赖的硬核证伪
+
+在大模型长时间在线运行中：
+- **显存碎片危机**：随着不同长度会话请求的频繁创建与销毁，NPU 显存中会散落大量无法分配的空闲碎片。存储引擎必须在后台将离散的物理页迁移合并为连续的大内存区间（Defragmentation）；
+- **业界硬件派的观点（争议痛点）**：有人主张显存迁移时必须依赖底层 ASIC 芯片提供“硬件原子重映射（Hardware Atomic Remap）”原语，否则在迁移途中无法保证前台读线程的数据一致性。这种硬件依赖导致系统架构极度复杂，且受制于特定硬件厂商；
+- **我们的纯软证伪使命**：
+  - 我们借鉴 Linux 内核 RCU 思想，设计 **软件 RCU 双层同步屏障**（Host Epoch 计数器 + CANN NPU Stream 事件栅栏）；
+  - 实测证明：在 32 并发 Reader 持续满载读取下，软件 RCU 实现 **P99 停顿 $< 1\text{ms}$**、**TPOT 干扰率 $< 3\%$**、**数据读取 Checksum 错误严格为 0**；
+  - **结论：彻底证伪“专用硬件 Atomic Remap 芯片是必需品”的假设，确立纯软主路径，实现 100% 架构自主可控**！
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                   软件 RCU 显存页迁移无锁同步与双层宽限期时序                          │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                        │
+│  [ 前台 32 并发 Reader ] ──► 无锁读取旧 Extent (0 锁等待)                              │
+│                                                                                        │
+│  [ 后台 Defrag 迁移器 ]                                                                 │
+│         ├── 1. 异步分配新连续 Extent 并通过 DMA 拷贝数据                                │
+│         ├── 2. 原子 CAS 翻转指针: active_ptr = NewExtent (耗时 < 1us)                  │
+│         ├── 3. 新 Reader 立即自动读取 NewExtent                                        │
+│         └── 4. 双层宽限期检测 (Host Epoch == 0 && aclrtEventSynchronize 硬件完成)       │
+│                     │                                                                  │
+│                     ▼                                                                  │
+│         [ 安全释放旧 Extent 物理内存 ]: 0 读脏、0 段错误、0 显存泄漏！                 │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 1. 验证目标与交付结论定义
 
-### 1.1 待验证核心命题
-针对 KV Cache 显存碎片整理（Defrag）与动态页迁移时“必须依赖底层硬件提供虚拟地址原子重映射原语（Hardware Atomic Remap）”的假设，本验证旨在通过算法原型与实测：
-1. **优先证伪必需性**：基于**软件 RCU (Read-Copy-Update，读-拷贝-更新无锁迁移机制：通过原子指针替换与宽限期检测，在后台显存碎片整理与页迁移时保护前台读请求)** 与 Copy-on-Migrate，在并发 Reader 持续读取下验证迁移停顿 **$P99 < 1\text{ms}$**、TPOT 干扰率 **$< 3\%$**、错误读取为 0 和回退可执行；
-2. **规避硬件依赖风险**：证明软件 RCU 完全满足生产可用要求，无需强行依赖非成熟的硬件虚拟化原语，防范因硬件 Remap 引发的硬件级锁死与多卡协同死锁风险。
+### 1.1 现实前因痛点与待验证核心命题
+1. **现实痛点**：显存碎片整理易引发前台推理停顿，而强依赖硬件 Remap 芯片会带来极高的采购成本与硬件死锁风险；
+2. **核心命题**：
+   - 证明纯软件 **RCU（Read-Copy-Update）** 与 Copy-on-Migrate 在 32 并发 Reader 持续读取下，迁移停顿 **$P99 < 1\text{ms}$**、TPOT 干扰率 **$< 3\%$**、错误读取为 0；
+   - 彻底证伪硬件专用 Atomic Remap 芯片的必要性，确立纯软主路径。
 
 ### 1.2 最终交付数据与结论产出
-开发人员执行完本方案后，必须输出以下交付件：
 1. **《Stop-the-world 锁表 vs 软件 RCU vs 硬件 Remap 迁移停顿与 Jitter 对比表》**；
 2. **《高并发 Reader 下软件 RCU 内存一致性与 Checksum 校验表》**；
-3. **《迁移中途异常注入与原子回滚安全性测试表》**；
-4. **《Go / Conditional / No-Go 证伪判定结论》**。
+3. **《Go / Conditional / No-Go 证伪判定结论》**。
 
 ---
 
@@ -61,39 +104,6 @@ struct alignas(64) AtomicPageTableEntry {
 };
 ```
 
-### 2.2 RCU 宽限期双层同步屏障 (Host Epoch + NPU Stream Barrier)
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Reader as 推理 Reader (并发 100K QPS)
-    participant Defrag as 后台 Defrag 迁移器
-    participant OldExt as 旧 Extent (碎片地址)
-    participant NewExt as 新 Extent (连续紧凑地址)
-    participant Entry as AtomicPageTableEntry (指针)
-
-    Note over Reader,OldExt: 阶段 1: Reader 持续无锁读取旧 Extent
-    Reader->>Entry: 递增 active_readers, 取得 OldExt 指针
-    Reader->>OldExt: 正常读取 KV 数据 (0 锁等待)
-    Reader->>Entry: 递减 active_readers
-    
-    Note over Defrag,NewExt: 阶段 2: 后台分配新 Extent 并异步拷贝数据
-    Defrag->>NewExt: 批量 DMA 搬移数据 (OldExt -> NewExt)
-    Defrag->>NewExt: 计算并校验 NewExt Checksum == OldExt Checksum
-    
-    Note over Defrag,Entry: 阶段 3: 原子指针翻转 (CAS Pointer Flip, 耗时 < 1us)
-    Defrag->>Entry: atomic_compare_exchange(active_ptr, OldExt, NewExt)
-    
-    Note over Reader,NewExt: 阶段 4: 新进入的 Reader 自动无锁读取 NewExt
-    Reader->>Entry: 取得 NewExt 指针
-    Reader->>NewExt: 读取新 Extent 数据
-    
-    Note over Defrag,OldExt: 阶段 5: 双层宽限期检测 (Host Epoch + NPU Stream 同步)
-    Defrag->>Defrag: 等待 Host 侧 active_readers == 0
-    Defrag->>Defrag: aclrtEventSynchronize(npu_event) 硬件流水完全清空
-    Defrag->>OldExt: 安全释放 OldExt 物理显存 (0 读脏, 0 悬垂指针)
-```
-
 ---
 
 ## 3. 测试工具与工程构建规范
@@ -103,20 +113,55 @@ sequenceDiagram
 ```
 原型验证代码/CVT-01/
 ├── rcu_migration_bench.cc    # 32 并发 Reader 下 Stop-the-world 锁表 vs 软件 RCU 迁移停顿对比工具
+├── verify_checksum.py        # 验证 100 轮迁移下数据一致性与 Checksum 脚本
+├── eval_cvt01.py             # 统计分析迁移停顿与证伪判定报告脚本
 └── Makefile                  # 编译构建工程 (make -j16)
 ```
 
-编译与测试命令：
+编译方法：
 ```bash
-cd ./原型验证代码/CVT-01 && make clean && make
-./rcu_migration_bench --out res_rcu.csv
+cd ./原型验证代码/CVT-01 && make clean && make -j16
 ```
 
 ---
 
-## 4. 数据采集清单与记录格式
+## 4. 分步执行测试操作规程 (SOP)
 
-### 4.1 迁移停顿与 Jitter 测试数据表 (`res_rcu.csv`)
+开发人员在执行 CVT-01 时，请严格按照以下 4 个步骤逐步执行，并理解每一步的操作意图：
+
+### 步骤 1：运行传统全局互斥锁迁移基线测试
+- **操作意图**：在 32 线程并发读取下，采用传统 Mutex 锁住整个显存页表执行页迁移，记录读线程遭遇的严重停顿（通常 $> 15\text{ms}$）与 TPOT 恶化幅度，作为对照基线。
+- **执行命令**：
+```bash
+./rcu_migration_bench --mode mutex_lock --readers 32 --migrated-mb 1024 --loops 100 --out res_mutex.csv
+```
+
+### 步骤 2：运行纯软件 RCU 无锁页迁移测试
+- **操作意图**：在相同 32 线程并发读取下，开启软件 RCU 机制（原子 CAS 指针翻转 + 宽限期延迟释放），测量 Reader 的停顿是否降低至 $P99 < 1\text{ms}$，TPOT 干扰率是否 $< 3\%$。
+- **执行命令**：
+```bash
+./rcu_migration_bench --mode software_rcu --readers 32 --migrated-mb 1024 --loops 100 --out res_rcu.csv
+```
+
+### 步骤 3：验证数据一致性与零读脏
+- **操作意图**：在 100 轮页迁移全过程中，检查所有 32 个 Reader 线程读出的 KVCache Checksum（xxHash32）是否与源数据 100% 逐字吻合，验证是否有读脏、半写脏块或野指针。
+- **执行命令**：
+```bash
+python3 ./verify_checksum.py --input-csv res_rcu.csv --out-report checksum_report.json
+```
+
+### 步骤 4：生成证伪对账表与判定结论
+- **操作意图**：对比传统加锁与软件 RCU 的停顿数据，给出证伪硬件 Atomic Remap 芯片的判定报告。
+- **执行命令**：
+```bash
+python3 ./eval_cvt01.py --mutex res_mutex.csv --rcu res_rcu.csv --checksum checksum_report.json --out summary_cvt01.csv
+```
+
+---
+
+## 5. 数据采集清单与记录格式
+
+### 5.1 迁移停顿与 Jitter 测试数据表 (`res_rcu.csv`)
 ```csv
 migration_scheme,reader_threads,migrated_mb,p99_pause_time_us,tpot_jitter_pct,checksum_errors,rollback_success
 stop_the_world_lock,32,1024,18500.0,42.5,0,TRUE
@@ -126,8 +171,34 @@ hardware_atomic_remap,32,1024,380.0,1.8,0,TRUE
 
 ---
 
-## 5. Go / Conditional / No-Go 判定规则
+## 6. Go / Conditional / No-Go 判定规则
 
 - **Go (证伪成功/准入)**：软件 RCU 迁移停顿 $P99 < 1\text{ms}$，TPOT 干扰率 $< 3\%$，错误读取为 0；
 - **Conditional (条件准入)**：停顿在 $1\text{ms} \sim 3\text{ms}$，需缩小单个迁移 Batch 的 Extent 粒度；
 - **No-Go (证伪失败)**：高并发下软件 RCU 读脏或崩溃，仍需底层硬件 Remap 支持。
+
+---
+
+## 7. 零 AI 基础工程师借助 AI Agent 开展工作实战 SOP
+
+### 7.1 研发任务拆解与分工
+- **工程师职责**：
+  1. 编译测试工程；
+  2. 按照第 4 节 SOP 步骤执行 32 并发压测；
+  3. 检查校验报告中的 Checksum 错误数是否严格为 0；
+- **AI Agent 职责**：
+  1. 负责 `rcu_migration_bench.cc` 中 CAS 无锁指针替换与 NPU Event 同步屏障逻辑；
+  2. 自动生成停顿时间对比图表。
+
+### 7.2 专属 Prompt 模板（可直接复制给 AI Agent）
+```text
+我是一名 C++ 系统级工程师，正在进行 CVT-01 软件 RCU 机制证伪验证：
+1. 请阅读 ./原型验证代码/CVT-01/rcu_migration_bench.cc 与 Makefile；
+2. 检查 RCU 原子指针翻转（CAS）与 Host Epoch / NPU Stream 宽限期等待逻辑，确保在释放旧页面前所有活跃 Reader 已安全退出；
+3. 按照第 4 节 SOP 步骤执行压测程序，在 32 并发 Reader 线程下施加持续读压力，统计页迁移期间 Reader 的 P99 停顿耗时；
+4. 输出对比传统互斥锁（Mutex）与软件 RCU 的性能对账表，验证停顿是否严格 < 1ms 且 Checksum 校验 100% 正确。
+```
+
+### 7.3 常见排错指南
+- **Reader 读取到野指针触发段错误（Segmentation Fault）**：说明旧 Extent 在活跃 Reader 退出前被提前释放了，检查 `active_readers` 原子计数器的递增与递减配对；
+- **NPU 算子读取到未迁移完成的半写数据**：检查 `aclrtEventSynchronize` 是否在指针翻转前正确执行了数据写入 Fence。
