@@ -1,24 +1,32 @@
 # PVT-03：Direct-View 与 Copy-to-HBM 适用边界与 ViewGuard 验证实施方案设计
-## —— 远端直读与本地显存拷贝的成本交叉、Decode 适用边界和故障回退
+## —— 远端直读与本地显存拷贝的成本交叉、Decode 适用边界和故障安全回退
 
-> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。Direct-View 与 Copy-to-HBM 的性能边界、ViewGuard 租约有效性和远端故障回退必须分别判定；公式输入、固定示意数值和本地模拟不能作为 SIGBUS 捕获、设备流重置或业务连续性的证据。
+> **公共执行契约**：本项严格遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。Direct-View（远端直读）与 Copy-to-HBM（拷贝到本地显存）的性能适用边界、ViewGuard（视图租约安全守卫机制）租约有效性以及远端节点故障安全回退机制必须独立记录并分别判定；严禁将纯公式推导输入、固定示意数值或单机本地模拟作为证明 SIGBUS 异常捕获、加速器硬件 Stream 安全重置或在线业务连续性的有效依据。
 
-> **验证范围声明**：当前受控工程中的 `view_vs_copy_bench.cc` 只使用命令行提供的 `t_dma_copy_ms`、`t_local_hbm_read_ms` 和 `t_remote_view_read_ms` 计算两条路径的累计时间，没有访问远端内存或本地 HBM；`benchmark_serving_view.py` 生成固定公式和随机扰动的 DEMO JSON，不连接推理服务；`view_guard.cc` 只实现租约创建、有效性检查和撤销，`handle_remote_crash_fallback()` 明确返回 `false`，没有安装 SIGBUS handler，也没有 `sigsetjmp/siglongjmp`、NPU Stream 重置或本地重算回退。当前代码只能示范成本模型、租约字段和失败边界，不能单独关闭 E1/E2 的性能或容错结论。
+> **验证范围声明**：在当前受控的原型验证工程中，`view_vs_copy_bench.cc` 仅根据命令行传入的 `t_dma_copy_ms`、`t_local_hbm_read_ms` 及 `t_remote_view_read_ms` 参数进行理论公式累加，并未实际访问远端节点内存或本地 HBM；`benchmark_serving_view.py` 仅依据固定公式与随机扰动生成 DEMO 级别的 JSON 输出，未实际对接推理服务引擎；`view_guard.cc` 仅实现了本地租约的创建、有效性基础检查与主动撤销，其 `handle_remote_crash_fallback()` 接口固定返回 `false`，尚未安装真正的操作系统 SIGBUS 信号处理 Handler，亦未集成 `sigsetjmp/siglongjmp` 上下文恢复、NPU Stream 异常终止或本地自动重算回退机制。因此，现有受控源码仅用于演示成本模型计算、租约元数据结构与异常拦截边界，不可直接作为关闭 E1/E2 阶段性能边界或生产级容错结论的依据。
 
-> **术语速查**：Direct-View（远端直读，即直接通过高速总线读取远端 KV 数据，不先产生本地显存完整副本）；Copy-to-HBM（拷贝到本地显存，即通过 DMA 将远端 KV 数据完整搬运到本地 HBM）；SVM（Shared Virtual Memory，共享虚拟内存，使设备或进程访问统一虚拟地址空间）；SIGBUS（总线错误信号，访问失效映射或设备总线无响应时可能由操作系统发送）；ViewGuard（视图租约安全守卫机制，负责租约有效期、访问资格和故障回退）；Crossover Point（成本交叉点，即两条路径总耗时相等的重读次数）；TPOT（Time Per Output Token，每个输出 Token 的生成耗时）；TTFT（Time To First Token，首字生成延迟）；Lease（租约，即在限定时间内允许读取某个远端对象的授权记录）。
+> **术语速查**：
+> - **Direct-View**：远端直读（直接通过高速互联总线跨节点读取远端显存中的 KV 数据，不产生本地显存完整副本）；
+> - **Copy-to-HBM**：拷贝到本地显存（通过 DMA 将远端 KV 数据完整搬运至本地高带宽显存 HBM 中）；
+> - **SVM**：Shared Virtual Memory（共享虚拟内存：支持异构设备或分布式进程访问统一虚拟地址空间的内存机制）；
+> - **SIGBUS**：总线错误信号（当进程访问物理总线未响应、非法映射或已失效的远端显存时由操作系统内核发送的同步硬件异常信号）；
+> - **ViewGuard**：视图租约安全守卫机制（负责远端直读生命周期管理、访问租约有效性校验、SIGBUS 信号安全捕获及故障自动回退的系统保护机制）；
+> - **Crossover Point**：成本交叉点（远端直读累加耗时与本地显存拷贝总耗时相等的临界读取次数）；
+> - **TTFT**：Time To First Token（首字生成延迟 / 首 Token 响应时间）；
+> - **TPOT**：Time Per Output Token（每个输出 Token 的生成耗时 / 单字生成延迟）；
+> - **Lease**：租约（在严格限定时间窗口内允许特定请求读取特定远端对象的授权凭证）。
 
 > **验证 ID**：PVT-03
 > **验证名称**：Direct-View 与 Copy-to-HBM 适用边界及 ViewGuard 安全验证
 > **验证优先级**：**🟡 P1 级（路径选择与安全支撑项）**
-> **对应验证阶段**：**E1（核心数据路径）/ E2（动态调度决策与分层扩容）**
-> **证伪标记**：**是（证伪“Decode 活跃 KV 默认适合 Direct-View 远端读取”）**
-> **建议周期**：4~6 人日
+> **对应验证阶段**：**E1（核心数据路径打通）/ E2（动态调度决策与分层扩容）**
+> **证伪标记**：**是（证伪“Decode 活跃阶段的 KVCache 默认适合 Direct-View 远端直读”）**
 > **主关联 IR**：`IR-01-07`, `IR-02-04`, `IR-02-05`
 > **核心 SRS / SR23 锚点**：
 > - SRS：`L1-OL-ViewVsCopy-011`, `L2-MM-ViewLease-028`, `L3-SE-ViewCopyCostModel-034`, `L3-MS-UBC2CTier-055`
 > - SR23：`SR23-01-07-01`, `SR23-01-10-01`, `SR23-02-04-01`, `SR23-02-05-02`
-> **配套源码**：[`提前验证方案设计/验证计划方案设计/原型验证代码/PVT-03/`](file:///d:/codes/reports/kvcache/unified_kv_memory/提前验证方案设计/验证计划方案设计/原型验证代码/PVT-03)
-> **开源基线版本**：Mooncake `f90ae691f109e49a60920e0c8abbf7e572826d8c`；vLLM `842dd8fd96650063e1ad32e6075742d457d39773`。正式结果必须以现场设备、驱动、框架和配置哈希为准。
+> **配套源码**：[`./原型验证代码/PVT-03/`](./原型验证代码/PVT-03/)
+> **开源基线版本**：Mooncake `f90ae691f109e49a60920e0c8abbf7e572826d8c`；vLLM `842dd8fd96650063e1ad32e6075742d457d39773`。正式测试结果必须以现场硬件设备、驱动版本、推理框架及配置哈希为准。
 
 ---
 
@@ -26,45 +34,47 @@
 
 ### 0.1 传统系统视角：`mmap` 直读与本地缓存拷贝的取舍
 
-在操作系统和数据库中，远端 `mmap`/共享内存直读与一次性 `read()` 到本地 Buffer 是两种典型策略：
+在经典操作系统与高性能数据库系统中，远端 `mmap`/共享内存直读与一次性 `read()` 拷贝至本地缓存是两种经典的访问策略：
 
 ```text
-直读：       建立映射/授权 → 每次访问穿过总线或网络
-本地拷贝：   一次性搬运到本地 → 后续访问走本地高速内存
+远端直读 (Direct-View) : 建立映射与租约授权 ────────► 每次数据访问均直接跨越总线或物理网络
+本地拷贝 (Copy-to-HBM) : 一次性通过 DMA 搬运至本地 ──► 后续所有重读操作均访问本地超高速内存
 ```
 
-直读省去一次完整拷贝，适合只读一次或重读次数很少的场景；本地拷贝需要额外显存和一次搬运，却把后续重读转为本地 HBM 访问。哪条路径更快取决于数据大小、远端访问带宽、固定建立开销、本地 HBM 带宽和重读次数，不能用“远端延迟低”单独决定。
+远端直读免去了一次性完整数据拷贝的开销与本地显存占用，非常适合只读取一次或重读频次极低的数据访问；而本地拷贝虽然引入了一次性搬运时延并占用本地显存，但能够将后续高频重读的访存带宽提升至本地高带宽显存 (HBM) 的物理极限。究竟哪一条路径具有更低的综合耗时，严格取决于传输数据量 (Payload)、远端总线访问带宽、固定建立时延、本地 HBM 访存带宽以及后续重读次数的联合函数，绝不能单凭“远端直读无需拷贝”的主观直觉盲目选用。
 
 ### 0.2 大模型推理中的对应物理问题
 
-KVCache（大模型注意力键值缓存，即自回归生成过程中保存历史 Key 和 Value 激活状态、避免后续 Token 重复计算注意力）在 Prefill（首字生成预计算，即对完整 Prompt 做输入理解并生成首个输出 Token 前的计算阶段）和 Decode（逐 Token 生成阶段，即基于历史 KVCache 反复生成后续 Token）中的访问模式不同：
+KVCache（大模型注意力键值缓存，即自回归生成过程中缓存的历史 Key 与 Value 激活状态张量，用于避免后续 Token 生成时重复计算注意力）在 Prefill（首字生成预计算阶段）与 Decode（逐字生成阶段）两个阶段展现出截然不同的访存动力学特征：
 
-- Prefill 通常对一段历史上下文进行一次大范围扫描，Direct-View 可能节省一次完整搬运；
-- Decode 每生成一个 Token 都要再次访问历史 KVCache，远端每次访问的固定时延和带宽限制会被输出 Token 数放大；
-- `Copy-to-HBM` 以一次性搬运换取后续本地带宽，但会占用本地显存并增加初始 TTFT；
-- 适用边界必须由相同 workload、相同设备、相同数据和真实路径事件计算，示意数值只能用于说明量纲。
+- **Prefill 阶段**：通常对一段超长的历史 Prompt 上下文执行单次大范围注意力计算，采用 Direct-View 远端直读能够直接节省一次超长上下文的全量搬运耗时；
+- **Decode 阶段**：每生成一个新的输出 Token，计算核心都必须对全量历史 KVCache 重新遍历执行一次注意力计算；若采用远端直读，跨节点总线的固定访问时延与有限网络带宽将被生成的输出 Token 数量成倍放大；
+- **Copy-to-HBM 路径**：以一次性 DMA 搬运成本换取了 Decode 阶段本地 HBM 的极致读带宽，但会占用本地显存容量并略微增加初始的首字生成延迟 (TTFT)；
+- **物理适用边界**：两条路径的优劣分界必须基于相同工作负载、相同硬件设备、相同数据规模及真实的底层硬件事件进行量化测算，文档中的示意数值仅用于交代计算量纲。
 
-### 0.3 为什么需要 ViewGuard
+### 0.3 为什么需要 ViewGuard 视图守卫机制
 
-Direct-View 的数据地址或租约依赖远端对象。如果远端节点故障、映射撤销、链路中断或租约过期，本地设备继续访问可能触发总线错误。生产级保护至少需要：
+Direct-View 远端直读的物理基地址与生命周期强依赖于远端物理节点的显存对象。一旦远端节点发生物理宕机、进程异常崩溃、显存映射被主动撤销、物理通信链路中断或租约过期，本地加速器在执行跨节点内存读取时将直接触发物理总线超时或操作系统同步硬件异常 (SIGBUS)。
 
-1. 访问前检查租约有效位、对象、地址范围和过期时间；
-2. 访问窗口内关联请求、线程和设备 Stream；
-3. 故障发生后撤销租约，阻止后续消费；
-4. 捕获并记录可归因的 SIGBUS/设备错误；
-5. 安全重置挂起的设备队列，并把请求回退到 Copy-to-HBM 或本地重算；
-6. 保存故障地址、时间、错误码、回退结果和进程状态。
+生产级环境下的 ViewGuard 必须构筑以下完整的软硬件协同保护链路：
 
-这是一条跨 CPU、设备和远端节点的故障链。单独返回 `false` 或打印一行日志，不能证明进程没有崩溃，也不能证明数据已经安全回退。
+1. **前置微秒级校验**：在发起访存前严格校验租约有效位、对象唯一标识、物理地址空间范围及到期时间戳；
+2. **请求与队列绑定**：在访问时间窗口内，将租约与发起线程、请求上下文及加速器执行 Stream 严格关联；
+3. **故障主动隔离**：在捕获到远端故障时瞬间将租约标记为失效，坚决阻断后续请求继续消费；
+4. **信号安全捕获**：在操作系统内核层精准捕获并隔离针对失效远端显存访问触发的 SIGBUS 异常；
+5. **硬件队列重置**：安全中止并重置挂起的加速器硬件队列，将受影响的请求无缝回退至 Copy-to-HBM 或本地直接重算；
+6. **故障审计追踪**：完整持久化记录故障发生时的物理地址、时间戳、硬件错误码、回退路径及进程健康状态。
+
+这是一条跨越 CPU、加速卡驱动及远端物理节点的完整故障恢复链。仅仅在应用层返回 `false` 或输出一行日志，绝不能证明进程不会异常崩溃，亦无法保证推理业务的平稳连续。
 
 ### 0.4 当前配套工程能够证明什么，不能证明什么
 
-| 子实验 | 当前源码能够完成的动作 | 当前源码不能直接证明的内容 | 当前默认证据 |
+| 验证子项 | 当前受控源码能够完成的执行动作 | 当前受控源码尚不能证明的内容 | 默认证据等级 |
 |---|---|---|---|
-| View-vs-Copy 成本模型 | 对固定 read count 计算两条公式路径总时间和较优路径 | 远端总线读、本地 DMA、HBM 读、实际 TTFT/TPOT | `DEMO / W0` |
-| 租约创建/校验 | 记录对象、远端地址、长度、过期时间和原子有效位；可撤销租约 | 远端映射、地址权限、并发引用安全、故障期间访问 | `DEMO / W0` |
-| 故障回退接口 | 打印 `DEMO_ONLY`，返回 `false` | SIGBUS 捕获、NPU Stream Abort、进程不崩溃、本地重算和请求连续性 | `NOT-SUPPORTED` |
-| 服务对照脚本 | 生成 View/Copy 的合成 TTFT 和 TPOT 分位数 | 真实推理端点、远端读、显存占用、Decode 事件和故障安全 | `DEMO / W0` |
+| View-vs-Copy 成本模型 | 针对固定的读取次数数组，基于纯数学公式计算两条路径的累加耗时并输出较优路径 | 远端总线直读、本地 DMA 搬运、本地 HBM 实测读耗时以及实际业务 TTFT/TPOT | `DEMO / W0` |
+| 租约创建与基础校验 | 记录对象 ID、远端地址、字节长度、到期时间并设置原子有效位；支持主动撤销租约 | 远端硬件地址映射、显存访问权限控制、高并发引用安全以及故障注水期间的拦截 | `DEMO / W0` |
+| 故障回退接口 | 在控制台输出 `DEMO_ONLY` 提示信息，函数固定返回 `false` | SIGBUS 信号捕获、NPU Stream 安全重置、进程存活性保障、本地重算回退及业务连续性 | `NOT-SUPPORTED` |
+| 服务模拟评测脚本 | 依据固定公式与随机分布生成 View 与 Copy 模式下的合成 TTFT 与 TPOT 分位数 | 真实大模型推理端点对接、物理远端直读、动态显存占用、真实 Decode 事件及故障安全 | `DEMO / W0` |
 
 ---
 
@@ -72,73 +82,91 @@ Direct-View 的数据地址或租约依赖远端对象。如果远端节点故�
 
 ### 1.1 待验证核心命题
 
-1. **命题一：Direct-View 与 Copy-to-HBM 存在可测的成本交叉**。在 payload、远端/本地带宽和固定建立开销冻结后，测量不同重读次数下两条路径总时延，确定现场的 Crossover Point；
-2. **命题二：Decode 活跃阶段的远端重复读取可能不具备净收益**。对 View 与 Copy 的真实 Decode 请求，比较 TPOT P50/P99、尾部抖动和本地显存占用，决定是否对 Decode 设置 Copy-to-HBM 优先路径；
-3. **命题三：ViewGuard 能把失效远端视图转成可控回退**。在租约过期、远端进程/节点故障、链路断开等故障注入下，验证访问是否被阻止、异常是否被捕获、设备队列是否安全处理、请求是否回退以及进程是否保持可用；
-4. **命题四：路径选择必须由动态成本而不是命中状态决定**。Direct-View、Copy-to-HBM 和本地重算应由数据规模、重读次数、Deadline、链路能力、租约状态和本地显存水位共同决定。
+1. **命题一：Direct-View 与 Copy-to-HBM 存在物理可测的成本交叉点 ($N_{crit}$)**。在传输 Payload、远端/本地访存带宽及固定建立时延严格冻结的前提下，量化实测不同重读次数下两条路径的端到端耗时，精确测定现场环境下的临界交叉点；
+2. **命题二：Decode 活跃生成阶段的远端高频重读不具备净加速收益（证伪命题）**。在真实大模型 Decode 生成请求中，严密对比 View 与 Copy 模式下的单字生成延迟 (TPOT P50/P99)、尾部时延抖动及本地显存水位，明确得出 Decode 阶段是否应确立 Copy-to-HBM 优先策略的科学结论；
+3. **命题三：ViewGuard 能够将失效的远端视图安全转化为可控的业务回退**。在租约自然过期、远端进程崩溃、物理节点宕机及通信链路断开等故障注入场景下，系统验证失效访问是否被秒级阻断、异常信号是否被安全捕获、硬件执行队列是否被正确重置、请求是否成功回退以及本地进程是否始终保持稳定存活；
+4. **命题四：数据搬运路径必须基于前置动态成本量化决策而非单纯依赖缓存命中状态**。Direct-View、Copy-to-HBM 与本地直接重算的选择，必须由数据块规模、预估重读次数、业务超时 Deadline、链路物理参数、租约有效性及本地显存水位共同动态决断。
 
 ### 1.2 交付物与结论边界
 
-每个正式 `run_id` 至少交付：
+每个正式的 `run_id` 必须至少交付以下结构化资产：
 
-1. 《不同重读次数下 View-vs-Copy 成本交叉表》：包含原始分项时延、总时延、重读次数、payload、路径和能力矩阵来源；
-2. 《Decode View-vs-Copy TTFT/TPOT 对照表》：保留逐请求/逐 Token 原始样本、失败请求、显存占用和重复实验离散度；
-3. 《ViewGuard 租约失效与远端故障回退测试表》：包含故障注入动作、信号/设备事件、租约状态、回退路径、恢复时间和进程状态；
-4. `manifest.json`、`environment.json`、运行命令、代码包、配置哈希、原始日志、Profiler/设备事件和摘要；
-5. 性能边界与容错安全分别输出 `GO`、`CONDITIONAL`、`NO-GO`、`NOT-SUPPORTED` 或 `INVALID-EVIDENCE`，不因性能通过而跳过安全结论。
+1. **《不同重读次数下 View-vs-Copy 成本交叉实测表》**：完整包含分项建立时延、有效带宽、总耗时、重读次数、Payload 尺寸及硬件能力矩阵来源凭证；
+2. **《Decode 阶段 View-vs-Copy TTFT/TPOT 严密对照表》**：保留逐请求、逐 Token 的原始采样数据、失败请求统计、显存占用轨迹及多轮重复实测离散度；
+3. **《ViewGuard 租约失效与远端故障安全回退测试报告》**：详细记录故障注入动作、硬件信号与设备错误事件、租约状态流转、回退执行路径、端到端恢复耗时及进程存活性状态；
+4. **标准证据包**：包含 `manifest.json`、`environment.json`、执行 CLI 命令、代码包版本、配置哈希、原始日志、Profiler 硬件时间线及分析摘要；
+5. **分项技术判定结论**：针对性能适用边界与容错安全机制分别独立输出 `GO | CONDITIONAL | NO-GO | NOT-SUPPORTED | INVALID-EVIDENCE` 结论，严禁因性能达标而违规跳过容错安全判定。
 
 ---
 
 ## 2. 成本模型、决策树与 ViewGuard 目标设计
 
-### 2.1 View-vs-Copy 成本模型
+### 2.1 View-vs-Copy 成本交叉数学模型
 
-设 payload 为 $S$，重读次数为 $N$，远端直读固定开销为 $t_{view\_setup}$，Copy-to-HBM 一次性搬运开销为 $t_{copy\_setup}$：
-
-$$
-T_{view}(N,S)=t_{view\_setup}+N\times(t_{remote\_fixed}+S/BW_{remote})
-$$
+设传输数据量为 $S$，生成阶段历史 KVCache 的重复读取次数为 $N$，远端直读的固定建立开销为 $t_{view\_setup}$，Copy-to-HBM 的一次性 DMA 搬运建立开销为 $t_{copy\_setup}$：
 
 $$
-T_{copy}(N,S)=t_{copy\_setup}+S/BW_{copy}+N\times(S/BW_{local\_hbm})
+T_{view}(N,S)=t_{view\_setup}+N	imes(t_{remote\_fixed}+rac{S}{BW_{remote}})
 $$
 
-当两条路径总时延相等时得到 $N_{crit}$。正式计算必须使用 PVT-01 或现场能力矩阵的真实输入，并保留单位、测量误差和有效期；文档中的任何 `0.02ms`、`0.85ms`、`3.20ms` 等数字只能作为示意输入，不是本项成绩。
+$$
+T_{copy}(N,S)=t_{copy\_setup}+rac{S}{BW_{copy}}+N	imes(rac{S}{BW_{local\_hbm}})
+$$
 
-### 2.2 微秒级路径选择逻辑
+当两条路径的端到端总耗时严格相等时，即可解得临界读取次数 $N_{crit}$：
 
-Direct-View 不是“命中即使用”。建议按以下顺序执行：
+$$
+N_{crit} = rac{t_{copy\_setup} - t_{view\_setup} + rac{S}{BW_{copy}}}{t_{remote\_fixed} + rac{S}{BW_{remote}} - rac{S}{BW_{local\_hbm}}}
+$$
+
+正式计算必须严格采用 PVT-01 测得的硬件能力矩阵参数，并完整标注物理量纲、测量误差及有效期；文档中的任何示例数字仅用于展示逻辑关系，不可直接作为工程验收指标。
+
+### 2.2 微秒级动态选路决策逻辑
+
+Direct-View 远端直读绝非“只要缓存命中就无脑采用”。调度引擎应严格遵循以下前置动态决策逻辑：
 
 ```text
 请求到达
-  └─► 本地已有可消费副本？──是──► 本地 HBM 复用
-               │否
-               ▼
-       是否为 Decode 高频重读？──是──► 优先 Copy-to-HBM 或本地重算
-               │否
-               ▼
-       读取次数、payload、Deadline 和能力矩阵是否支持 View？
-               │否                         │是
-               ▼                           ▼
-          比较 Copy/重算成本        比较 View 与 Copy/重算成本
-               │                           │
-               └────────► 选择有净收益且租约有效的路径
+   └─► 本地显存是否已有可消费副本？──是──► 走本地 HBM 直接复用（零拷贝快路径）
+                │否
+                ▼
+        是否属于 Decode 阶段高频重读场景？──是──► 优先采用 Copy-to-HBM 或本地直接重算
+                │否
+                ▼
+        读取次数、Payload 尺寸、业务 Deadline 与硬件能力矩阵是否支持 Direct-View？
+                │否                                   │是
+                ▼                                     ▼
+        量化对比 Copy 与本地重算开销          量化对比 View 与 Copy/重算的综合成本
+                │                                     │
+                └──────────────────► 动态选择具有明确净加速收益且租约有效的最优路径
 ```
 
-判定时必须同时考虑：
+在执行决策判定时，必须同时满足以下物理约束：
 
-- Direct-View 的租约剩余时间是否覆盖整个访问窗口；
-- 远端对象、地址范围、布局和权限是否一致；
-- Copy-to-HBM 是否有显存空间和设备完成事件；
-- 本地重算是否比加载和挂接更快；
-- 任何候选路径都不能超过请求 Deadline 或破坏前台 TPOT。
+- Direct-View 的租约有效剩余时间必须完全覆盖整个访问的时间窗口；
+- 远端显存对象、物理地址范围、数据布局哈希及访问权限必须严格一致；
+- 采用 Copy-to-HBM 路径时，本地显存池必须具备足够的连续空间并获取到真实的 DMA 完成事件；
+- 当数据拉取与加载总开销超过本地直接重算耗时时，必须主动回退至本地重算；
+- 任何选定路径均严禁超出业务请求的超时 Deadline，且不得破坏前台在线推理的 TPOT 尾部稳定性。
 
 ### 2.3 ViewLease 当前实现与目标扩展
 
-当前 `ViewLease` 字段为 `object_id`、`remote_addr`、`size_bytes`、过期时间和原子 `is_valid`。目标生产结构至少还需要：
+当前受控源码 `view_guard.h` 中定义的结构体仅包含基础字段：
 
 ```cpp
-struct ViewLeaseDescriptor {
+struct ViewLease {
+    uint64_t object_id;
+    uint64_t remote_addr;
+    uint64_t size_bytes;
+    std::chrono::steady_clock::time_point expire_time;
+    std::atomic<bool> is_valid;
+};
+```
+
+面向跨节点生产级协同的目标协议结构设计如下：
+
+```cpp
+struct alignas(64) ViewLeaseDescriptor {
     uint64_t lease_id;
     uint64_t object_id;
     uint64_t remote_va_or_handle;
@@ -146,35 +174,38 @@ struct ViewLeaseDescriptor {
     uint32_t layout_version;
     uint64_t visibility_epoch;
     uint64_t expire_timestamp_ns;
-    uint32_t owner_node;
+    uint32_t owner_node_id;
     uint32_t permissions;
-    // 并发引用、撤销状态、错误原因等固定字段
+    uint32_t active_readers;
+    uint32_t revoke_reason;
+    uint8_t  reserved[16];
 };
+static_assert(sizeof(ViewLeaseDescriptor) == 64);
 ```
 
-目标结构仍需由现场协议决定。必须加入地址范围、布局版本、可见性 epoch、权限、引用计数和撤销原因，且对并发访问和跨进程读取做固定大小断言。当前代码没有这些字段，不能直接当作生产 View 协议。
+上述结构体为生产级协议的设计标准。在正式实现中必须补齐物理地址范围、布局版本校验、可见性 Epoch、并发原子引用计数及撤销原因枚举，并对跨进程共享内存访问提供定长 64B POD 保证。
 
-### 2.4 ViewGuard 故障恢复目标链
+### 2.4 ViewGuard 故障安全恢复目标链路
+
+生产级 ViewGuard 必须完整跑通以下 7 步软硬件安全闭环：
 
 ```text
-访问前校验租约
-      ↓
-进入 Direct-View 临界区并记录请求/Stream
-      ↓
-远端故障或租约撤销
-      ↓
-捕获实际 SIGBUS/设备错误并记录故障地址
-      ↓
-停止或隔离挂起的设备队列
-      ↓
-撤销租约、阻断失效对象
-      ↓
-Copy-to-HBM 或本地重算
-      ↓
-恢复请求并输出完整故障证据
+步骤 1：访问前微秒级校验租约有效性与过期时间戳
+               ↓
+步骤 2：进入 Direct-View 临界区，记录活跃请求与加速器 Stream 句柄
+               ↓
+步骤 3：模拟注入远端物理宕机、进程崩溃或租约主动撤销
+               ↓
+步骤 4：操作系统与驱动层捕获 SIGBUS 异常或硬件总线错误，精准提取故障地址
+               ↓
+步骤 5：安全中止 (Abort) 或物理隔离当前挂起的加速器硬件队列
+               ↓
+步骤 6：瞬间撤销本地租约，原子阻断后续任何失效对象的访存操作
+               ↓
+步骤 7：将受影响的请求安全回退至 Copy-to-HBM 或本地直接重算，输出完整故障凭证
 ```
 
-`sigaction`、`sigsetjmp/siglongjmp` 和 `aclrtStreamAbort` 等是可能的实现手段，不是当前代码已具备的能力。信号处理函数中还必须遵守异步信号安全约束，不能在 handler 中直接调用未经验证的复杂分配、锁或日志函数；设备队列能否安全重置也必须由现场驱动确认。
+在底层实现中，`sigaction`、`sigsetjmp/siglongjmp` 以及 CANN/NPU 的 `aclrtStreamAbort` 是核心的技术手段。在编写信号处理函数 (Signal Handler) 时，必须严格遵守异步信号安全 (Async-Signal-Safe) 规范，严禁在 Handler 中调用未经验证的动态内存分配、互斥锁或复杂 I/O 操作；硬件队列的安全重置能力亦必须由原厂驱动提供底层支持。
 
 ---
 
@@ -182,33 +213,33 @@ Copy-to-HBM 或本地重算
 
 ### 3.1 三组子实验矩阵
 
-| 子实验 | 正式参数 | 核心观测指标 | 当前源码覆盖 |
+| 验证子项 | 正式测试输入参数 | 核心观测指标与输出 | 当前源码支持状态分析 |
 |---|---|---|---|
-| View-vs-Copy 交叉 | payload 16MB、64MB 及现场扩展；重读次数 1、2、4、8、16、32、64、128、256 | View 总时延、Copy 总时延、分项成本、$N_{crit}$、显存占用 | 支持固定 read_counts 和公式输入；无真实读写 |
-| Decode 在线 A/B | View/Copy、Prompt 长度、输出 Token 数、请求率、并发和重复轮次 | TTFT、TPOT P50/P95/P99、失败、尾部、显存和实际路径 | 只有合成 JSON 脚本；不连接服务 |
-| ViewGuard 故障注入 | 租约超时、远端进程/节点故障、链路断开、地址撤销；每类至少 3 次独立重复 | 信号/设备事件、租约状态、Stream 处理、回退路径、恢复时间、进程存活 | 当前无故障测试可执行程序，回退接口固定失败 |
+| View-vs-Copy 成本交叉 | Payload 尺寸：16MB、64MB 及扩展档位；重读次数：1、2、4、8、16、32、64、128、256 | View 总耗时、Copy 总耗时、分项建立成本、临界交叉点 $N_{crit}$、显存占用量 | 支持基于固定 `read_counts` 与命令行参数的公式推导；无真实硬件读写 |
+| Decode 在线 A/B 对照 | View 模式与 Copy 模式、Prompt 上下文长度、输出 Token 数、请求并发度及重复轮次 | 首字延迟 TTFT、单字生成耗时 TPOT (P50/P95/P99)、失败请求率、尾部抖动、显存水位轨迹 | 仅提供合成 JSON 数据生成脚本；尚未实际对接在线推理服务引擎 |
+| ViewGuard 故障注入 | 租约自然超时、远端进程异常崩溃、物理节点宕机、显存映射撤销；每类至少重复 3 轮 | 硬件信号/设备错误事件、租约状态流转、Stream 处理结果、回退执行路径、恢复耗时、进程存活性 | 尚未提供可执行的故障测试工具，回退接口固定返回失败 |
 
 ### 3.2 成本模型输入矩阵
 
-| 维度 | 正式计划 | 当前工具状态 |
+| 测试维度 | 正式实施计划标准 | 当前工程实际支持情况 |
 |---|---|---|
-| payload | 16MB、64MB、现场可用等价档位 | `--payload-mb` 单值 |
-| 重读次数 | 1、2、4、8、16、32、64、128、256 | `read_counts` 固定在源码内，无 CLI 选择 |
-| 远端直读耗时 | 来自真实 Direct-View 完成事件或 PVT-01 能力矩阵 | `--remote-read-ms` 只是输入参数 |
-| Copy 搬运耗时 | 来自真实 DMA 完成事件 | `--dma-copy-ms` 只是输入参数 |
-| 本地 HBM 读取耗时 | 来自真实设备事件 | `--local-read-ms` 只是输入参数 |
+| Payload 尺寸 | 16MB、64MB 及现场可用等价档位 | `--payload-mb` 支持传入单值 |
+| 重读次数序列 | 1、2、4、8、16、32、64、128、256 | `read_counts` 数组硬编码在 C++ 源码中，CLI 暂不支持动态配置 |
+| 远端直读耗时 | 来源于真实的 Direct-View 完成事件或 PVT-01 硬件能力矩阵 | `--remote-read-ms` 仅作为公式推导的输入参数 |
+| Copy 搬运耗时 | 来源于真实的 DMA 硬件完成事件 | `--dma-copy-ms` 仅作为公式推导的输入参数 |
+| 本地 HBM 读耗时 | 来源于真实的加速器本地访存实测事件 | `--local-read-ms` 仅作为公式推导的输入参数 |
 
 ### 3.3 环境与证据矩阵
 
-| 环境 | 目的 | 最低条件 | 允许形成的结论 |
+| 运行环境级别 | 验证核心目的 | 最低前置条件 | 允许产出的证据结论 |
 |---|---|---|---|
-| W0 公式/合成 | 验证命令、成本模型、字段和状态 | C++/Python 运行时 | 仅形成 `DEMO` 结论 |
-| W1 局部设备 | 验证同一设备上的 View/Copy 局部路径和租约逻辑 | 可用设备内存、DMA、事件和故障控制 | 形成绑定设备的 `LAB` 结论 |
-| W2 真实跨节点 | 验证远端读取、Decode 影响和故障回退 | 跨节点数据路径、真实推理、设备事件、故障注入权限 | 证据闭环后形成 `MEASURED` 结论 |
+| W0 公式/合成 | 验证 CLI 命令、成本模型计算逻辑、租约数据结构及状态流转的执行闭环 | C++ 编译器、Python 环境 | 仅可产出 `DEMO` 级别的工作流有效性结论 |
+| W1 局部设备实验 | 在单机环境下验证 View 与 Copy 局部路径、内存租约及基础异常处理 | 具备可用显存、DMA 引擎、硬件事件及故障注入控制权限 | 可产出绑定特定硬件设备的 `LAB` 局部结论 |
+| W2 真实跨节点实验 | 验证跨节点远端直读适用边界、Decode 性能劣化证伪及生产级 ViewGuard 容错 | 具备跨节点高速互联、真实在线推理服务、底层硬件事件及故障注水权限 | 满足全量证据闭环后，可产出 `MEASURED` 生产级结论 |
 
-### 3.4 公平 A/B 与安全隔离
+### 3.4 公平 A/B 对照与安全隔离要求
 
-性能 A/B 必须保持模型、Prompt、输出长度、设备、链路、请求率、资源配额、预热和统计口径一致，只改变 View/Copy 路径。故障注入必须在隔离环境进行，记录注入时间和影响对象，不允许以生产请求作为未经批准的故障试验对象。性能门槛和故障安全门槛分别判定。
+在开展性能 A/B 对照测试时，必须严格保持模型权重、Prompt 长度、输出 Token 数量、硬件设备、互联链路、请求并发率、资源配额、预热策略及统计口径的高度一致，测试中仅允许变更数据访问路径策略。故障注入测试必须在严格物理隔离的测试集群中开展，详细记录注入时间点与受影响对象，严禁使用生产在线流量进行未经授权的故障测试。性能适用边界与容错安全门限必须分别独立判定。
 
 ---
 
@@ -219,54 +250,49 @@ Copy-to-HBM 或本地重算
 ```text
 原型验证代码/PVT-03/
 ├── Makefile
-├── view_vs_copy_bench.cc
-├── view_guard.h
-├── view_guard.cc
-└── benchmark_serving_view.py
+├── view_vs_copy_bench.cc       # 基于命令行输入耗时推导交叉点与较优路径的微基准程序
+├── view_guard.h                # 视图租约结构体与 ViewGuard 守卫类声明
+├── view_guard.cc               # 租约创建、有效性校验与回退接口占位实现
+└── benchmark_serving_view.py   # 生成包含随机扰动的 View 与 Copy 模式合成性能评估脚本
 ```
 
-当前可复现的 W0 命令：
+当前可复现的 W0 构建与运行命令为：
 
 ```bash
 cd ./原型验证代码/PVT-03
 make clean
 make
-./view_vs_copy_bench --payload-mb 64 \
-    --dma-copy-ms 3.20 \
-    --local-read-ms 0.06 \
-    --remote-read-ms 0.85 \
-    --evidence-level DEMO \
-    --out res_view_vs_copy_demo.csv
-python3 ./benchmark_serving_view.py \
-    --mode view --prompt-len 32768 --decode-tokens 256 \
-    --seed 42 --output res_serving_view_demo.json
+./view_vs_copy_bench --payload-mb 64     --dma-copy-ms 3.20     --local-read-ms 0.06     --remote-read-ms 0.85     --evidence-level DEMO     --out res_view_vs_copy_demo.csv
+python3 ./benchmark_serving_view.py     --mode view --prompt-len 32768 --decode-tokens 256     --seed 42 --output res_serving_view_demo.json
 ```
 
-这些命令中的时间和合成服务结果都是 DEMO 输入。当前工程没有 `view_guard_test`、`plot_crossover.py`，服务脚本的模式名称是 `view`/`copy`，不是 `direct_view`/`copy_to_hbm`。
+特别说明：上述命令中的耗时参数与合成服务数据均为 DEMO 输入。当前工程中尚未包含独立的 `view_guard_test` 故障注入测试程序或 `plot_crossover.py` 绘图脚本；服务脚本中 `--mode` 支持的参数为 `view` 与 `copy`，非内部全称。
 
 ### 4.2 源码实际行为审计
 
-| 代码路径 | 实际行为 | 对证据的影响 |
+| 源码文件与核心逻辑 | 源码实际执行行为 | 对实测证据等级的影响分析 |
 |---|---|---|
-| `view_vs_copy_bench.cc` | 固定扫描 1、2、4、8、16、32、64、128、256 次，按输入耗时计算 View/Copy 总时间和较优路径 | 是成本模型，不访问远端或本地设备；输出没有状态字段 |
-| `view_vs_copy_bench.cc` 默认值 | 使用 3.20ms、0.06ms、0.85ms 等代码内默认输入；可被 CLI 覆盖 | 默认结果不能当作现场测量，必须记录输入来源和证据等级 |
-| `--evidence-level` | 接受任意字符串，不限制 DEMO/LAB/MEASURED | 只能由外部证据审查层校验，不能信任命令行标签 |
-| `view_guard.cc::create_lease` | 记录地址、大小、过期时间并把 `is_valid` 置 true | 没有地址范围、权限、可见性 epoch、引用计数或远端注册 |
-| `view_guard.cc::validate_access` | 检查原子有效位和当前时间是否超过过期时间 | 没有对象/地址/长度校验，也没有并发撤销与设备完成关联 |
-| `handle_remote_crash_fallback` | 打印 `DEMO_ONLY`，返回 `false` | 没有 SIGBUS handler、Stream Abort 或本地重算回退 |
-| `benchmark_serving_view.py` | 对 View/Copy 使用固定 TTFT 公式，并为 TPOT 生成随机分布；输出 `evidence_level=DEMO`、`status=DEMO_ONLY` | 不是推理服务，不能证明真实 TTFT/TPOT 或远端直读 |
-| Makefile | 只链接 C++ 标准库和 pthread，无设备/框架 SDK | 当前工程不能执行目标硬件路径 |
+| `view_vs_copy_bench.cc` | 遍历固定的重读次数数组，基于输入的耗时参数计算累加时间并输出 `better_path` | 属于纯数学公式模型，未实际访问远端或本地硬件显存；输出未附带状态字段 |
+| 代码内默认耗时参数 | 预置了 3.20ms、0.06ms、0.85ms 等默认输入值；支持通过 CLI 参数覆盖 | 默认结果不可作为现场硬件测量值，必须完整记录输入来源凭证与证据等级 |
+| `--evidence-level` 参数 | 接受任意字符串传入，内部未对 DEMO、LAB、MEASURED 进行严格契约校验 | 必须由外部证据审查层进行归一化核验，不可轻信命令行传入的标签 |
+| `view_guard.cc::create_lease` | 记录对象 ID、地址、大小、过期时间并将原子有效位 `is_valid` 置为 true | 尚未包含物理地址范围校验、访问权限、可见性 Epoch、引用计数或远端注册 |
+| `view_guard.cc::validate_access` | 仅检查原子有效位状态以及当前单调时钟是否超过预设的过期时间 | 未进行对象/地址/长度的多维一致性校验，亦未关联并发撤销与设备完成事件 |
+| `handle_remote_crash_fallback` | 在控制台输出 `DEMO_ONLY` 提示日志，函数固定返回 `false` | 尚未集成 SIGBUS 信号 Handler、NPU Stream Abort 或本地重算回退机制 |
+| `benchmark_serving_view.py` | 依据固定 TTFT 公式与随机分布生成合成性能数据；输出 `status=DEMO_ONLY` | 属于模拟数据生成工具，无法证明真实环境下的 TTFT/TPOT 表现或远端直读收益 |
+| Makefile 编译配置 | 仅采用 `-std=c++17 -pthread` 编译，未链接任何硬件设备或推理框架 SDK | 当前工程无法直接执行真实的底层硬件直达数据通路 |
 
 ### 4.3 面向 LAB/MEASURED 的最小工程扩展
 
-1. **真实 View/Copy 路径**：接入远端映射/读取、Copy-to-HBM DMA、本地 HBM 访问和完成事件；记录实际 payload、读次数和路径凭证；
-2. **动态能力输入**：读取 PVT-01 产生的硬件能力矩阵和有效期，不能使用代码内默认时延；
-3. **真实推理打流**：将 View/Copy 作为实际端点或配置开关，记录 TTFT、TPOT、请求失败、显存水位、实际路径和逐 Token 事件；
-4. **租约完整性**：增加 lease_id、对象/布局哈希、权限、可见性 epoch、引用计数、撤销原因和并发访问保护；
-5. **异常处理闭环**：在隔离环境实现并验证 SIGBUS/设备错误捕获、Stream 安全处理、租约撤销、Copy/重算回退和恢复结果；
-6. **故障注入工具**：实现租约超时、远端进程/节点故障、链路断开和地址撤销的可控注入，保留注入时间与实际故障事件；
-7. **统计与证据包**：至少 3 次独立重复，保存逐请求/逐 Token 样本、Profiler/设备事件、进程存活、核心转储状态、版本和拓扑；
-8. **状态归一化**：将脚本 `DEMO_ONLY`、回退 `false`、解析失败等内部状态映射为公共契约状态，缺失字段写 `null` 和 `invalid_reason`。
+在正式进入真实性能适用边界测定与 ViewGuard 容错验证前，必须补齐以下工程支撑能力：
+
+1. **真实物理直读与 DMA 路径打通**：接入远端显存映射读取、Copy-to-HBM DMA 搬运、本地 HBM 访存及硬件完成事件；逐次记录实际 Payload、读取次数及物理路径凭证；
+2. **硬件能力矩阵动态读取**：无缝读取由 PVT-01 实测产出的标准化硬件能力矩阵与有效期，严禁使用代码内置的默认时延；
+3. **真实推理打流与采样**：将 View 与 Copy 模式作为推理服务引擎的底层配置，实时采集真实的 TTFT、TPOT、请求失败率、显存水位轨迹及逐 Token 访存事件；
+4. **租约协议生产级补全**：在 `ViewLease` 中补齐全局 lease_id、对象/布局哈希、访问权限、可见性 Epoch、并发原子引用计数及显式撤销原因；
+5. **异常恢复闭环实现**：在隔离环境中实现并严密验证 SIGBUS 信号安全捕获、NPU Stream 异常重置、租约秒级阻断、Copy/重算平稳回退及业务恢复能力；
+6. **自动化故障注入工具开发**：实现针对租约自然超时、远端进程崩溃、物理节点宕机及显存映射撤销的可控故障注入工具，完整留存注入时间与硬件故障事件；
+7. **全链路原始事件与证据包归档**：每组测试确保至少 3 轮独立重复，完整保存逐请求/逐 Token 原始样本、Profiler 时间线、进程存活性状态、Core Dump 记录、版本清单及网络拓扑；
+8. **规范化状态枚举输出**：将脚本内部返回的 `DEMO_ONLY`、回退 `false` 及解析失败映射为公共契约规定的 `GO | CONDITIONAL | NO-GO | NOT-SUPPORTED | INVALID-EVIDENCE` 标准状态，缺失字段规范填报为 `null` 并注明 `invalid_reason`。
 
 ---
 
@@ -274,70 +300,64 @@ python3 ./benchmark_serving_view.py \
 
 ### 步骤 0：冻结实验身份、能力输入和安全边界
 
-- **操作意图**：先区分公式 DEMO、局部 LAB 和真实 MEASURED，并确保性能试验与故障注入隔离。
-- **执行动作**：填写 `run_id`、`workload_id`、`package_id`、`baseline_commit`、`config_hash`、`hardware_profile`、`topology_profile`、能力矩阵版本、payload、重读次数、输出 Token 数、预热、重复轮次和门槛；列出当前未实现的故障链。
-- **应观察现象**：能明确说明耗时来自真实设备还是 CLI 输入；没有远端路径、设备事件或故障注入工具时提前标 `NOT-SUPPORTED`。
+- **操作意图**：明确本轮评测的执行级别（W0/DEMO、W1/LAB 或 W2/MEASURED），确保性能适用测试与高危故障注入实验在物理环境上严格隔离。
+- **执行动作**：在配置清单中完整填报 `run_id`、`workload_id`、`package_id`、`baseline_commit`、`config_hash`、`hardware_profile`、`topology_profile`、能力矩阵版本、Payload 尺寸、重读次数序列、输出 Token 数、预热策略、重复轮次及准入门槛；详细列明当前未实现的容错链路。
+- **应观察现象**：配置能够清晰界定时延参数来源于现场硬件能力矩阵还是 CLI 手动输入；若现场缺乏真实跨节点远端路径或故障注入工具，应提前登记为 `NOT-SUPPORTED`。
 
 ### 步骤 1：构建并运行成本模型 W0
 
-- **操作意图**：验证 Crossover 表的命令、字段和公式流程，建立后续真实能力数据接入的回归样本。
+- **操作意图**：验证成本交叉计算工具的 CLI 参数解析、数据字段及数学公式流程，建立后续接入真实硬件能力参数的回归对比样本。
 - **执行命令**：
 
 ```bash
 cd ./原型验证代码/PVT-03
 make clean
 make
-./view_vs_copy_bench --payload-mb 64 \
-    --dma-copy-ms 3.20 --local-read-ms 0.06 --remote-read-ms 0.85 \
-    --evidence-level DEMO --out res_view_vs_copy_demo.csv > crossover_stdout.txt 2>&1
+./view_vs_copy_bench --payload-mb 64     --dma-copy-ms 3.20 --local-read-ms 0.06 --remote-read-ms 0.85     --evidence-level DEMO --out res_view_vs_copy_demo.csv > crossover_stdout.txt 2>&1
 ```
 
-- **应观察现象**：CSV 按固定 read_counts 输出 View/Copy 总时间和 `better_path`；`evidence_level` 只是命令行输入，必须在 manifest 中明确标 `DEMO`。
-- **判定边界**：不能把代码内默认时延、交叉点或 `better_path` 写成硬件实测；真实 `N_crit` 必须由能力矩阵和原始事件重新计算。
+- **应观察现象**：CSV 文件按预设的 `read_counts` 序列输出各点下的 View/Copy 总耗时与 `better_path` 推荐；`evidence_level` 仅反映 CLI 传入值，在证据清单中必须明确归类为 `DEMO`。
+- **判定边界**：严禁将代码内置的默认参数或推导得出的 `better_path` 包装为硬件实测成绩；现场真实的 $N_{crit}$ 必须基于实测能力矩阵与底层原始事件重新计算。
 
 ### 步骤 2：运行合成 View/Copy 服务流程 DEMO
 
-- **操作意图**：验证 TTFT/TPOT JSON schema 和分位数输出，不把合成数据误解为真实推理服务。
+- **操作意图**：验证 TTFT 与 TPOT 的 JSON Schema 结构与分位数统计输出格式，杜绝将合成数据误判为真实推理服务的实测表现。
 - **执行命令**：
 
 ```bash
-python3 ./benchmark_serving_view.py \
-    --mode view --prompt-len 32768 --decode-tokens 256 \
-    --seed 42 --output res_serving_view_demo.json
-python3 ./benchmark_serving_view.py \
-    --mode copy --prompt-len 32768 --decode-tokens 256 \
-    --seed 42 --output res_serving_copy_demo.json
+python3 ./benchmark_serving_view.py     --mode view --prompt-len 32768 --decode-tokens 256     --seed 42 --output res_serving_view_demo.json
+python3 ./benchmark_serving_view.py     --mode copy --prompt-len 32768 --decode-tokens 256     --seed 42 --output res_serving_copy_demo.json
 ```
 
-- **应观察现象**：JSON 的 `evidence_level=DEMO`、`status=DEMO_ONLY`；TPOT 由脚本内随机分布生成，输入 seed 只保证该合成流程可复现。
-- **证据边界**：脚本没有连接 `/v1/completions` 或真实 KV 路径，不能用它关闭 Decode 证伪命题。
+- **应观察现象**：生成的 JSON 文件明确标注 `evidence_level=DEMO` 与 `status=DEMO_ONLY`；TPOT 数据由脚本内置的随机分布生成，随机种子仅用于保证合成流程的可复现性。
+- **证据边界**：该脚本并未实际连接大模型推理服务的 `/v1/completions` 端点或真实 KV 路径，不可据此直接关闭 Decode 阶段的直读证伪命题。
 
-### 步骤 3：核对真实 View/Copy A/B（条件步骤）
+### 步骤 3：核对真实 View/Copy A/B 实测（条件步骤）
 
-- **前置条件**：真实 View/Copy 端点、设备完成事件、能力矩阵、模型和数据集均已准备；A/B 只改变路径策略。
-- **操作意图**：在真实 Prompt、输出长度和请求率下比较 TTFT、TPOT、显存和失败率，确认是否存在 Decode 重复远端读取放大。
-- **执行动作**：按同一 workload 分别运行 View 与 Copy；每次记录实际路径、租约、payload、重读次数、设备事件、逐 Token 统计和同场次本地重算参考。
-- **应观察现象**：View/Copy 的差异能回指能力矩阵和原始事件；若实际路径无法证明或只有合成服务脚本，应标 `NOT-SUPPORTED`/`INVALID-EVIDENCE`。
+- **前置条件**：真实远端直读与本地拷贝服务配置、底层硬件完成事件、PVT-01 硬件能力矩阵、大模型及评测数据集均已就绪；A/B 测试仅允许变更数据访问路径策略。
+- **操作意图**：在真实 Prompt 上下文、输出长度及请求并发压力下严密对比 TTFT、TPOT、显存占用及请求失败率，从物理第一性原理确证 Decode 阶段是否存在远端高频读取放大。
+- **执行动作**：在相同工作负载下分别运行 View 与 Copy 模式；逐次完整记录实际物理路径、租约信息、Payload 尺寸、重读次数、底层硬件事件、逐 Token 耗时统计以及同场次的本地重算基准。
+- **应观察现象**：View 与 Copy 的性能差异能够精准与硬件能力矩阵及原始物理事件相互印证；若实际物理路径无法证明或仅有合成服务脚本，必须规范标记为 `NOT-SUPPORTED` 或 `INVALID-EVIDENCE`。
 
 ### 步骤 4：验证租约创建、过期和撤销
 
-- **操作意图**：先验证不涉及硬件故障的访问资格边界，再进入危险的远端故障注入。
-- **执行动作**：创建短租约，分别在有效期内、过期后和显式撤销后调用 `validate_access`；记录时间戳、对象、地址、长度、有效位和返回值。
-- **应观察现象**：有效租约允许访问，过期/撤销租约拒绝访问；当前代码只能证明这两个本地判断，不能证明远端映射或设备消费安全。
+- **操作意图**：在不涉及硬件故障的前提下，首先验证租约创建、时间窗口过期及主动撤销等访问资格基础逻辑的闭环。
+- **执行动作**：创建短周期租约，分别在有效期内、自然过期后以及显式主动撤销后调用 `validate_access`；完整记录时间戳、对象标识、物理地址、长度、原子有效位及返回值。
+- **应观察现象**：有效租约正常允许访问，过期或已被撤销的租约被严格拒绝；当前代码仅能证明上述本地判定逻辑，不能证明远端显存映射或底层硬件消费的安全性。
 
 ### 步骤 5：执行远端故障与 SIGBUS 回退（条件步骤）
 
-- **前置条件**：已在隔离环境完成真实 View 路径、SIGBUS/设备错误捕获、设备队列处理、租约撤销和 Copy/重算回退实现，并有恢复验证方案。
-- **操作意图**：验证远端故障不会把本地推理进程直接带入不可恢复状态，并且失效对象不会继续被消费。
-- **执行动作**：分别注入租约超时、远端进程/节点故障、链路断开和映射撤销；记录注入时间、故障信号/设备错误、故障地址、Stream 状态、租约状态、回退路径、恢复时间、请求结果和进程存活。
-- **应观察现象**：异常能被实际捕获，失效租约被阻断，设备队列按现场驱动规则处理，请求按约定回退；任一环节没有原始事件时不得判定通过。
-- **当前代码边界**：`handle_remote_crash_fallback()` 当前固定返回 `false`，不存在可直接执行的 `view_guard_test`；本步骤在未扩展前记录 `NOT-SUPPORTED`。
+- **前置条件**：已在物理隔离环境中完成真实 View 路径对接、SIGBUS 信号与设备错误安全捕获、加速器 Stream 异常处理、租约秒级阻断及 Copy/重算回退机制的工程实现，并配备完善的恢复验证手段。
+- **操作意图**：验证远端节点的突发故障绝不会导致本地大模型推理进程异常崩溃，且失效的远端显存对象绝不会被继续错误消费。
+- **执行动作**：分别针对租约超时、远端进程崩溃、物理节点宕机及显存映射撤销执行可控注入；逐次完整记录注入时间、硬件故障信号/设备错误、故障物理地址、Stream 状态、租约状态、回退路径、恢复耗时、请求最终状态及本地进程存活性。
+- **应观察现象**：异常信号被安全拦截捕获，失效租约被瞬间阻断，硬件执行队列按原厂驱动规则安全重置，请求平稳回退至有效路径；任一环节缺乏底层原始事件凭证时，一律不得判定为通过。
+- **当前代码边界**：`handle_remote_crash_fallback()` 当前固定返回 `false`，且工程中不存在可直接执行的 `view_guard_test`；在未完成工程扩展前，本步骤统一规范记录为 `NOT-SUPPORTED`。
 
 ### 步骤 6：生成分项证据包和决策摘要
 
-- **操作意图**：把性能交叉、在线影响和故障安全分开归档，防止性能曲线覆盖容错缺口。
-- **执行动作**：按 `results/PVT-03/<subtest>/<run_id>/` 建目录，保存成本输入、能力矩阵、原始 TTFT/TPOT、租约事件、故障注入日志、进程状态、Profiler/设备事件、`manifest.json`、`environment.json` 和摘要；每个条件至少 3 次独立重复。
-- **应观察现象**：每个 `N_crit`、TPOT 分位数和回退结果能回指原始样本；没有采集到的字段使用 `null` 并填写 `invalid_reason`。
+- **操作意图**：将性能成本交叉、在线业务影响与容错安全证据分开独立归档，彻底杜绝以单一的性能曲线掩盖系统的容错安全缺口。
+- **执行动作**：在 `results/PVT-03/<subtest>/<run_id>/` 目录下归档成本输入、硬件能力矩阵、原始 TTFT/TPOT 采样数据、租约流转事件、故障注入日志、进程存活性记录、Profiler 时间线、`manifest.json`、`environment.json` 及分析摘要；每个测试条件确保至少完成 3 轮独立重复测量。
+- **应观察现象**：报告中的每个 $N_{crit}$ 交叉点、TPOT 分位数及故障回退结果均能精准索引至底层原始样本；未采集到的字段显式置为 `null` 并注明 `invalid_reason`。
 
 ---
 
@@ -371,16 +391,18 @@ package_id, config_hash, hardware_profile, topology_profile,
 evidence_environment, evidence_level, status, invalid_reason
 ```
 
-`signal_name`、`device_error_code`、`process_alive` 或 `fallback_action` 没有实际事件时写 `null`，不能用 `FALSE` 代替“没有观测到”。
+字段填写约束：在缺乏真实硬件事件时，`signal_name`、`device_error_code`、`process_alive` 或 `fallback_action` 等字段必须显式填写为 `null`，严禁用 `FALSE` 替代“未实际观测到”。
 
 ### 6.3 汇总 CSV 模板
+
+以下为微基准汇总输出字段格式规范（非预置实测成绩）：
 
 ```csv
 validation_id,run_id,subtest,mode,payload_bytes,read_count,view_total_ms,copy_total_ms,better_path,ttft_p50_ms,ttft_p99_ms,tpot_p50_ms,tpot_p99_ms,lease_valid,fault_type,signal_caught,stream_action,fallback_action,fallback_time_us,process_alive,evidence_level,status,invalid_reason
 <PVT-03>,<run_id>,<crossover_or_decode_or_fault>,<view_or_copy>,<bytes>,<N>,<measured_or_null>,<measured_or_null>,<view_or_copy_or_null>,<measured_or_null>,<measured_or_null>,<measured_or_null>,<measured_or_null>,<true_or_null>,<fault_or_null>,<true_or_null>,<abort_or_null>,<recompute_or_copy_or_error_or_null>,<measured_or_null>,<true_or_null>,<DEMO_OR_LAB_OR_MEASURED>,<status>,<null_or_reason>
 ```
 
-### 6.4 证据包目录
+### 6.4 证据包目录结构
 
 ```text
 results/PVT-03/<subtest>/<run_id>/
@@ -398,55 +420,57 @@ results/PVT-03/<subtest>/<run_id>/
 └── logs/
 ```
 
-`manifest.json` 至少记录能力矩阵版本、代码包、基线 Commit、配置哈希、模型和 workload、故障注入授权/范围、设备与拓扑、执行命令、原始文件哈希、证据等级、支持范围和分项状态。
+`manifest.json` 至少完整固化硬件能力矩阵版本、代码包版本、基线 Git Commit、配置哈希、大模型结构与工作负载、故障注入授权范围、硬件设备、网络拓扑、执行 CLI 命令、原始文件哈希、证据等级、功能支持范围及分项判定状态。
 
 ---
 
 ## 7. GO / CONDITIONAL / NO-GO / NOT-SUPPORTED / INVALID-EVIDENCE 判定规则
 
-### 7.1 View-vs-Copy 适用边界
+### 7.1 View-vs-Copy 适用边界判定
 
-- **GO（成本边界可复现）**：真实 View/Copy 事件、能力矩阵、payload、重读次数和同场次基线齐全；$N_{crit}$ 在至少 3 次独立重复中稳定，路径选择与实际总耗时一致，并且没有超 Deadline、显存或失败率退化。
-- **CONDITIONAL（场景受限）**：Direct-View 只在低重读、较小 payload 或 Prefill 场景有净收益；Decode 结论限定为已测输出长度、并发和拓扑。
-- **NO-GO（路径没有净收益）**：有效实测中 View 或 Copy 在声明场景持续不如另一条路径，或路径引入不可接受的尾部时延、显存或失败率退化。
-- **NOT-SUPPORTED**：当前只有公式模型、合成服务脚本、没有远端/本地设备事件或能力矩阵不可用。
+- **GO（成本适用边界形成完整闭环且可复现）**：真实远端直读与本地拷贝硬件事件、能力矩阵参数、Payload 尺寸、重读次数及同场次基线完整齐备；临界交叉点 $N_{crit}$ 在至少 3 轮独立重复实测中保持稳定，路径决策推荐与实际测得的总耗时高度自洽，且未引发请求超时、显存耗尽或失败率恶化。
+- **CONDITIONAL（场景条件受限）**：Direct-View 仅在极低重读次数、小 Payload 或 Prefill 阶段展现出确定性净收益；Decode 阶段结论严格限定于已测的输出 Token 长度、并发度及网络拓扑。
+- **NO-GO（路径未产生净加速收益）**：在合法的实测中，View 或 Copy 模式在其声明的适用场景下性能持续劣于对比路径，或路径切换引入了不可接受的尾部时延抖动、显存开销或失败率上升。
+- **NOT-SUPPORTED（功能未支持）**：当前仅具备纯数学公式模型、合成服务脚本，缺乏底层远端/本地硬件设备事件凭证或硬件能力矩阵不可用。
 
-### 7.2 Decode 直读证伪
+### 7.2 Decode 阶段直读证伪判定
 
-- **GO（完成证伪并形成策略）**：真实在线 A/B 显示 Decode 的 Direct-View 在运行前冻结的输出长度和并发范围内，TPOT/尾部成本显著高于 Copy-to-HBM 或本地重算，并能由逐 Token 远端读事件解释；随后把 Copy-to-HBM 设为相应场景的优先路径。
-- **CONDITIONAL（边界而非全局结论）**：只有特定 payload、输出长度、复用模式或设备上观察到直读放大；策略限定在这些条件。
-- **NO-GO（证伪不成立或目标路径更差）**：实测未观察到预期差异，或 Copy-to-HBM 的一次性成本和显存压力反而造成更差的在线结果；不得保留未经数据支持的固定策略。
+- **GO（完成科学证伪并确立优先策略）**：在真实大模型在线 A/B 实测中，证实 Decode 阶段采用 Direct-View 在运行前冻结的输出长度与并发范围内，其 TPOT 均值与尾部时延显著劣于 Copy-to-HBM 或本地直接重算，且该性能劣化可由底层逐 Token 跨节点远端访存事件完整归因；系统随后在工程调度层面确立 Copy-to-HBM 为该场景的优先推荐路径。
+- **CONDITIONAL（边界条件证伪）**：仅在特定 Payload 尺寸、超长输出、特定多租复用模式或特定硬件设备上观察到远端直读性能放大；调度策略严格限定于上述条件。
+- **NO-GO（证伪不成立或目标路径表现更差）**：实测未观察到预期的性能劣化，或 Copy-to-HBM 的一次性搬运成本与显存压力导致了更差的端到端业务表现；严禁保留未经实测数据支撑的静态调度策略。
 
-### 7.3 ViewGuard 故障安全
+### 7.3 ViewGuard 故障安全判定
 
-- **GO（故障链闭环）**：每类运行前冻结的故障注入均有实际故障事件；失效租约被阻断，信号/设备异常被捕获，设备队列按驱动规则处理，请求回退到有效路径，进程保持可用，恢复时间和数据一致性均可回溯。
-- **CONDITIONAL（局部保护）**：仅租约过期或软件撤销通过，尚未覆盖远端节点故障、链路断开或设备异常；只能声明已覆盖的故障类型。
-- **NO-GO（安全回退失败）**：有效故障注入导致进程崩溃、失效视图继续被消费、设备队列无法恢复或请求没有安全回退。
-- **NOT-SUPPORTED**：当前没有 SIGBUS/设备错误处理、故障注入程序或真实 View 路径。
+- **GO（故障容错恢复链形成完整闭环）**：每类运行前冻结的故障注入测试均产生了真实的底层故障事件；失效租约被瞬间阻断，SIGBUS 信号或设备硬件错误被安全捕获，加速器硬件队列按驱动规范平稳重置，请求成功回退至 Copy-to-HBM 或本地重算有效路径，本地进程保持稳定存活，恢复耗时与数据一致性均具备权威复核凭证。
+- **CONDITIONAL（局部故障保护）**：仅在租约自然过期或应用层主动撤销场景下通过验证，尚未覆盖远端节点物理宕机、通信链路断开或底层硬件异常；结论严格限定于已覆盖的故障类型。
+- **NO-GO（安全回退机制失效）**：在合法的故障注入下导致本地推理进程异常崩溃、失效的远端显存对象被继续错误消费、加速器硬件队列死锁无法恢复或业务请求未实现安全回退。
+- **NOT-SUPPORTED（物理环境未支持）**：现场缺乏 SIGBUS 信号与硬件错误处理实现、故障注入程序或真实的远端直读物理路径。
 
 ### 7.4 统一无效证据规则
 
-以下任一情况将对应子实验标为 `INVALID-EVIDENCE`，不得输出 `GO`：
+凡出现以下任一情形，对应子实验一律判定为 `INVALID-EVIDENCE`，严禁给出 `GO` 结论：
 
-- 把代码内 0.02ms、0.85ms、3.20ms 或服务脚本合成数值写成实测；
-- 把 `--evidence-level LAB` 字符串、`DEMO_ONLY` 或 `handle_remote_crash_fallback=false` 当作真实状态；
-- 没有实际远端读、Copy DMA、HBM 读取、设备完成或逐 Token 事件；
-- 租约对象、地址、长度、布局、权限、可见性 epoch 或实际路径无法证明；
-- 缺少故障注入时间、信号/设备事件、进程状态、回退结果或原始日志；
-- 缺少同场次 A/B、重复实验、版本、拓扑或能力矩阵；
-- 缺失字段用 0 或 `FALSE` 补齐，或将未观测解释为“没有故障”。
+- 将 C++ 源码内预置的 0.02ms、0.85ms、3.20ms 等默认值或服务脚本生成的合成数值直接作为实测成绩填报；
+- 将命令行传入的 `--evidence-level LAB` 字符串、脚本输出的 `DEMO_ONLY` 或函数返回的 `handle_remote_crash_fallback=false` 误判为真实硬件状态；
+- 缺乏底层真实的远端访存、Copy DMA 搬运、本地 HBM 读取、硬件完成中断或逐 Token 采样事件；
+- 租约对象 ID、物理地址、长度、数据布局、权限范围、可见性 Epoch 或实测物理路径无法提供权威凭证；
+- 缺失故障注入时间戳、硬件信号/设备错误记录、本地进程存活性状态、回退执行结果或原始系统日志；
+- 缺失同场次 A/B 对照数据、多轮重复实测记录、代码版本凭证、网络拓扑或硬件能力矩阵来源；
+- 关键指标缺失却采用 0 或 `FALSE` 强行补齐，或将未实际观测解释为“未发生系统故障”。
 
 ---
 
 ## 8. 执行阶段与交付闭环
 
-| 阶段 | 工作内容 | 必须交付 | 退出条件 |
-|---|---|---|---|
-| 阶段 A：模型与 W0 流程 | 审计成本公式、合成服务、租约校验和回退占位 | 公式 CSV、合成 JSON、源码审计、`DEMO` manifest | 示意输入与未支持项明确 |
-| 阶段 B：真实性能路径 | 接入 View/Copy 设备路径和在线推理 A/B，形成 $N_{crit}$ 与 TPOT 证据 | 原始读/拷贝事件、TTFT/TPOT、显存和重复汇总 | 每个指标能回指设备事件 |
-| 阶段 C：故障安全与策略固化 | 完成租约撤销、远端故障注入、设备处理和回退对账 | 故障证据包、恢复表、路径策略和分项结论 | 性能与安全均通过公共契约，未覆盖项单独列出 |
+测试实施划分为三个严密的演进阶段：
 
-本项的最终作用是让调度器根据真实成本和租约状态选择远端直读、本地拷贝或重算，并验证远端视图失效时的安全回退边界。它不能以“公式更快”代替设备实测，也不能以“捕获了一个信号”代替完整业务恢复。
+| 实施阶段 | 核心攻坚内容 | 阶段必须交付物 | 准出判定条件 |
+|---|---|---|---|
+| 阶段 A：模型与 W0 流程 | 严密审计成本推导公式、合成服务脚本、租约基础校验逻辑及回退接口占位实现 | 成本公式 CSV、合成服务 JSON、源码审计报告、`DEMO` 级 manifest | 明确区分示意输入与当前未支持特性的技术边界 |
+| 阶段 B：真实性能路径 | 接入远端直读与本地拷贝的底层硬件通路及真实在线推理 A/B 实测，确立临界交叉点 $N_{crit}$ 与 TPOT 证据链 | 原始读/拷贝事件、TTFT/TPOT 实测表、显存水位轨迹、多轮重复实测汇总 | 每个性能指标均能精准追溯至底层硬件事件 |
+| 阶段 C：故障安全与策略固化 | 攻坚租约瞬间撤销、远端故障可控注入、加速器硬件队列安全重置及业务平稳回退 | 故障注入证据包、安全恢复对照表、动态选路策略报告及分项技术结论 | 性能适用边界与容错安全均通过公共契约核验，未覆盖项清晰单列 |
+
+本验证项的核心价值在于为微秒级动态选路决策引擎（QueryPlan）提供高精度的成本预估模型与租约安全状态输入，并在工程层面证实“Decode 阶段远端直读将引发访存放大、必须优先采用 Copy-to-HBM”的技术边界，同时为分布式显存共享构筑坚不可摧的安全兜底防线。本项严禁用单一的“公式推导更快”代替真实硬件实测，亦不可用“仅捕获了一次信号”代替完整的端到端业务恢复。
 
 ---
 
@@ -454,24 +478,24 @@ results/PVT-03/<subtest>/<run_id>/
 
 ### 9.1 工程师与 Agent 的职责边界
 
-- **工程师负责**：
-  1. 确认远端映射、设备 DMA、HBM、能力矩阵、推理端点和故障注入权限；
-  2. 冻结 payload、重读次数、输出长度、A/B、故障类型、重复轮次和安全边界；
-  3. 执行并记录 View/Copy 请求、租约生命周期、故障注入、进程状态和回退结果；
-  4. 判断 SIGBUS/设备事件和恢复是否来自真实路径，确认测试不会影响生产请求；
-  5. 对 Direct-View 是否开放给某一场景承担现场复核责任。
-- **AI Agent 负责**：
-  1. 先阅读方案和四个实际源码文件，列出真实 CLI、默认参数、输出状态和未实现功能；
-  2. 编写能力矩阵读取、成本复算、TTFT/TPOT 分位数、租约事件和故障日志解析工具；
-  3. 检查 View/Copy 同场次 A/B、$N_{crit}$、缺失字段和证据等级；
-  4. 不凭空创建 `view_guard_test`、`plot_crossover.py`、SIGBUS 通过数据或 NPU Stream 恢复结论。
+- **工程师核心职责**：
+  1. 确认现场远端显存映射、加速卡 DMA 引擎、本地 HBM 通路、PVT-01 硬件能力矩阵、大模型推理端点及故障注入测试权限；
+  2. 固化 Payload 尺寸、重读次数序列、输出 Token 长度、A/B 对照策略、故障注入类型、重复测试轮次及安全红线；
+  3. 实际下发并完整留存 View/Copy 请求数据、租约全生命周期日志、故障注入时间戳、进程存活性记录及回退执行结果；
+  4. 严格审定 SIGBUS 信号与底层设备错误事件是否确由真实物理路径触发并安全恢复，确保测试不会对生产环境产生任何非预期干扰；
+  5. 对 Direct-View 路径是否具备向特定业务场景开放的生产条件承担最终技术复核与签字把关责任。
+- **AI Agent 协同职责**：
+  1. 深入研读本方案设计、公共测试契约及四个原型验证源码文件，精准梳理实际支持的 CLI 参数、代码内置默认值、输出状态及当前未实现功能；
+  2. 编写硬件能力矩阵解析读取、成本模型复算、TTFT/TPOT 分位数计算、租约流转事件审计及故障注入日志解析工具；
+  3. 严格核验 View/Copy 同场次 A/B 实测数据、临界交叉点 $N_{crit}$、缺失字段填报及证据等级规范性；
+  4. 严守学术与技术诚信红线，严禁虚构 `view_guard_test`、`plot_crossover.py`、SIGBUS 捕获通过数据或 NPU Stream 恢复结论。
 
 ### 9.2 可直接复制给 Coding Agent 的 Prompt 模板
 
 ```text
 我正在执行 PVT-03：Direct-View 与 Copy-to-HBM 适用边界及 ViewGuard 安全验证。
 
-请先阅读：
+请先研读以下核心文件：
 1. ./提前验证方案设计/验证计划方案设计/04_PVT-03_DirectView与Copy-to-HBM适用边界与ViewGuard验证实施方案设计.md
 2. ./提前验证方案设计/验证计划方案设计/Benchmark公共契约与证据分级规范.md
 3. ./提前验证方案设计/验证计划方案设计/原型验证代码/PVT-03/view_vs_copy_bench.cc
@@ -479,23 +503,23 @@ results/PVT-03/<subtest>/<run_id>/
 5. ./提前验证方案设计/验证计划方案设计/原型验证代码/PVT-03/view_guard.cc
 6. ./提前验证方案设计/验证计划方案设计/原型验证代码/PVT-03/benchmark_serving_view.py
 
-约束：
-- 先列出真实 CLI 和源码行为；确认 view_vs_copy_bench.cc 只用 CLI 时间做公式，benchmark_serving_view.py 只输出 DEMO 合成 JSON。
-- 确认 ViewLease 只有对象、地址、长度、过期时间和有效位；handle_remote_crash_fallback 当前返回 false，没有 SIGBUS handler、Stream Abort 或回退实现。
-- 真实性能结论必须读取能力矩阵并保留远端读、Copy DMA、HBM 读取、设备完成和逐 Token 事件；不能把示意值写成 MEASURED。
-- ViewGuard 只有在故障事件实际发生、租约撤销、设备处理、Copy/重算回退、进程状态和恢复结果全部可回溯时才允许判定。
-- 缺失字段使用 null 并填写 invalid_reason；性能边界与安全故障分开出结论；不创建不存在的 view_guard_test 或 plot_crossover.py。
-- 最后输出：源码能力矩阵、实际命令、View/Copy 成本表、Decode A/B 字段、故障注入字段、未支持项和下一步最小代码改动建议。
+执行约束与任务要求：
+- 首先梳理源码实际支持的 CLI 参数与底层执行行为；确认 view_vs_copy_bench.cc 仅使用 CLI 传入的时延做纯公式计算，benchmark_serving_view.py 仅输出 DEMO 级别的合成 JSON 数据。
+- 确认当前 ViewLease 仅包含对象 ID、地址、长度、过期时间与原子有效位；handle_remote_crash_fallback() 固定返回 false，尚未集成 SIGBUS Handler、NPU Stream Abort 或本地重算回退。
+- 真实的性能适用结论必须读取 PVT-01 产出的硬件能力矩阵，并完整保留底层远端读、Copy DMA 搬运、本地 HBM 读取、硬件完成中断及逐 Token 采样事件；严禁将示意值填入 MEASURED 字段。
+- ViewGuard 容错结论仅在底层故障事件真实发生、失效租约瞬间阻断、硬件队列平稳重置、Copy/重算回退成功、进程存活性及恢复耗时全部可追溯时方可给出。
+- 未采集到的字段显式置为 null 并详细注明 invalid_reason；性能适用边界与容错安全门限分别独立输出结论；严禁虚构不存在的 view_guard_test 或 plot_crossover.py 脚本。
+- 最终输出：源码能力核验矩阵、实际执行命令清单、View/Copy 成本对比表、Decode A/B 实测字段表、故障注入审计表、未支持特性清单以及下一步最小代码重构建议。
 ```
 
 ### 9.3 常见排错指南
 
-- **Crossover 点随默认参数变化**：这是公式模型预期现象；检查输入时延是否来自能力矩阵和同一 payload，不能把某个默认交叉点写成固定结论。
-- **运行服务脚本后没有真实端点日志**：当前脚本不连接推理服务，只生成 DEMO JSON；不要把它当作 TTFT/TPOT 实测。
-- **`validate_access` 在租约过期后仍允许访问**：核对单调时钟、过期时间单位、并发撤销和对象/地址范围；当前实现没有完整并发安全协议。
-- **故障回退返回 `false`**：这是当前 `handle_remote_crash_fallback()` 的固定行为，表示回退未实现，不是“故障已安全处理”。
-- **想直接运行 `view_guard_test`**：当前目录没有该文件；先实现隔离故障注入工具和原始事件记录，再执行安全判定。
-- **SIGBUS handler 导致新的崩溃**：检查 handler 中是否调用了非异步信号安全函数、是否重复进入、是否有有效 `sigsetjmp` 锚点；设备队列处理必须由现场驱动验证。
-- **Copy-to-HBM 显存不足**：记录显存水位、分配失败和回退到重算的实际事件；不能用降小 payload 后的结果替代原场景。
-- **跨节点时间无法直接相减**：优先使用同一节点单调时钟；跨节点时记录 PTP/其他同步方式及误差上限。
-- **View 更快但业务 TPOT 变差**：区分一次性 TTFT 和 Decode 高频重读成本，不能只按首字延迟选择路径。
+- **测得的临界交叉点 $N_{crit}$ 随代码内置默认参数变动**：此为纯公式模型的预期现象；检查输入时延参数是否源自 PVT-01 硬件能力矩阵实测且对应相同的 Payload 尺寸，严禁将单一默认交叉点包装为固定技术结论。
+- **运行服务评测脚本后未捕获到真实的大模型推理日志**：当前脚本并未实际连接推理服务，仅用于生成 DEMO JSON 数据；切勿将其误当成真实 TTFT/TPOT 的实测表现。
+- **调用 `validate_access` 在租约过期后依然判定为允许访问**：核对单调时钟计时器、过期时间单位、并发撤销机制及对象/地址空间范围；当前源码实现尚未包含完整的跨节点并发安全协议。
+- **调用故障回退接口固定返回 `false`**：此为当前受控工程 `handle_remote_crash_fallback()` 的占位行为，代表回退机制尚未在底层打通，绝不代表“故障已被安全处理”。
+- **尝试直接运行 `view_guard_test` 脚本**：当前受控目录中不存在该测试文件；应首先在隔离环境中开发故障注入与原始事件采集工具，再开展安全判定。
+- **安装 SIGBUS 信号 Handler 后导致进程产生二次崩溃**：检查 Handler 内部是否调用了非异步信号安全 (Non-Async-Signal-Safe) 的函数、是否存在信号重入问题、是否设置了合法的 `sigsetjmp` 跳转锚点；加速卡硬件执行队列的安全重置必须由原厂驱动提供底层支持。
+- **执行 Copy-to-HBM 路径时出现显存不足 (OOM)**：完整记录当时的显存水位轨迹、显存分配失败事件及主动回退至本地重算的执行日志；严禁通过私自缩减 Payload 尺寸来掩盖大模型真实长上下文下的显存瓶颈。
+- **跨节点传输时间戳计算出现负数或异常偏差**：优先采用单节点内的单调硬件时钟进行相对耗时计算；若必须进行跨节点时间对齐，需完整记录 PTP 等时钟同步状态及纳秒级误差上限。
+- **Direct-View 虽然首字耗时更低但在线业务 TPOT 发生严重劣化**：在技术评审中必须严格区分 Prefill 阶段的一次性 TTFT 收益与 Decode 阶段高频重读的累积成本，严禁单纯依赖首字延迟指标盲目选择数据路径。

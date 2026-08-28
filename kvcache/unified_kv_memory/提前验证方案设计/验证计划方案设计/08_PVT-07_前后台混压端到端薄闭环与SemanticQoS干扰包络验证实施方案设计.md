@@ -1,266 +1,279 @@
 # PVT-07：前后台混压端到端最小闭环（Vertical Slice）与 SemanticQoS 干扰控制验证实施方案设计
-## —— 全链路前后台混压验证：原生参考实现、统一 KV 方案与 SemanticQoS 对照
+## —— 全链路前后台混压验证：原生参考实现、统一 KV 方案与 SemanticQoS 服务质量对照
 
-> **公共执行契约**：本项遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。每个 `run_id` 必须冻结硬件、拓扑、模型、工作负载、请求速率、后台负载、代码包、配置哈希、QoS 配置、预热、测量窗口和证据等级；结果必须保留前台逐请求 TTFT/TPOT、完成与失败请求、实际 QPS、后台目标/实际带宽、网卡队列计数、CPU/DDR/PCIe 观测、`planned_path`/`actual_path` 和前后台时间线。TTFT/QPS 的收益基线是相同条件下的原生参考实现混压，TPOT 干扰基线是同一增强代码包的纯前台运行，两种基线不能互相替代。
+> **公共执行契约**：本项严格遵循 [Benchmark 公共契约与证据分级规范](./Benchmark公共契约与证据分级规范.md)。每个测试 `run_id` 必须在运行前完整固化物理服务器硬件、网络拓扑、模型架构、工作负载特征、前台目标请求速率、后台 I/O 压力、代码包版本、配置哈希、QoS 队列策略、预热周期、稳态采样窗口及目标证据等级；实测产出必须完整保留前台逐请求 TTFT/TPOT 原始采样、成功与失败请求对账、实际达成 QPS、后台目标/实测读写带宽、网卡硬件队列计数、Host CPU/DDR/PCIe 性能观测、`planned_path`/`actual_path` 路径对账及前后台混压物理时间线。TTFT 与 QPS 的收益对账基线必须严格设定为同等物理条件下的原生参考实现混压测试，而 TPOT 干扰率的评估基线必须设定为同一增强代码包的纯前台无干扰运行，严禁混淆或互相替代两类不同性质的对账基线。
 
-> **验证范围声明**：当前受控工程中的 `mixed_workload_bench.py` 只运行本地 asyncio 协程，前台和后台都是数学/睡眠模拟；`semantic_qos_controller.py` 只提供布尔暂停控制，没有网卡队列、动态预算或 `Worker.step()` 行级回调；`run_mixed_bench.py` 也不能读取当前 DEMO 输出直接形成三组真实对照。因此当前代码只能验证字段、统计公式和控制流程，不能单独证明真实推理服务、RoCE 队列、SSD I/O、SemanticQoS 生效或两节点混压已成立；缺少真实服务事件、设备计数器和原始日志的结果只能标记为 `DEMO`/`LAB`。
+> **验证范围声明**：在当前受控的原型验证工程中，`mixed_workload_bench.py` 仅在本地单机运行 Python asyncio 协程，前台在线时延与后台搬运吞吐均基于数学概率分布与 sleep 延时进行纯软件模拟；`semantic_qos_controller.py` 仅提供了单进程内的布尔变量暂停控制，尚未对接 RoCE 网卡硬件队列、应用层动态带宽预算调节或 `Worker.step()` 算子级事件回调；`run_mixed_bench.py` 亦无法直接将当前的 DEMO 演示输出作为三组生产级输入进行闭环门禁评估。因此，现有受控源码仅用于验证接口定义、统计公式及门禁判决逻辑，不可直接作为证明真实在线大模型推理服务已打通、RoCE 优先级队列已生效、NVMe SSD 物理 I/O 已受控、SemanticQoS 干扰抑制已达标或双节点集群混压测试已通过的依据。在缺乏真实分布式服务调用、硬件性能计数器及原始系统日志的前提下，测试结论统一限定标记为 `DEMO` 或 `LAB`。
 
-> **术语速查**：KVCache（大模型注意力键值缓存，即自回归生成过程中保存历史 Key 和 Value 激活状态、避免后续 Token 重复计算注意力）；Decode（逐 Token 生成阶段，前台 TPOT 主要在此形成）；TTFT（Time To First Token，首字生成延迟）；TPOT（Time Per Output Token，每个输出 Token 的生成耗时）；QoS（Quality of Service，服务质量，即用优先级、带宽预算和退避控制保护前台请求）；SemanticQoS（前后台服务质量保障策略，即让在线 Decode 流和后台 KV 搬运流采用可区分、可观测的调度规则）；RoCE（RDMA over Converged Ethernet，基于以太网的远程直接内存访问）；DSCP（IP 包中的差分服务标记，用于映射网络优先级）；CoS（以太网帧的服务类别标记）；TC0/TC1（硬件流量类别队列，本文约定 TC0 承担前台高优先级流、TC1 承担后台流）；Incast（多对一突发网络拥塞，即多个发送节点同时向一个接收端发送）；Worker.step()（推理 Worker 的一次调度/执行步，目标实现可在此边界通知后台退避）；EWMA（指数加权移动平均，用于平滑观测）；CDF（累计分布函数，用于展示时延分布）；P99（延迟分布中 99% 样本不超过的分位值）；后台目标带宽（实验前设定的发送目标，不等于设备或网络实际带宽）。
+> **术语速查**：
+> - **KVCache**：大模型注意力键值缓存（大模型自回归生成过程中缓存的历史 Key 与 Value 激活状态张量，用于避免后续 Token 生成时重复计算注意力）；
+> - **Decode**：逐字生成阶段（大模型逐个输出 Token 的计算阶段，前台 TPOT 尾部延迟主要在该阶段形成）；
+> - **TTFT**：Time To First Token（首字生成延迟 / 首 Token 响应时间）；
+> - **TPOT**：Time Per Output Token（每个输出 Token 的生成耗时 / 单字生成延迟）；
+> - **QoS**：Quality of Service（服务质量：通过硬件优先级队列映射与带宽保留，确保高优先级实时前台请求不受后台大流量搬运的干扰）；
+> - **SemanticQoS**：前后台服务质量保障策略（通过网络 RoCE 优先级队列映射与应用层微秒级自适应退避，确保后台数据换出与拉取不干扰前台在线推理的 TPOT 尾部延迟）；
+> - **RoCE**：RDMA over Converged Ethernet（基于以太网的通用远程直接内存访问协议）；
+> - **DSCP**：Differentiated Services Code Point（IP 报文差分服务标记，用于向交换机声明网络优先级）；
+> - **CoS**：Class of Service（以太网数据链路层服务类别标记）；
+> - **TC0/TC1**：Traffic Class 0/1（网络硬件流量类别优先级队列，约定 TC0 承载前台高优先级在线流，TC1 承载后台大流量搬运流）；
+> - **Incast**：多对一突发网络拥塞（多个发送节点在极短时间内同时向单一接收节点回传数据包，导致交换机出端口缓冲区瞬间耗尽而引发的排队丢包风暴）；
+> - **Worker.step()**：大模型推理引擎单步调度与执行生命周期（SemanticQoS 控制器在该物理边界通知后台 I/O 动态退避降速）；
+> - **EWMA**：Exponentially Weighted Moving Average（指数加权移动平均：用于平滑短周期噪声的统计算法）；
+> - **CDF**：Cumulative Distribution Function（累积分布函数：用于直观展示时延分位数分布）；
+> - **P99**：99 分位值（数据集中 99% 样本均优于该阈值的统计指标）；
+> - **后台目标带宽**：实验前配置的预期发送速率（不等于底层网络或设备的实际吞吐）。
 
 > **验证 ID**：PVT-07
 > **验证名称**：前后台混压端到端最小闭环（Vertical Slice）与 SemanticQoS 服务质量保障验证
 > **验证优先级**：**🔴 P0 级（核心关键项）**
 > **对应验证阶段**：**E3（全链路前后台混压总门禁）**
-> **证伪标记**：否（全链路系统与服务质量保障确认）
-> **建议周期**：7~8 人日
+> **证伪标记**：否（全链路系统与服务质量保障能力确认）
 > **主关联 IR**：`IR-01-04`, `IR-01-11`, `IR-02-06`
 > **核心 SRS / SR23 锚点**：
 > - SRS：`L3-QO-SemanticQoS-045`, `L3-MS-StateAwarePrefetch-081`, `L3-OB-PerPathTelemetry-047`, `L4-FT-PathIntegrityPolicy-077`
 > - SR23：`SR23-01-04-01`, `SR23-01-11-02`, `SR23-02-02-01`, `SR23-02-02-02`, `SR23-02-06-01`, `SR23-02-11-01`, `SR23-02-12-03`, `SR23-02-12-05`
-> **配套源码**：[`提前验证方案设计/验证计划方案设计/原型验证代码/PVT-07/`](file:///d:/codes/reports/kvcache/unified_kv_memory/提前验证方案设计/验证计划方案设计/原型验证代码/PVT-07)
-> **开源基线版本**：Mooncake `f90ae691f109e49a60920e0c8abbf7e572826d8c`；vLLM `842dd8fd96650063e1ad32e6075742d457d39773`。正式结果必须绑定实际服务、网卡/交换机 QoS 配置、驱动/运行时和配置哈希。
+> **配套源码**：[`./原型验证代码/PVT-07/`](./原型验证代码/PVT-07/)
+> **开源基线版本**：Mooncake `f90ae691f109e49a60920e0c8abbf7e572826d8c`；vLLM `842dd8fd96650063e1ad32e6075742d457d39773`。正式测试结果必须绑定实际推理服务引擎、网卡与交换机 QoS 配置、底层驱动及配置哈希。
 
 ---
 
 ## 0. 架构导读与核心概念第一性原理剖析
 
-### 0.1 前后台混压的物理干扰链
+### 0.1 前后台混压的物理资源争用与干扰链剖析
 
-前台在线 Decode 与后台 KV 搬运可能共同竞争网络出端口、PCIe、设备 DMA 队列、Host DDR 和 CPU 调度。一个可验证的物理链路应写成：
-
-```text
-前台请求 -> 推理调度 -> Decode/集合通信 -> 输出 Token
-后台 KV 任务 -> 设备/网络 I/O -> 队列排队 -> 设备完成
-                              \-> 与前台共享网络、PCIe、显存或 Host DDR
-```
-
-QoS 的作用不是让后台任务消失，而是在前台 Decode 的关键窗口限制后台的占用，并让这种限制可以由队列计数、实际带宽和前台逐请求 TPOT 对账。仅在 Python 协程中延长 `sleep`，不能证明硬件队列确实发生了优先级调度。
-
-### 0.2 目标 SemanticQoS 双层机制
-
-目标实现可分为两层：
-
-1. **硬件层**：将前台和后台标记映射到不同队列，例如前台使用高优先级 TC0、后台使用 TC1；具体 DSCP/CoS 数值和无损配置由现场设备确认；
-2. **应用层**：在前台 Decode Step 开始时降低或暂停后台提交，在 Step 结束后依据实时观测按受控步长恢复，设置恢复上限和连续超时保护。
+在大模型分布式推理集群中，前台在线推理的 Decode 阶段对时延高度敏感，每个 Token 的自回归生成均依赖微秒级的显存访问与节点间集合通信。而在同一物理节点与网络互联拓扑上，后台数据面同时承载着海量的分层存储换入换出、跨节点 Prefetch 预取以及热点数据广播任务。在物理硬件层面，前后台双流将共同争用以下关键路径：
 
 ```text
-前台 step begin
-    -> 记录事件和 step_seq
-    -> 降低后台提交预算
-    -> 前台执行 Decode/集合通信
-前台 step end
-    -> 记录本步 TPOT
-    -> 更新平滑观测和尾部计数
-    -> 按规则恢复后台预算，但不超过上限
+前台在线流 : 在线请求 ──► 批处理调度 ──► NPU Decode 计算 ──► 节点间集合通信 AllReduce ──► 输出 Token
+                                                   │                       │
+                                           [PCIe 总线争用]          [网卡出端口 Incast 争用]
+                                                   │                       │
+后台搬运流 : 冷热 KV 换出 ──► DMA 读写 ──► PCIe P2P 传输 ──────────► RoCE 高吞吐网络传输 ──► 目标介质
 ```
 
-该机制必须与后台 I/O 的实际提交端相连。只改变一个控制器对象里的 `bool`，而后台任务不读取该对象，不能形成控制闭环。
+若缺乏系统级的流控隔离，后台突发大流量搬运将迅速打满交换机出端口缓冲区与 PCIe 总线带宽，导致前台微秒级的 AllReduce 集合通信数据包在网卡队列中剧烈排队甚至遭遇丢包重传，直接引发前台 TPOT 产生严重的数百毫秒长尾抖动，破坏业务在线 SLO。
 
-### 0.3 当前受控源码能力矩阵
+SemanticQoS 服务质量保障策略的核心物理目标，绝非简单消除后台搬运任务，而是在前台执行在线 Decode 的微秒级关键时间窗口内，利用软硬件协同流控主动压制后台流量，确保前台集合通信拥有绝对纯净的总线与网络快路径。
 
-| 文件 | 当前可确认行为 | 当前不能声称的能力 |
+### 0.2 SemanticQoS 软硬件协同双层保障机制
+
+原厂软硬件协同架构建立了“硬件流分类队列 + 应用层微秒级自适应退避”的纵深防御体系：
+
+1. **硬件层（网络与总线流控）**：通过在 IP 报文头部打上标准 DSCP/CoS 标记，在网卡硬件与交换机出端口将流量严格划分为不同的 Traffic Class 队列。将前台在线交互流映射至最高优先级的 **TC0** 队列（保障严格优先调度与专属带宽隔离），后台搬运流映射至较低优先级的 **TC1** 队列，从物理层消除 Incast 队列头阻塞；
+2. **应用层（微秒级自适应动态退避）**：在前台推理引擎的单步算子执行物理边界 (`Worker.step()`) 动态捕获时延指标。在 Step 启动瞬间自动缩减后台 I/O 提交预算；在 Step 结束且 TPOT 稳定达标后，基于指数加权移动平均 (EWMA) 按受控步长平滑恢复后台带宽，并设置硬性上限保护。
+
+```text
+前台推理 Worker.step() 开始
+        │
+        ├─► 发送 StepBegin 事件，记录物理时间戳
+        ├─► 瞬间压低后台 I/O 提交带宽预算 (foreground_guard_budget)
+        └─► 前台高优先级执行 Decode 计算与 AllReduce 集合通信 (独占 TC0 硬件队列)
+        │
+前台推理 Worker.step() 结束
+        │
+        ├─► 采样并记录当前 Step 的实际 TPOT 耗时
+        ├─► 更新 EWMA 移动平均线，监测长尾抖动偏离度
+        └─► 若 TPOT 稳定在安全包络内 ──► 按步长受控恢复后台带宽预算 (不超过 max_budget)
+            若 TPOT 发生超限扰动   ──► 触发指数退避，进一步收紧后台 I/O 吞吐
+```
+
+该控制机制必须与底层存储和网络 I/O 引擎的实际提交队列深度结合。严禁仅在控制器类内部维护孤立的布尔变量而底层传输引擎毫无感知的“假闭环”。
+
+### 0.3 当前受控源码能力矩阵审计
+
+| 源码文件与路径 | 当前受控源码实际行为 | 现阶段尚不能声称的能力 |
 |---|---|---|
-| `原型验证代码/PVT-07/mixed_workload_bench.py` | asyncio 并发运行前台/后台协程；前台用指数分布或正态分布生成 TPOT；后台按 64MB 和固定睡眠间隔累计模拟字节；输出 `tpot_*`、`bg_bandwidth_gbps`、`DEMO`、`DEMO_ONLY` | 没有真实推理请求、TTFT、QPS、网络/SSD I/O、Worker.step、硬件队列或两节点通信 |
-| `原型验证代码/PVT-07/semantic_qos_controller.py` | `on_foreground_step_begin()` 设置 `bg_throttled=True`；结束时直接恢复为 false；超限分支为 `pass`；`allow_background_transfer()` 只返回布尔值 | 没有 TC0/TC1、DSCP/CoS、带宽预算、EWMA、动态退避、后台提交端或微秒级事件 |
-| `原型验证代码/PVT-07/run_mixed_bench.py` | 读取三个 JSON；校验必需字段、A/B 公平性、背景带宽差异；计算 TTFT 降幅、QPS 提升、TPOT 干扰率和门限 | 不生成真实指标；不检查输入状态是否为 `MEASURED`；只拒绝 `evidence_level == DEMO`；异常状态使用脚本内部 `INVALID_EVIDENCE` |
-| `原型验证代码/PVT-07` 目录 | 没有独立的前台服务启动器、后台真实 I/O 适配器、网卡配置脚本或结果可视化脚本 | 不能声称已完成端到端最小闭环 |
+| `原型验证代码/PVT-07/mixed_workload_bench.py` | 采用 Python asyncio 并发运行前台与后台协程；前台通过正态/指数随机分布生成模拟 TPOT；后台按 64MB 固定间隔累加模拟字节数；输出 `tpot_*`、`bg_bandwidth_gbps` 并标记 `DEMO,DEMO_ONLY` | 无真实推理服务打流；无实际 TTFT 与 QPS 测量；无底层 RoCE 网卡与 NVMe SSD 物理 I/O；未对接 `Worker.step()`；无真实双节点集群通信 |
+| `原型验证代码/PVT-07/semantic_qos_controller.py` | `on_foreground_step_begin()` 将 `bg_throttled` 设为 `True`；`on_foreground_step_end()` 直接将其重置为 `False`；超限分支为空操作 (`pass`)；`allow_background_transfer()` 仅返回布尔值 | 未实现 TC0/TC1 硬件队列映射；无 DSCP/CoS 标记；无动态带宽预算管理；无 EWMA 时延平滑；无后台真实 I/O 提交控制 |
+| `原型验证代码/PVT-07/run_mixed_bench.py` | 读取三组 JSON 报告；执行字段完整性校验、A/B 对照公平性核验及后台带宽偏差计算；依据公式计算 TTFT 降幅、QPS 提升及 TPOT 干扰率 | 本身不产生真实性能指标；未对输入数据是否来自生产级 `MEASURED` 建立自动核验；对输入为 DEMO 的数据仅做拒绝拦截 |
+| `原型验证代码/PVT-07` 目录 | 当前缺少独立的前台推理服务启动器、后台真实 I/O 驱动适配器、网络队列配置脚本及 CDF 绘图工具 | 当前工程代码尚不能单独证明已完成全链路端到端混压验证 |
 
-### 0.4 当前脚本之间不能直接串联
+### 0.4 当前脚本之间的数据格式边界
 
-`mixed_workload_bench.py` 的输出只有 `qos_enabled`、前台样本数量、TPOT 分位数、后台模拟带宽、证据级别和 seed；`run_mixed_bench.py` 要求 `run_id`、`package_id`、`config_hash`、硬件/拓扑/工作负载、模型、目标速率、P99 TTFT、P99 TPOT、QPS 和 `bg_bw_gbps` 等字段。当前输出缺少这些字段，因此不能直接作为汇总脚本的三组输入。
+`mixed_workload_bench.py` 生成的演示 JSON 仅包含 `qos_enabled`、样本量、TPOT 分位数及模拟后台带宽；而 `run_mixed_bench.py` 严格要求输入 JSON 包含 `run_id`、`package_id`、`config_hash`、`hardware_profile`、`topology_profile`、`workload_id`、`model_id`、`target_rate_rps`、`p99_ttft_ms`、`p99_tpot_ms`、`qps` 及 `bg_bw_gbps` 等全量对账字段。因此，当前 DEMO 生成的演示 JSON 无法直接作为汇总脚本的三组输入。
 
-此外，`mixed_workload_bench.py` 只有 `--fg-clients`、`--bg-workers`、`--duration`、`--qos`、`--out`、`--seed` 参数，没有文档旧稿中使用的 `--mode`、`--rate`、`--prompts` 或 `--bg-gbps`。当前脚本只能分别运行 QoS 关闭和开启的本地 DEMO，不能表达“纯前台、原生混压、统一 KV 混压”三种工程模式。
+此外，当前 `mixed_workload_bench.py` 仅支持 `--fg-clients`、`--bg-workers`、`--duration`、`--qos`、`--out` 与 `--seed` 参数。早期文档中提及的 `--mode` 或 `--bg-gbps` 在当前代码中尚未支持。
 
-## 1. 验证目标与交付物
+---
 
-### 1.1 验证目标
+## 1. 验证目标、交付物与候选准入门槛
 
-| 目标 | 需回答的问题 | 最低证据 |
+### 1.1 核心验证目标
+
+| 验证核心维度 | 必须回答的物理与工程问题 | 必须具备的最低客观证据 |
 |---|---|---|
-| 前台基线 | 同一增强代码包无后台时的 TTFT、TPOT、实际 QPS 是多少 | 真实服务请求、逐请求样本和完成/失败统计 |
-| 原生混压 | 原生参考实现承受相同后台负载时的 P99 TTFT、P99 TPOT 和 QPS 是多少 | 真实后台提交/完成计数和前台时间线 |
-| QoS 混压 | 开启 SemanticQoS 后，后台负载可比时前台指标如何变化 | 队列映射、控制事件、实际后台带宽和前台样本 |
-| 控制闭环 | `Worker.step()` 或等价事件是否真正改变后台提交预算 | step 事件、预算变化、后台提交端观测 |
-| 可靠性 | 网络拥塞、后台短 I/O、前台突发和控制器恢复是否可处理 | 异常日志、前后台状态、恢复时间和请求完成情况 |
+| 纯前台黄金基线 | 同一增强代码包在无后台 I/O 干扰时的 TTFT、TPOT 及实际 QPS 物理基线是多少 | 真实在线推理服务打流、逐请求全量样本及成功/失败对账表 |
+| 原生参考实现混压 | 原生参考实现在承受相同后台满载 I/O 压力时的 P99 TTFT、P99 TPOT 及 QPS 表现如何 | 真实后台 I/O 提交/完成对账日志、前台逐请求时间线及物理网络拥塞监控 |
+| 统一 KV 方案 QoS 混压 | 开启 SemanticQoS 双层保障后，在同等后台负载下系统能否显著降低前台时延并提升吞吐 | 硬件队列统计、QoS 动态退避事件流、后台实测吞吐及前台逐请求时延样本 |
+| 控制面闭环有效性 | 前台 `Worker.step()` 事件是否能在微秒级时间内切实驱动后台 I/O 提交预算退避与平稳恢复 | Step 事件物理时间戳、带宽预算动态调节日志、底层 I/O 提交端实测对账 |
+| 异常与拥塞鲁棒性 | 在突发网络 Incast 拥塞、后台短 I/O 异常及前台突发流量冲击下，系统能否平稳收敛 | 交换机 PFC 丢包监控、异常错误日志、QoS 控制器恢复耗时及请求成功率 |
 
-### 1.2 目标门限
+### 1.2 候选工程准入门槛 (E3 阶段)
 
-在真实两节点、统一请求流和相同后台实际负载条件下，候选 E3 门限为：
+在真实的 2 节点集群、完全相同的模型权重、请求序列及后台物理负载条件下，E3 全链路混压总门禁的候选准入门槛如下（非当前测试桩已达到的结论）：
 
-- 相对原生参考实现混压，统一 KV 混压的 P99 TTFT 降低至少 20%；
-- 相对原生参考实现混压，统一 KV 混压的实际 QPS 提升至少 10%；
-- 相对同一增强代码包纯前台，QoS 混压的 P99 TPOT 干扰率小于 3%。
+- **首字生成延迟改善**：相对同等负载下的原生参考实现混压测试，统一 KV 方案的 **首字生成延迟 P99 TTFT 降低 $\ge 20\%$**；
+- **在线服务吞吐提升**：相对同等负载下的原生参考实现混压测试，统一 KV 方案的 **在线请求达标吞吐量 (QPS) 提升 $\ge 10\%$**；
+- **前台长尾干扰抑制**：相对同一增强代码包的纯前台黄金基线，开启 SemanticQoS 后的 **单字生成延迟 P99 TPOT 干扰恶化率 $< 3\%$**。
 
-这些是待测门限，不是当前 DEMO 的结果。后台实际带宽偏离 A/B 对照容差时，应先判为无效或条件结果，不能继续套用门限。
+### 1.3 阶段交付资产
 
-### 1.3 交付物
+每个正式的 `run_id` 必须至少交付以下结构化资产：
 
-1. 同一增强代码包的纯前台基线、原生参考实现混压、统一 KV QoS 混压三组结果；
-2. 每个请求的 TTFT/TPOT、完成状态、错误原因和时间戳；
-3. 后台目标/实际带宽、读写比例、队列计数、QoS 标记和控制事件；
-4. 三组 A/B 公平性检查、P99/QPS 计算和 CDF；
-5. `GO/CONDITIONAL/NO-GO/NOT-SUPPORTED/INVALID-EVIDENCE` 判定及证据缺口。
+1. **《三组核心实验全量原始数据与公平性核验证明》**：涵盖纯前台基线、原生参考实现混压、统一 KV QoS 混压的三份独立 JSON 报告及 A/B 对齐清单；
+2. **《前台逐请求时延全量采样表》**：记录每个请求的到达时间、首 Token 时间戳、逐 Token 生成时延、完成状态及错误归因；
+3. **《后台 I/O 物理吞吐与网络队列审计日志》**：包含后台提交/完成字节数、目标/实测带宽对比、TC0/TC1 网卡队列计数器及 DSCP 抓包凭证；
+4. **《SemanticQoS 控制流转与退避时间线分析报告》**：记录 `Worker.step()` 事件与后台带宽预算的微秒级关联轨迹；
+5. **标准证据包与判定报告**：包含 `manifest.json`、原始数据、CDF 绘图及 `GO | CONDITIONAL | NO-GO | NOT-SUPPORTED | INVALID-EVIDENCE` 最终判定。
 
-## 2. 目标控制接口与调度模型
+---
 
-### 2.1 目标流量描述符
+## 2. 目标控制接口与调度模型设计
 
-当前仓库没有该结构。真实实现前需冻结最小描述符，且明确它只描述控制面，不代表硬件已经支持：
+### 2.1 目标 QoS 流量描述符设计
+
+面向软硬件协同流控，底层 QoS 流量描述符的标准化定义如下：
 
 ```cpp
 enum class TrafficClass : uint8_t {
-    FOREGROUND_ONLINE = 0,
-    BACKGROUND_TIERING = 1,
+    FOREGROUND_ONLINE = 0,      // 前台在线交互流 (高优先级，映射至 TC0)
+    BACKGROUND_TIERING = 1,     // 后台分层搬运流 (低优先级，映射至 TC1)
 };
 
-struct QoSFlowDescriptor {
-    uint64_t run_id_hash;
+struct alignas(64) QoSFlowDescriptor {
+    uint64_t     run_id_hash;
     TrafficClass traffic_class;
-    uint32_t dscp;
-    uint8_t cos;
-    uint32_t queue_id;
-    uint64_t target_bandwidth_bytes_per_sec;
-    uint64_t current_budget_bytes_per_sec;
-    uint64_t in_flight_bytes;
-    uint64_t step_seq;
+    uint32_t     dscp;                          // IP 报文 DSCP 标记 (如 CS6 或 AF41)
+    uint8_t      cos;                           // 以太网 802.1p CoS 优先级标记
+    uint32_t     queue_id;                      // 底层硬件队列 ID (TC0 / TC1)
+    uint64_t     target_bandwidth_bytes_per_sec;// 目标发送带宽
+    uint64_t     current_budget_bytes_per_sec;  // 当前动态分配的传输预算
+    uint64_t     in_flight_bytes;               // 在途未完成 I/O 字节数
+    uint64_t     step_seq;                      // 关联的前台 Step 序号
 };
+static_assert(sizeof(QoSFlowDescriptor) <= 64);
 ```
 
-需要在设备侧确认 `dscp/cos -> queue_id` 的实际映射；在程序侧确认后台 I/O 提交是否读取 `current_budget_bytes_per_sec`。两者任一没有闭合，都只能报告“配置存在”，不能报告“QoS 生效”。
+必须在网络侧通过命令验证 `dscp/cos -> queue_id` 的物理映射生效；在软件侧确认底层 I/O 引擎的提交函数严格受控于 `current_budget_bytes_per_sec`。
 
-### 2.2 目标控制器状态
+### 2.2 SemanticQoS 控制器状态机流转
 
 ```text
-NORMAL
-  -> FOREGROUND_STEP_ACTIVE
-  -> BACKGROUND_BUDGET_REDUCED
-  -> FOREGROUND_STEP_DONE
-  -> RECOVERING_WITH_CAP
-  -> NORMAL
+[NORMAL 常态运行]
+     │
+     ▼
+[FOREGROUND_STEP_ACTIVE 前台 Step 启动] ──► 压低后台预算至 [BACKGROUND_BUDGET_REDUCED]
+     │                                                    │
+     │ 前台 Decode 计算与 AllReduce 通信                  │ 后台按安全预算低速传输
+     ▼                                                    ▼
+[FOREGROUND_STEP_DONE 前台 Step 结束] ◄────────────────────┘
+     │
+     ▼
+[RECOVERING_WITH_CAP 平滑受控恢复] ──(未超限且达到步长)──► [NORMAL 常态运行]
+     │
+     └─► (检测到 TPOT 超限扰动) ──► 触发指数退避 ──► [BACKGROUND_BUDGET_REDUCED]
 ```
 
-控制器需要记录状态进入和退出时间、step 序号、观测到的 TPOT、预算旧值/新值、恢复原因和后台实际提交量。后台任务应能感知预算变化，不能只更新控制器内部字段。
+控制器全流程记录状态迁移时间戳、Step 序号、实测 TPOT 瞬时值、预算调整前后数值及后台实际提交字节数。
 
-### 2.3 退避与恢复规则
+### 2.3 动态退避与平滑恢复数学模型
 
-建议先冻结可审计的规则，再通过现场数据调参：
+$$
+	ext{Step 启动阶段} : \quad B_{	ext{bg}}(t) = \min\left( B_{	ext{guard}}, B_{	ext{bg}}(t-1) ight)
+$$
 
-```text
-若本次或窗口内 TPOT 超过目标：
-    background_budget = max(min_budget, old_budget * backoff_factor)
-若连续窗口未超限：
-    background_budget = min(max_budget, old_budget + restore_step)
-前台 step 活跃期间：
-    禁止后台预算超过 foreground_guard_budget
-```
+$$
+	ext{Step 结束阶段（发生时延超限扰动）} : \quad B_{	ext{bg}}(t) = \max\left( B_{	ext{min}}, B_{	ext{bg}}(t-1) 	imes lpha ight), \quad lpha \in (0, 1)
+$$
 
-`backoff_factor`、`min_budget`、`max_budget`、`restore_step` 和窗口大小必须进入 `config_hash`。当前控制器没有这些字段，不能引用“后台按 10Gbps 线性恢复”作为已有行为。
+$$
+	ext{Step 结束阶段（时延稳定达标）} : \quad B_{	ext{bg}}(t) = \min\left( B_{	ext{max}}, B_{	ext{bg}}(t-1) + \Delta B ight)
+$$
 
-## 3. 实验矩阵与 A/B 公平性
+其中退避系数 $lpha$、最小保障预算 $B_{	ext{min}}$、最大物理上限 $B_{	ext{max}}$ 及恢复步长 $\Delta B$ 必须在测试元数据清单中严格固化。
 
-### 3.1 三组核心条件
+---
 
-| 条件 | 代码包 | 后台负载 | 用途 |
+## 3. 实验矩阵与 A/B 公平性校验规则
+
+### 3.1 三组核心对比条件定义
+
+| 实验条件标识 | 代码包版本与配置 | 后台物理负载 | 核心对账用途与定位 |
 |---|---|---|---|
-| `unified_foreground` | 统一 KV 代码包 | 关闭 | TPOT 干扰基线 |
-| `mooncake_native_mixed` | 原生参考实现 | 开启 | TTFT/QPS 收益基线 |
-| `unified_mixed_qos` | 统一 KV 代码包 | 开启，SemanticQoS | 被测条件 |
+| `unified_foreground` | 原厂软硬件协同增强代码包 (Unified KV) | **完全关闭** (0 后台 I/O) | **TPOT 干扰率计算的绝对黄金基线** |
+| `mooncake_native_mixed` | 开源原生参考实现代码包 (Mooncake Native) | **完全开启** (满载真实 I/O) | **TTFT 降幅与 QPS 提升的同场景收益基线** |
+| `unified_mixed_qos` | 原厂软硬件协同增强代码包 (Unified KV) | **完全开启** (开启 SemanticQoS) | **被测核心目标条件（全链路验证）** |
 
-三组必须冻结硬件、拓扑、模型、精度、Tokenizer、请求数据、目标速率、运行时长和后台负载。纯前台组和统一混压组必须使用相同 `package_id`，这是 `run_mixed_bench.py` 已有的检查；原生参考实现可以使用不同代码包，但其他公平性字段必须一致。
+三组测试必须严格保持服务器物理硬件、拓扑连接、模型权重、量化精度、Tokenizer 词表、Prompt 序列、目标请求速率、测试时长及后台实际负载的绝对一致。`unified_foreground` 与 `unified_mixed_qos` 必须使用完全相同的 `package_id` 与代码构建二进制。
 
-### 3.2 负载矩阵
+### 3.2 负载压力测试矩阵
 
-第一轮可采用以下候选点，现场资源不足时减少点位必须说明：
+| 测试维度 | 正式实施计划标准 | 工程说明与约束 |
+|---|---|---|
+| 前台目标请求速率 | 5、15、30 req/s | 评估不同并发负载下的时延与吞吐边界 |
+| 前台并发客户端数 | 1、8、32、64 并发 | 构造阶梯式的推理请求并发压力 |
+| 后台物理实测带宽 | 物理设备可用带宽的 25%、50%、80% | 检验不同后台压力级别下的总线与网络争用 |
+| 后台并发 Worker 数 | 1、4、8 并发任务 | 评估多流并发下的 I/O 竞争与调度开销 |
+| 稳态评测时长 | 预热 30s，稳态采样 $\ge 5	ext{min}$ | 确保捕获完整的长周期稳态表现与 GC/碎片整理影响 |
+| 负载上下文分布 | 严格固化 Prompt 长度与生成 Token 数分布 | 记录随机种子与测试数据集指纹 |
+| QoS 策略消融对比 | 关闭 QoS、仅硬件队列、仅应用退避、双层完整开启 | 严格拆解并证明各层机制的独立贡献 |
 
-| 维度 | 候选值 |
-|---|---|
-| 前台目标速率 | 5、15、30 req/s；以实际达成速率另行记录 |
-| 前台并发 | 1、8、32、64 |
-| 后台实际带宽 | 设备可用带宽的 25%、50%、80% |
-| 后台并发 worker | 1、4、8 |
-| 运行时长 | 预热 30s，稳态 5min 起步 |
-| 请求规模 | 固定 Prompt/输出 Token 分布；记录 seed 和数据版本 |
-| 后台 I/O | KV 换出、换入、预取分别测量，再测混合比例 |
-| QoS | 关闭、硬件队列、应用退避、双层开启 |
+### 3.3 A/B 对照公平性校验规则
 
-当前 DEMO 默认 `fg_clients=32`、`bg_workers=4`、`duration=5`、`seed=42`，这些只是脚本默认值，不是正式 E3 参数。
+汇总评估工具在计算前必须自动执行以下公平性核验：
 
-### 3.3 A/B 校验规则
+1. 三组数据的 `hardware_profile`、`topology_profile`、`workload_id`、`model_id` 及 `target_rate_rps` 必须完全一致；
+2. `unified_foreground` 纯前台组与 `unified_mixed_qos` 混压组的 `package_id` 必须严格一致；
+3. 两组混压测试（原生参考实现 vs 统一 KV 方案）的后台实测物理带宽 `bg_bw_gbps` 偏差必须在预设容差范围（默认 $\le 5\%$）之内；
+4. 输入数据的证据等级必须为 `MEASURED`，严禁输入任何标记为 `DEMO` 的演示数据。
 
-`run_mixed_bench.py` 当前会检查：
+---
 
-- 三组 `hardware_profile`、`topology_profile`、`workload_id`、`model_id`、`target_rate_rps` 相同；
-- 纯前台组与统一混压组 `package_id` 相同；
-- 两组混压的 `bg_bw_gbps` 偏差不超过 `--background-tolerance-pct`，默认 5%；
-- 输入证据级别不能是字面值 `DEMO`。
+## 4. 工具审计与最小实现增量
 
-正式报告还应补充检查：请求数和输出 Token 分布、后台读写比例、QoS 配置、代码配置哈希、实际运行时长、失败请求比例、时间窗口和 `actual_path`。当前汇总脚本尚未检查这些字段。
+### 4.1 当前基准测试脚本行为审计
 
-## 4. 工具审计、实际命令与最小实现增量
-
-### 4.1 当前 DEMO 的实际命令
-
-当前混流脚本的真实命令为：
+当前受控 `mixed_workload_bench.py` 的执行命令为：
 
 ```bash
 cd ./提前验证方案设计/验证计划方案设计/原型验证代码/PVT-07
-python3 mixed_workload_bench.py \
-  --fg-clients 32 --bg-workers 4 --duration 5 \
-  --out mixed_workload_no_qos_demo.json --seed 42
+python3 mixed_workload_bench.py   --fg-clients 32 --bg-workers 4 --duration 5   --out mixed_workload_no_qos_demo.json --seed 42
 
-python3 mixed_workload_bench.py \
-  --fg-clients 32 --bg-workers 4 --duration 5 --qos \
-  --out mixed_workload_qos_demo.json --seed 42
+python3 mixed_workload_bench.py   --fg-clients 32 --bg-workers 4 --duration 5 --qos   --out mixed_workload_qos_demo.json --seed 42
 ```
 
-应观察两个 JSON 均为 `evidence_level=DEMO`、`status=DEMO_ONLY`，包含 TPOT 模拟样本和后台模拟带宽。第二次运行的 `--qos` 只改变随机样本生成分支，不会配置网卡或调用后台 I/O。
+执行后生成的两个 JSON 明确标记 `evidence_level=DEMO` 与 `status=DEMO_ONLY`。传入 `--qos` 仅在 Python 协程中切换了内部随机数生成分支，未对底层网卡或物理存储产生任何控制作用。
 
-以下旧命令不是当前脚本支持的接口：
+### 4.2 当前门禁汇总脚本行为审计
+
+当前受控 `run_mixed_bench.py` 的 CLI 执行命令为：
 
 ```bash
-python3 mixed_workload_bench.py --mode unified_kv_mixed_qos --bg-gbps 400 --rate 30 --prompts 1000 --out result.json
+python3 run_mixed_bench.py   --unified-foreground <foreground-json>   --mooncake-native-mixed <native-mixed-json>   --unified-mixed <unified-mixed-json>   --background-tolerance-pct 5   --target-rate-rps 30   --out pvt07_summary.json
 ```
 
-若执行会因未知参数失败，不能把该命令写成当前可执行 SOP。
+特别说明：汇总脚本在捕获到字段不全、A/B 不公平或输入为 `DEMO` 时，会输出脚本内部状态 `INVALID_EVIDENCE`；在最终工程交付报告中，统一规范映射为标准状态 `INVALID-EVIDENCE`。
 
-### 4.2 当前汇总脚本的实际命令
+### 4.3 面向生产级闭环的最小工程增量
 
-`run_mixed_bench.py` 的命令行参数为：
+在正式进入 E3 阶段验收前，必须补齐以下最小工程增量：
 
-```bash
-python3 run_mixed_bench.py \
-  --unified-foreground <foreground-json> \
-  --mooncake-native-mixed <native-mixed-json> \
-  --unified-mixed <unified-mixed-json> \
-  --background-tolerance-pct 5 \
-  --target-rate-rps <optional-rate> \
-  --out pvt07_summary.json
-```
+1. **真实推理服务适配器**：对接真实的大模型推理引擎，逐请求捕获并导出到达时间戳、首字时间戳、完成状态、实际 QPS 及 TTFT/TPOT 全量样本；
+2. **真实后台 I/O 驱动适配器**：对接真实的 RoCE 网络传输与 NVMe SSD 存储引擎，逐周期采集物理完成字节数、目标/实测带宽及硬件错误；
+3. **元数据全量对齐**：为三组实验生成标准化的 `run_id`、`package_id`、`config_hash` 及硬件拓扑指纹；
+4. **QoS 控制器与 I/O 引擎对接**：将 `SemanticQoSController` 深度嵌入后台 I/O 引擎的提交函数，实现真实的带宽预算限流与平滑恢复；
+5. **算子级事件挂载**：在前台推理框架的 `Worker.step()` 物理边界插入微秒级事件通知；
+6. **网络流分类配置**：在操作系统与交换机侧完成 DSCP/CoS 到 TC0/TC1 的物理映射，并挂载网卡硬件队列计数器；
+7. **全场景故障注入**：支持注入网络 Incast 拥塞、PFC 死锁、存储短 I/O 及前台突发流量。
 
-但当前混流 DEMO 输出缺少汇总脚本的必需字段，不能直接填入上述三个输入。只有在真实适配器产生完整 schema 后，才能使用该脚本做门限计算。
+---
 
-当前汇总脚本在异常时输出 `INVALID_EVIDENCE`，这是脚本内部下划线格式；项目文档和最终报告统一使用 `INVALID-EVIDENCE`，并在适配层完成映射。
+## 5. 分步执行测试操作规程（SOP）
 
-### 4.3 最小真实闭环增量
+### 步骤 0：冻结实验配置、环境快照与代码版本
 
-进入 LAB/MEASURED 前至少需要：
-
-1. 增加前台真实推理服务适配器，输出逐请求 TTFT、TPOT、完成状态和实际 QPS；
-2. 增加后台真实 KV 搬运适配器，记录提交/完成字节、读写比例、目标/实际带宽和设备错误；
-3. 为三组条件生成统一的 `run_id/package_id/config_hash/hardware_profile/topology_profile/workload_id/model_id`；
-4. 把 QoS 控制器接到实际后台提交端，补齐预算、退避、恢复和事件记录；
-5. 接入真实 `Worker.step()` 或等价调度事件，并记录事件时间与请求 ID；
-6. 在网络侧配置并验证 DSCP/CoS 到队列的映射，保存网卡和交换机计数；
-7. 扩展汇总脚本检查 `MEASURED`、实际路径、请求完整性、后台读写比和时间窗口；
-8. 增加异常注入：Incast、后台短 I/O、前台突发、QoS 控制器暂停、设备错误和恢复。
-
-## 5. 逐步执行 SOP
-
-### Step 0：冻结版本、配置和结果目录
-
-操作意图：让三组结果可在同一源码、配置、拓扑和工作负载下复核。
-
-执行动作：
+- **操作意图**：确保三组对比测试均可精准追溯至唯一的源码版本、网络拓扑、硬件配置及工作负载。
+- **执行命令**：
 
 ```bash
 run_id="PVT-07-$(date +%Y%m%d-%H%M%S)-mixed"
@@ -271,35 +284,27 @@ date --iso-8601=ns > "${result_dir}/timestamp.txt"
 git status --short > "${result_dir}/git_status.txt"
 ```
 
-应观察现象：commit、时间戳、工作树状态和配置快照均已保存。
+- **应观察现象**：结果目录创建成功，Commit 哈希、系统时间戳及工作区状态完整落盘。
+- **判定边界**：三组测试的代码包或配置哈希无法锁定对应关系时，整组测试直接判定为 `INVALID-EVIDENCE`。
 
-判定边界：三组代码包或配置哈希不可追溯时，整组结果标记 `INVALID-EVIDENCE`。
+### 步骤 1：运行当前本地 DEMO 确认接口与边界
 
-### Step 1：运行当前本地混流 DEMO
-
-操作意图：确认当前脚本接口和 DEMO 输出字段，建立与真实闭环不同的明确基线。
-
-执行动作：
+- **操作意图**：验证当前脚本的参数解析与输出落盘流程，同时明确记录当前程序尚未产生真实推理服务与硬件 I/O 的事实。
+- **执行命令**：
 
 ```bash
 cd ./提前验证方案设计/验证计划方案设计/原型验证代码/PVT-07
-python3 mixed_workload_bench.py \
-  --fg-clients 32 --bg-workers 4 --duration 5 \
-  --out "../../../../results/pvt07/${run_id}/demo_no_qos.json" --seed 42
-python3 mixed_workload_bench.py \
-  --fg-clients 32 --bg-workers 4 --duration 5 --qos \
-  --out "../../../../results/pvt07/${run_id}/demo_qos.json" --seed 42
+python3 mixed_workload_bench.py   --fg-clients 32 --bg-workers 4 --duration 5   --out "../../../../results/pvt07/${run_id}/demo_no_qos.json" --seed 42
+python3 mixed_workload_bench.py   --fg-clients 32 --bg-workers 4 --duration 5 --qos   --out "../../../../results/pvt07/${run_id}/demo_qos.json" --seed 42
 ```
 
-应观察现象：脚本生成本地 JSON，输出 TPOT 分位数和模拟后台带宽，状态为 `DEMO_ONLY`。
+- **应观察现象**：导出的 JSON 文件中状态明确标注为 `DEMO_ONLY`，包含模拟 TPOT 分位数与模拟后台吞吐。
+- **判定边界**：本步骤仅证实脚本语法与输出结构正常，不可据此断言实际 TTFT/QPS 收益或 QoS 控流已经成立。
 
-判定边界：本步骤不能提供 TTFT/QPS、网卡队列、真实后台带宽或 SemanticQoS 生效证据；只能验证 DEMO 运行和字段落盘。
+### 步骤 2：审计当前控制器确认控制面真实边界
 
-### Step 2：确认当前控制器没有形成真实闭环
-
-操作意图：把控制器的可用接口和未实现行为单独取证，避免将方法名当作效果。
-
-执行动作：
+- **操作意图**：将控制器的可用接口与内部空操作进行显式取证，避免将代码方法名误判为真实控制效果。
+- **执行命令**：
 
 ```bash
 python3 - <<'PY'
@@ -314,302 +319,190 @@ print({"during_step": before_end, "after_step": after_end})
 PY
 ```
 
-应观察现象：step 开始期间返回不允许后台传输，step 结束后立即恢复；即使传入 100ms，超限分支也没有调整任何预算字段。
+- **应观察现象**：Step 开始时返回不允许后台传输，Step 结束后立即恢复允许；即使传入 100ms 严重超时，超限分支由于为 `pass` 而未触发任何预算递减。
+- **判定边界**：在缺乏底层 I/O 提交端对接与网卡硬件队列计数前，不可判定 QoS 控制闭环成立。
 
-判定边界：该步骤只能说明布尔控制器的局部行为；没有后台提交端、事件时间戳和网卡队列计数时，不能判定 QoS 控制成立。
+### 步骤 3：准备标准化三组输入 Schema（条件步骤）
 
-### Step 3：准备真实三组输入 schema
+- **操作意图**：确保提供给汇总评估工具的三组 JSON 均具备完整的物理来源与公平性对账字段。
+- **执行规范**：每组输入 JSON 必须严格包含 `run_id`、`package_id`、`config_hash`、`evidence_level`（必须为 `MEASURED`）、`hardware_profile`、`topology_profile`、`workload_id`、`model_id`、`target_rate_rps`、`p99_ttft_ms`、`p99_tpot_ms`、`qps`、`bg_bw_gbps`、`actual_path` 及逐请求采样文件路径。
+- **判定边界**：严禁手工将模拟演示数据篡改为 `MEASURED` 或直接编造字段值。
 
-操作意图：在运行汇总脚本前，确保每组 JSON 都具备真实来源和公平性字段。
+### 步骤 4：运行真实纯前台黄金基线实测（条件步骤）
 
-执行动作：每组输入至少包含：
+- **操作意图**：在完全无后台 I/O 干扰的环境下测得同一增强代码包的物理性能基线，作为 TPOT 干扰率计算的唯一黄金分母。
+- **执行动作**：固化模型、Tokenizer 及请求序列；彻底关闭后台 KV 搬运与 QoS 控制器；运行预热后开启稳态采样；逐请求记录到达、首字、完成时间戳及 TPOT 样本。
+- **应观察现象**：请求成功数与失败数严格对账，导出的 `p99_tpot_ms` 反映前台无干扰下的纯净物理性能。
+- **判定边界**：若缺乏逐请求原始样本而仅有均值统计，不可用于计算高置信度的 P99 干扰率。
 
-```json
-{
-  "run_id": "<run-id>",
-  "package_id": "<package>",
-  "config_hash": "<hash>",
-  "evidence_level": "MEASURED",
-  "hardware_profile": "<profile>",
-  "topology_profile": "<topology>",
-  "workload_id": "<workload>",
-  "model_id": "<model>",
-  "target_rate_rps": 30.0,
-  "p99_ttft_ms": 0.0,
-  "p99_tpot_ms": 0.0,
-  "qps": 0.0,
-  "bg_bw_gbps": 0.0,
-  "actual_path": "<observed-path>",
-  "request_samples_file": "<path>"
-}
-```
+### 步骤 5：运行原生参考实现混压实测（条件步骤）
 
-应观察现象：每个指标都能回指逐请求原始文件，三组公平性字段一致，两个混压组的实际后台带宽偏差在冻结容差内。
+- **操作意图**：测定开源原生参考实现在承受满载后台物理 I/O 压力时的性能表现，作为 TTFT 降幅与 QPS 提升的同场景对账基线。
+- **执行动作**：启动原生参考实现服务，注入相同的前台推理请求序列；同时启动后台满载 KV 搬运任务，固化读写比例与目标带宽；采集全量前台请求时延与后台实际完成吞吐。
+- **应观察现象**：前台逐请求时延显著受抖动拉长，后台实测带宽达到物理饱和。
+- **判定边界**：若后台实测吞吐与后续统一 KV 组的偏差超过 5%，该测试点判定为 `CONDITIONAL` 或 `INVALID-EVIDENCE`，必须重新校准负载后重测。
 
-判定边界：当前 DEMO JSON 缺少必需字段，不能通过此步骤；禁止手工把模拟 TPOT 改名为 TTFT/QPS 或把 `DEMO` 改写为 `MEASURED`。
+### 步骤 6：运行统一 KV 方案 SemanticQoS 混压实测（条件步骤）
 
-### Step 4：运行真实前台基线
+- **操作意图**：在完全相同的后台实际物理负载下，验证硬件流分类队列与应用层微秒级自适应退避对前台在线推理的保护效果。
+- **执行动作**：启动原厂软硬件协同增强系统；配置并验证 DSCP/CoS 到 TC0/TC1 的物理映射；挂载 `Worker.step()` 事件通知；启动后台真实 I/O 搬运；全量采集前台逐请求 TTFT/TPOT、实际达成 QPS、后台实测吞吐、控制器预算变化轨迹及 TC0/TC1 硬件队列计数器。
+- **应观察现象**：前台 Step 事件与后台预算压低在时间线上精准咬合；TC0 硬件队列保持极低排队时延；后台实测物理带宽与原生混压组严格一致；前台 TPOT 尾部时延得到显著收敛。
+- **判定边界**：若仅有控制器日志而缺乏底层 I/O 提交端真实退避与网卡队列计数的物理支撑，不可判定 QoS 生效。
 
-操作意图：测量同一增强代码包无后台时的前台表现，作为 TPOT 干扰基线。
+### 步骤 7：执行三组数据汇总与门禁判决（条件步骤）
 
-执行动作：
-
-1. 固定模型、Tokenizer、Prompt/输出 Token 分布和目标速率；
-2. 关闭后台 KV 搬运和 QoS 控制；
-3. 运行预热窗口后开始稳态采样；
-4. 保存每个请求的到达、首 Token、各输出 Token、完成或失败时间；
-5. 记录实际 QPS、P99 TTFT/P99 TPOT、CPU/设备利用率和配置哈希。
-
-应观察现象：前台请求完成数与失败数可对账，稳态窗口和预热窗口分离，结果证据级别由采集链路决定。
-
-判定边界：只有服务端汇总均值而无逐请求样本时，不能计算可复核 P99；没有同一 `package_id` 时，不能作为统一混压的 TPOT 基线。
-
-### Step 5：运行原生参考实现混压
-
-操作意图：提供 TTFT/QPS 的同场景收益基线，并确保后台负载可与被测组比较。
-
-执行动作：
-
-1. 启动原生参考实现和相同的前台请求流；
-2. 启动后台 KV 搬运，冻结读写比例、块大小、并发和目标带宽；
-3. 记录网卡、设备和后台 I/O 的实际完成字节；
-4. 保存前台逐请求样本和后台时间线；
-5. 运行结束后核对两组混压实际后台带宽偏差。
-
-应观察现象：原生参考实现混压结果包含 `p99_ttft_ms`、`p99_tpot_ms`、`qps`、`bg_bw_gbps` 和全部元数据。
-
-判定边界：只记录目标带宽或只运行本地协程时，不能作为收益基线；后台实际带宽不匹配时，标记 `CONDITIONAL` 或 `INVALID-EVIDENCE`。
-
-### Step 6：运行统一 KV SemanticQoS 混压
-
-操作意图：在同一后台实际负载下观察硬件队列和应用层退避是否降低前台干扰。
-
-执行动作：
-
-1. 启动与 Step 4 相同的增强代码包；
-2. 配置并保存 DSCP/CoS 到 TC0/TC1 的现场映射；
-3. 接入 `Worker.step()` 或等价前台事件；
-4. 运行后台真实 I/O，采集预算变化、提交/完成字节和队列计数；
-5. 保存前台逐请求 TTFT/TPOT、实际 QPS、失败请求和所有异常；
-6. 核对 `actual_path` 与 `planned_path`，避免把“开启 QoS”当作路径观测。
-
-应观察现象：前台事件与后台预算变化在时间线上可关联；两个混压组后台实际带宽可比；QoS 组的 P99 指标由真实样本计算。
-
-判定边界：如果只有控制器日志、没有后台提交量和网卡/设备计数，不能判定退避真正生效。
-
-### Step 7：执行三组汇总与门禁
-
-操作意图：用统一脚本计算三项门限，并保留脚本输入和异常信息。
-
-执行动作：
+- **操作意图**：调用标准化汇总工具，基于三组真实的 `MEASURED` 数据计算三大核心指标并执行门禁判决。
+- **执行命令**：
 
 ```bash
-python3 run_mixed_bench.py \
-  --unified-foreground ./results/unified_foreground.json \
-  --mooncake-native-mixed ./results/mooncake_native_mixed.json \
-  --unified-mixed ./results/unified_mixed_qos.json \
-  --background-tolerance-pct 5 \
-  --target-rate-rps 30 \
-  --out ./results/pvt07_summary.json
+python3 run_mixed_bench.py   --unified-foreground ./results/unified_foreground.json   --mooncake-native-mixed ./results/mooncake_native_mixed.json   --unified-mixed ./results/unified_mixed_qos.json   --background-tolerance-pct 5   --target-rate-rps 30   --out ./results/pvt07_summary.json
 ```
 
-应观察现象：脚本输出三项百分比指标、四个 gate 和输入快照。当前脚本的 `PASS/FAIL/INVALID_EVIDENCE` 是内部结果，正式报告需要映射到本文档状态枚举。
+- **应观察现象**：输出三项核心改善百分比及四个 Gate 的判决结果，所有结论精准回溯至底层实测数据。
+- **判定边界**：若输入数据非完整 `MEASURED` 或物理路径证据不全，汇总报告严禁输出 `GO` 结论。
 
-判定边界：脚本通过字段校验不等于物理链路已验证；若输入证据级别不是 `MEASURED`、实际路径不明或原始样本缺失，报告不得输出 `GO`。
+### 步骤 8：全量证据包标准化归档
 
-### Step 8：归档证据包
+- **操作意图**：将三组测试的原始数据、硬件队列计数、QoS 事件流、CDF 曲线及环境快照统一归档，支持跨团队独立复核。
+- **执行动作**：在 `results/pvt07/<run_id>/` 目录下完整归档 `foreground_request_samples.jsonl`、`background_io_samples.jsonl`、`qos_events.jsonl`、`nic_queue_counters.jsonl`、`pvt07_summary.json`、`cdf_data.csv`、`errors.log` 及 `summary.md`。
 
-操作意图：让评审人员能够复核混压时序、公平性和门禁计算。
+---
 
-执行动作：
+## 6. 数据采集清单、核心公式与记录格式
 
-```text
-results/pvt07/<run_id>/
-  metadata.yaml
-  command.txt
-  git_commit.txt
-  git_status.txt
-  environment.txt
-  topology.txt
-  qos_mapping.txt
-  foreground_request_samples.jsonl
-  background_io_samples.jsonl
-  foreground_summary.json
-  native_mixed_summary.json
-  unified_mixed_summary.json
-  qos_events.jsonl
-  nic_queue_counters.jsonl
-  device_counters.jsonl
-  pvt07_summary.json
-  cdf_data.csv
-  errors.log
-  summary.md
-```
-
-应观察现象：每个汇总字段能回指原始样本、队列计数或配置快照。
-
-判定边界：缺少两组混压实际后台带宽、前台请求样本或 QoS 映射证据时，不能闭合 E3。
-
-## 6. 证据字段、公式与汇总格式
-
-### 6.1 每运行一行的标准字段
+### 6.1 混压测试标准汇总记录字段
 
 ```csv
 run_id,condition,package_id,config_hash,evidence_level,hardware_profile,topology_profile,workload_id,model_id,target_rate_rps,actual_qps,completed_requests,failed_requests,p99_ttft_ms,p99_tpot_ms,bg_target_gbps,bg_bw_gbps,bg_read_ratio,planned_path,actual_path,qos_enabled,status,invalid_reason
 ```
 
-`actual_qps` 应使用完成请求数除以稳态统计窗口；目标速率只用于公平性匹配，不能替代实际 QPS。`bg_bw_gbps` 必须由设备/网络实际完成字节和统计窗口计算，不能复制 `bg_target_gbps`。
+约束说明：`actual_qps` 必须基于稳态窗口内的实际完成请求数严格除以时间计算；`bg_bw_gbps` 必须基于底层物理设备或网络实际完成的字节数计算，严禁直接复制目标配置值。
 
-### 6.2 逐请求样本
+### 6.2 前台逐请求原始采样字段
 
 ```csv
 run_id,request_id,arrival_ts_ns,first_token_ts_ns,finish_ts_ns,output_tokens,ttft_ms,tpot_p50_ms,tpot_p99_ms,request_status,error_code,foreground_step_count
 ```
 
-如果服务端只能给出每请求平均 TPOT，仍需说明其统计口径；P99 不能由多个请求平均值再次推导。
-
-### 6.3 QoS 事件和后台 I/O
+### 6.3 QoS 控制流转与后台 I/O 原始事件字段
 
 ```csv
 run_id,step_seq,event,request_id,budget_before_bps,budget_after_bps,foreground_tpot_ms,bg_submitted_bytes,bg_completed_bytes,nic_tc0_bytes,nic_tc1_bytes,ts_ns,reason
 ```
 
-`event` 至少包括 `foreground_step_begin`、`foreground_step_end`、`budget_backoff`、`budget_restore`、`background_submit`、`background_complete` 和 `queue_counter_sample`。
+### 6.4 核心对账指标计算公式
 
-### 6.4 汇总公式
+$$
+	ext{首字延迟降低比例 (TTFT Reduction)} = rac{	ext{TTFT}_{	ext{P99}}(	ext{NativeMixed}) - 	ext{TTFT}_{	ext{P99}}(	ext{UnifiedMixedQoS})}{	ext{TTFT}_{	ext{P99}}(	ext{NativeMixed})} 	imes 100\%
+$$
 
-沿用 `run_mixed_bench.py` 的基线定义：
+$$
+	ext{在线服务吞吐提升比例 (QPS Gain)} = rac{	ext{QPS}(	ext{UnifiedMixedQoS}) - 	ext{QPS}(	ext{NativeMixed})}{	ext{QPS}(	ext{NativeMixed})} 	imes 100\%
+$$
 
-```text
-TTFT 降幅 = (原生参考实现混压 P99 TTFT - 统一 KV 混压 P99 TTFT)
-          / 原生参考实现混压 P99 TTFT × 100%
+$$
+	ext{前台长尾干扰恶化率 (TPOT Degradation)} = rac{	ext{TPOT}_{	ext{P99}}(	ext{UnifiedMixedQoS}) - 	ext{TPOT}_{	ext{P99}}(	ext{UnifiedForeground})}{	ext{TPOT}_{	ext{P99}}(	ext{UnifiedForeground})} 	imes 100\%
+$$
 
-QPS 提升 = (统一 KV 混压实际 QPS - 原生参考实现混压实际 QPS)
-        / 原生参考实现混压实际 QPS × 100%
+$$
+	ext{后台实测负载偏差率 (Background Load Deviation)} = rac{\left| 	ext{BW}_{	ext{bg}}(	ext{UnifiedMixedQoS}) - 	ext{BW}_{	ext{bg}}(	ext{NativeMixed}) ight|}{	ext{BW}_{	ext{bg}}(	ext{NativeMixed})} 	imes 100\%
+$$
 
-TPOT 干扰率 = (统一 KV 混压 P99 TPOT - 统一 KV 纯前台 P99 TPOT)
-            / 统一 KV 纯前台 P99 TPOT × 100%
+---
 
-后台带宽偏差 = |统一 KV 混压实际带宽 - 原生参考实现混压实际带宽|
-             / 原生参考实现混压实际带宽 × 100%
-```
+## 7. 候选准入门槛、判定规则与立即止损机制
 
-分母必须为正，统计窗口、请求流和后台负载要一致。若 P99 TTFT 或 QPS 的输入为零、空值或来自 DEMO，汇总结果为 `INVALID-EVIDENCE`。
+### 7.1 候选工程准入门槛一览表
 
-### 6.5 证据分级
+| 核心评估指标 | 候选工程准入门槛 | 权威对账基线与计算口径 |
+|---|---:|---|
+| 首字生成延迟改善 | 相对原生参考实现混压基线 **P99 TTFT 降低 $\ge 20\%$** | 相同硬件、模型、请求序列及后台负载下的 A/B 对照 |
+| 在线服务吞吐提升 | 相对原生参考实现混压基线 **实际达标 QPS 提升 $\ge 10\%$** | 稳态统计窗口内实际成功完成的请求总数对账 |
+| 前台长尾干扰抑制 | 相对同一增强代码包纯前台 **P99 TPOT 干扰恶化率 $< 3\%$** | 同一代码构建、同一硬件拓扑下的纯前台基线对账 |
+| 后台负载对齐容差 | 两组混压测试的 **后台实测物理带宽偏差 $\le 5\%$** | 物理设备与网卡实际完成吞吐对账，确保 A/B 绝对公平 |
+| 全链路数据正确性 | 全量在线推理请求 **0 错误消费、0 内容截断损坏** | 逐请求张量 checksum 校验与独立 Oracle 对账 |
 
-| 级别 | 允许内容 | 不允许内容 |
-|---|---|---|
-| `DEMO` | 本地随机 TPOT、控制器布尔状态、结果 schema 和公式演示 | TTFT/QPS 收益、真实 QoS、两节点混压结论 |
-| `LAB` | 测试服务、模拟后台 I/O 或局部真实网络的可复核结果 | 直接外推到生产两节点和现场网卡队列 |
-| `MEASURED` | 真实服务、真实后台 I/O、真实硬件计数、完整时间线和 A/B 字段 | 缺少逐请求样本、实际带宽或 QoS 映射证明 |
+### 7.2 状态判定枚举与规则
 
-## 7. 判定标准、无效证据与止损条件
+- **GO（全链路证据形成完整闭环）**：三组真实 `MEASURED` 数据完整，后台实际负载偏差 $\le 5\%$，三大核心门限全量达标，QoS 控制事件与网卡/设备硬件计数物理吻合；
+- **CONDITIONAL（局部场景或特定负载达标）**：核心门限在特定请求速率或受限后台压力下达标，但高并发或极端混压下存在波动；结论严格限定于已测条件；
+- **NO-GO（性能未达标或前台严重恶化）**：前台 TPOT 干扰恶化率超出止损门限、TTFT 降幅未达标、后台限速后无法平稳恢复或出现不可控的推理错误；
+- **NOT-SUPPORTED（物理环境未支持）**：现场缺乏两节点集群、RoCE 网卡硬件流分类队列或可观测计数器，无法完成端到端混压；
+- **INVALID-EVIDENCE（无效证据）**：使用模拟 DEMO 数据、三组测试条件不公平、后台实际带宽偏差超出容差、原始逐请求样本缺失或实际路径未证实。
 
-### 7.1 状态枚举
+### 7.3 立即安全止损条件
 
-- `GO`：三组真实数据完整，后台实际负载可比，TTFT 降幅至少 20%、QPS 提升至少 10%、TPOT 干扰率小于 3%，且 QoS 控制事件与硬件/设备观测一致；
-- `CONDITIONAL`：部分门限或部分拓扑满足，或只能在限定 QoS/后台负载下成立，必须写明条件；
-- `NO-GO`：前台干扰超过止损线、门限明显不满足、后台控制无法恢复、请求错误或出现不可解释的队列/设备异常；
-- `NOT-SUPPORTED`：现场没有两节点、真实后台 I/O、RoCE/等价网络 QoS 或可观测队列，无法执行对应验证；
-- `INVALID-EVIDENCE`：使用 DEMO、三组字段不公平、实际后台带宽不可比、原始样本缺失、计划路径与实际路径不一致或只依赖脚本内部 PASS。
+在测试过程中凡触发以下任一异常，必须立即终止测试并保存现场：
 
-### 7.2 当前汇总脚本与正式状态的映射
+- 前台在线请求错误率持续攀升、推理服务端发生无响应挂起或 TPOT 尾部时延持续恶化超出预设止损红线；
+- 网络发生剧烈 Incast 拥塞，导致出现大面积丢包重传、PFC 持续死锁暂停或网卡硬件队列非正常堆积；
+- SemanticQoS 控制器在压低后台预算后发生死锁无法平稳恢复，或恢复时引发前台时延二次严重震荡；
+- 开启 QoS 保护后，系统出现比未开启 QoS 时更多且无法解释的底层硬件/通信异常；
+- 流量统计显示前台数据包未正确进入 TC0 队列，导致流分类彻底失效；
+- 两组混压测试的后台实测带宽严重失配（偏差 $> 10\%$），导致 A/B 对照失去物理基础。
 
-| 当前脚本输出 | 正式解释 |
-|---|---|
-| `PASS` | 仅表示输入字段通过脚本门限；只有输入为完整 `MEASURED` 且路径证据齐全时才可进一步判为 `GO` |
-| `FAIL` | 门限未同时满足；结合证据完整性判为 `CONDITIONAL` 或 `NO-GO` |
-| `INVALID_EVIDENCE` | 统一映射为 `INVALID-EVIDENCE` |
-| 输入为 `DEMO` 被拒绝 | 保持 `DEMO`/`INVALID-EVIDENCE`，不得改写为失败实测 |
+---
 
-### 7.3 无效证据规则
+## 8. 执行阶段划分与交付闭环
 
-以下情况不能进入 E3 `MEASURED` 汇总：
+测试实施划分为四个严密的演进阶段：
 
-- 用随机生成的 TPOT 样本冒充真实推理请求；
-- 以 `bg_target_gbps` 代替 `bg_bw_gbps`；
-- 三组运行时间、请求速率、输出 Token 分布或后台读写比例不同；
-- 只改变 `--qos` 参数，却没有真实后台提交端读取预算；
-- `semantic_qos_controller.py` 的 `pass` 分支被描述为“已完成动态退避”；
-- 输入 JSON 手工补齐 `p99_ttft_ms`、`qps` 或 `package_id`，但没有原始来源；
-- 汇总脚本输入虽非 `DEMO`，但没有完整 `MEASURED` 采集链路；
-- 只有 P99 没有逐请求样本，或没有前后台实际完成计数；
-- 网卡队列映射只存在配置文件，没有现场计数或抓包/设备状态对账。
+| 实施阶段 | 核心攻坚内容 | 阶段必须交付物 | 准出判定条件 |
+|---|---|---|---|
+| E0（契约与基线规范确认） | 严密固化三组对比条件、Schema 结构、基线对账公式、采样窗口及证据等级 | 源码审计报告、DEMO 输出 JSON、规范化 manifest | 确认当前代码边界，杜绝将测试桩冒充实测 |
+| E1（真实服务与后台 I/O 打通） | 分别接入真实大模型推理服务与后台真实 KV 搬运引擎，打通逐请求时延与带宽采样 | 逐请求时延表、后台实测吞吐表、系统资源监控 | 证实前台服务与后台 I/O 均能独立稳定运行 |
+| E2（SemanticQoS 控制闭环） | 打通 `Worker.step()` 事件、控制器动态预算、后台提交队列及 TC0/TC1 网卡队列 | QoS 流转日志、网卡队列计数表、消融实验报告 | 证实软硬件双层 QoS 机制能够精准压制后台干扰 |
+| E3（全链路前后台混压总门禁） | 在真实 2 节点集群下完成三组 A/B 混压测试，全量验证 TTFT、QPS、TPOT 及一致性 | 混压时间线报告、门禁判决汇总表、最终判定结论 | 证实 TTFT 降幅 $\ge 20\%$、QPS 提升 $\ge 10\%$ 且 TPOT 干扰率 $< 3\%$ |
+| 条件证伪（软硬 QoS 独立贡献） | 分别单独关闭硬件队列与应用退避，严格证伪性能收益的技术源头与边界 | QoS 消融对照矩阵、技术边界评估报告 | 确立软硬件协同必要性，若硬件不支持则规范降级 |
 
-### 7.4 立即止损条件
+---
 
-出现以下任一情况，应停止扩大后台压力并保留现场：
+## 9. 零 AI 基础工程师借助 AI Agent 开展工作实战 SOP
 
-- 前台请求错误率持续上升、服务端失去响应或 TPOT 长尾超过预设止损线；
-- Incast 导致丢包、重传、PFC 持续暂停或网卡队列异常增长；
-- 后台限速后无法恢复，或恢复时再次造成前台长尾；
-- QoS 组出现比无 QoS 组更高且无法解释的设备错误；
-- 计划使用 TC0/TC1，但现场计数显示流量没有进入对应队列；
-- 三组后台实际带宽不匹配，继续比较将改变实验问题。
+### 9.1 工程师与 Agent 的职责边界
 
-## 8. 阶段推进与闭环
+- **工程师核心职责**：
+  1. 确认现场部署的 2 节点物理服务器、RoCE 网卡、交换机 QoS 队列配置及推理引擎特权；
+  2. 固化模型架构、Prompt 序列分布、前台目标请求速率、后台 I/O 压力及安全止损红线；
+  3. 实际启动/停止分布式推理服务、后台搬运任务及网络监控工具，完整留存交换机统计与系统 dmesg 日志；
+  4. 严格审定三组测试的后台实际物理负载是否在 5% 容差内，确保 A/B 对照绝对严密公平；
+  5. 对全链路前后台混压是否达到生产准入标准承担最终技术把关责任。
+- **AI Agent 协同职责**：
+  1. 深入研读本方案设计、公共测试契约及原型源码，精准梳理实际支持的 CLI 参数、依赖库及当前未实现特性；
+  2. 编写推理服务适配层、逐请求时延解析器、QoS 动态退避流转审计、CDF 绘图及标准证据包生成工具；
+  3. 严格核验三组输入的公平性对齐状态、`planned_path` 与 `actual_path` 路径一致性及状态枚举归一化；
+  4. 严守学术与技术诚信红线，严禁虚构推理请求、伪造吞吐降幅或将演示 DEMO 篡改为生产级实测。
 
-### E0：数据契约和基线定义
-
-冻结三组条件、字段、基线、公式、运行窗口和证据等级。当前 PVT-07 可以完成随机 DEMO 与汇总脚本接口审计。
-
-### E1：真实前台服务和后台 I/O
-
-分别接入前台推理服务和后台 KV I/O，打通逐请求 TTFT/TPOT、实际 QPS、后台完成字节和完整元数据。
-
-### E2：SemanticQoS 控制闭环
-
-打通前台 step 事件、控制器预算、后台提交端、网卡队列和设备计数，完成关闭 QoS、硬件队列、应用退避、双层开启的消融。
-
-### E3：两节点前后台混压门禁
-
-在真实两节点和统一请求流下完成三组 A/B，核对后台实际带宽，计算 P99 TTFT、QPS 和 P99 TPOT 干扰率，输出正式状态。
-
-### 条件证伪：硬件 QoS 与应用退避的独立贡献
-
-分别关闭硬件队列和应用退避，验证收益是否来自真实机制而不是负载差异。若现场不支持 DSCP/CoS、TC 队列或 `Worker.step()` 事件，应把结论限定为软件模拟或 `NOT-SUPPORTED`。
-
-## 9. 研发人员与 AI Agent 执行约束
-
-### 9.1 研发人员检查清单
-
-- [ ] 三组条件的硬件、拓扑、模型、请求流、目标速率和后台负载已冻结；
-- [ ] 纯前台组与统一混压组使用同一 `package_id`；
-- [ ] 原生混压和统一混压的实际后台带宽在容差内；
-- [ ] TTFT、TPOT 和 QPS 来自真实请求样本；
-- [ ] 后台带宽来自设备/网络实际完成字节；
-- [ ] QoS 控制器接入实际后台提交端，而不是只修改局部布尔值；
-- [ ] DSCP/CoS、TC0/TC1 映射有现场配置和计数证据；
-- [ ] `planned_path` 与 `actual_path` 分开记录；
-- [ ] DEMO/LAB/MEASURED 未混入同一门禁汇总；
-- [ ] 所有异常、失败请求和止损事件均保留。
-
-### 9.2 AI Agent 执行提示词
+### 9.2 可直接复制给 Coding Agent 的 Prompt 模板
 
 ```text
-你负责执行 PVT-07 前后台混压端到端最小闭环与 SemanticQoS 验证。
+我正在执行 PVT-07：前后台混压端到端最小闭环（Vertical Slice）与 SemanticQoS 服务质量保障验证。
 
-先读取项目索引、公共 Benchmark 契约、本方案和原型目录。确认当前 mixed_workload_bench.py 只是 asyncio 随机 TPOT/后台字节 DEMO，semantic_qos_controller.py 只有布尔暂停且超限分支为空，run_mixed_bench.py 需要完整三组 JSON 字段并会拒绝 evidence_level=DEMO。不要把当前脚本输出改名为真实 TTFT/QPS，也不要把目标带宽当作实际带宽。
+请先研读以下核心文件：
+1. ./提前验证方案设计/验证计划方案设计/08_PVT-07_前后台混压端到端薄闭环与SemanticQoS干扰包络验证实施方案设计.md
+2. ./提前验证方案设计/验证计划方案设计/Benchmark公共契约与证据分级规范.md
+3. ./提前验证方案设计/验证计划方案设计/原型验证代码/PVT-07/mixed_workload_bench.py
+4. ./提前验证方案设计/验证计划方案设计/原型验证代码/PVT-07/semantic_qos_controller.py
+5. ./提前验证方案设计/验证计划方案设计/原型验证代码/PVT-07/run_mixed_bench.py
 
-正式实验必须使用同一硬件、拓扑、模型、请求流、目标速率和后台实际负载，建立统一 KV 纯前台、原生参考实现混压、统一 KV SemanticQoS 混压三组数据。记录逐请求 TTFT/TPOT、完成/失败、实际 QPS、后台提交/完成字节、网卡队列计数、控制器预算变化、planned_path、actual_path 和原始日志。
-
-先做 DEMO 接口审计，再接入真实前台服务、后台 I/O、前台 step 事件和 DSCP/CoS 队列映射。P99 TTFT 降幅、QPS 提升和 TPOT 干扰率必须从原始样本计算。最终输出 GO、CONDITIONAL、NO-GO、NOT-SUPPORTED 或 INVALID-EVIDENCE；如果证据缺失，列出缺口，不要杜撰结果。
+执行约束与任务要求：
+- 首先梳理源码实际支持的 CLI 参数与底层执行行为；确认 mixed_workload_bench.py 当前仅为基于 asyncio 的随机 TPOT/模拟后台吞吐 DEMO，semantic_qos_controller.py 仅实现布尔变量切换且超限分支为空，而 run_mixed_bench.py 需要完整的三组 JSON 输入并会显式拒绝 evidence_level=DEMO。
+- 正式实验必须建立三组严格对齐的物理测试：同一增强代码包的纯前台黄金基线、原生参考实现混压基线、统一 KV 方案 SemanticQoS 混压组。
+- 逐请求采集 TTFT、TPOT 全量样本、实际达成 QPS、后台实际物理完成字节数、网卡 TC0/TC1 硬件队列计数及控制器动态预算轨迹。
+- 严格校验 A/B 公平性，两组混压的后台实测物理带宽偏差必须在 5% 容差内；区分 planned_path 与 actual_path。
+- 未采集到的字段显式置为 null 并详细注明 invalid_reason；完整留存硬件异常与失败日志；将脚本状态规范归一化为公共契约枚举。
+- 最终输出：源码能力核验矩阵、实际执行命令清单、三组实验性能对照表、QoS 控制流转审计表、未支持特性清单以及下一步最小代码重构建议。
 ```
 
-### 9.3 常见问题定位
+### 9.3 常见排错指南
 
-| 现象 | 原因定位 | 处理方式 |
-|---|---|---|
-| 当前 DEMO 没有 TTFT/QPS | 脚本只生成 TPOT 和模拟后台字节 | 保持 DEMO，接入真实推理服务和请求统计 |
-| `--mode/--rate/--bg-gbps` 报未知参数 | 当前混流脚本不支持这些参数 | 按真实 CLI 运行，或先补接口 |
-| 汇总脚本提示缺字段 | DEMO 输出 schema 与汇总要求不一致 | 由真实采集器生成完整 JSON，禁止手工填数 |
-| 汇总脚本提示 `is DEMO` | `run_mixed_bench.py` 明确阻止 DEMO 关闭 E3 | 提升证据链，不要改写 evidence_level |
-| QoS 开启后只有随机分布变化 | 当前 `--qos` 只切换模拟样本生成分支 | 接入实际预算和后台提交端 |
-| 超过 TPOT 限制后没有退避 | 控制器超限分支为 `pass` | 实现预算、事件和恢复测试 |
-| 后台带宽目标相同但实际不同 | 设备/网络队列或限速配置改变了负载 | 以实际完成字节校准，重新做 A/B |
-| TC0/TC1 没有计数 | DSCP/CoS 映射未生效或没有采集 | 先验证现场队列，再进行混压 |
-| 前台长尾突然升高 | Incast、PFC、PCIe 或设备队列争用 | 降低后台压力，保留网卡/设备计数和时间线 |
-| `INVALID_EVIDENCE` 与文档状态不一致 | 脚本内部使用下划线 | 汇总层统一映射为 `INVALID-EVIDENCE` |
-
-本方案的完成标准不是“两个 Python 进程成功退出”，而是形成可复核链路：真实前台请求 → 真实后台搬运 → QoS 控制事件 → 网卡/设备队列观测 → 三组公平 A/B → P99 TTFT、实际 QPS 和 P99 TPOT 计算 → 最终状态判定。
+- **运行当前 DEMO 发现缺乏 TTFT 与 QPS 统计**：当前受控 DEMO 脚本仅模拟了 TPOT 与后台吞吐；需接入真实的推理服务适配器，在未接入前测试结果严格保持为 `DEMO`。
+- **命令行传入 `--mode` 或 `--bg-gbps` 报错未知参数**：当前受控混流脚本尚未集成此类 CLI 参数；应按照实际支持的 CLI 参数执行，或在重构增量中补齐接口。
+- **运行汇总脚本提示缺少必需字段报错**：DEMO 生成的演示 JSON 与汇总脚本的 Schema 规范不匹配；需由真实的测试适配器生成全量标准 JSON，严禁手工伪造填报。
+- **汇总脚本拦截报错提示输入数据 `is DEMO`**：`run_mixed_bench.py` 内部设置了严格的证据门禁，明确拒绝使用 DEMO 数据闭环 E3；必须提升取证链路，严禁直接篡改 `evidence_level` 字段。
+- **开启 QoS 后仅观测到随机分布参数发生微调**：当前 `--qos` 仅在 Python 协程内部切换了模拟分支；必须将控制器动态预算深度接入底层存储与网络传输引擎的提交队列。
+- **注入 TPOT 超限扰动后系统未发生动态退避**：排查控制器源码中超限分支是否仍为 `pass` 空操作；必须补齐指数退避与步长恢复的数学模型实现。
+- **两组混压测试的目标带宽设定相同但实测带宽偏差巨大**：底层硬件队列调度或拥塞流控对不同数据流的处理差异导致实际吞吐失配；必须以物理完成字节数重新校准测试负载。
+- **网卡硬件队列 TC0/TC1 计数器始终为 0**：排查操作系统 DSCP 标记与交换机 Priority Mapping 映射配置是否生效，需在网络层先做连通性抓包验证。
+- **前台推理 TPOT 尾部时延突发剧烈恶化**：排查网络侧是否触发了 Incast 丢包、PFC 持续死锁暂停或 PCIe 总线竞争；需结合网络计数器与时间线降低后台压力排查根因。
+- **脚本输出的 `INVALID_EVIDENCE` 与文档状态规范不符**：脚本内部使用了下划线格式；在最终汇总评估层统一规范映射为标准状态 `INVALID-EVIDENCE`。
