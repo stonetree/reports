@@ -1,0 +1,261 @@
+{
+  "evidence_type": "THEORETICAL_PARAMETER_SWEEP",
+  "status": "MATH_CHECKS_PASSED",
+  "measurement_claim": "无硬件实测或项目验收结论",
+  "checks": [
+    {
+      "name": "流水闭式与独立事件递推",
+      "result": "VERIFIED_MATH",
+      "cases": 600,
+      "scope": "恒定两阶段耗时，计算传输可并行"
+    },
+    {
+      "name": "一层流水无重叠收益",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "结构边界"
+    },
+    {
+      "name": "流水无额外干扰时不慢于串行",
+      "result": "VERIFIED_MATH",
+      "cases": 64,
+      "scope": "含零时间与不平衡边界"
+    },
+    {
+      "name": "共享资源减速可使流水更慢",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "反例，不是硬件观测"
+    },
+    {
+      "name": "缩短非关键节点不必改善总时延",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "关键路径反例"
+    },
+    {
+      "name": "查询直接收益由总占比折算",
+      "result": "VERIFIED_MATH",
+      "cases": 500,
+      "scope": "查询串行且其他环节不变"
+    },
+    {
+      "name": "TPOT 阈值代回原始耗时式 w=0.25",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "带宽受限暴露时间模型"
+    },
+    {
+      "name": "TPOT 阈值代回原始耗时式 w=0.5",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "带宽受限暴露时间模型"
+    },
+    {
+      "name": "TPOT 阈值代回原始耗时式 w=1.0",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "带宽受限暴露时间模型"
+    },
+    {
+      "name": "因果注意力运算量与逐位置求和",
+      "result": "VERIFIED_MATH",
+      "cases": 100,
+      "scope": "固定稠密结构，非运行时间模型"
+    },
+    {
+      "name": "缓存字节量单位",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "纯结构示例 1 GiB；非指定业务模型"
+    },
+    {
+      "name": "到达服务曲线时延界",
+      "result": "VERIFIED_MATH",
+      "cases": 100,
+      "scope": "速率时延与仿射到达；不检验实际设备保证"
+    },
+    {
+      "name": "剩余服务率时延表达",
+      "result": "VERIFIED_MATH",
+      "cases": 100,
+      "scope": "严格总服务与受约束后台"
+    },
+    {
+      "name": "组完成覆盖率 k=1",
+      "result": "VERIFIED_MATH",
+      "cases": 2,
+      "scope": "独立同分布与无独立假设的并集条件分别计算"
+    },
+    {
+      "name": "组完成覆盖率 k=2",
+      "result": "VERIFIED_MATH",
+      "cases": 2,
+      "scope": "独立同分布与无独立假设的并集条件分别计算"
+    },
+    {
+      "name": "组完成覆盖率 k=4",
+      "result": "VERIFIED_MATH",
+      "cases": 2,
+      "scope": "独立同分布与无独立假设的并集条件分别计算"
+    },
+    {
+      "name": "组完成覆盖率 k=8",
+      "result": "VERIFIED_MATH",
+      "cases": 2,
+      "scope": "独立同分布与无独立假设的并集条件分别计算"
+    },
+    {
+      "name": "组完成覆盖率 k=16",
+      "result": "VERIFIED_MATH",
+      "cases": 2,
+      "scope": "独立同分布与无独立假设的并集条件分别计算"
+    },
+    {
+      "name": "平均排队缩放与两次原式计算",
+      "result": "VERIFIED_MATH",
+      "cases": 12,
+      "scope": "M/G/1 平均等待；不推断 P99"
+    },
+    {
+      "name": "TTFT 反推阈值 alpha=0.21 eta=0",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "负 r 表示物理上无法满足该单项预算"
+    },
+    {
+      "name": "TTFT 反推阈值 alpha=0.21 eta=0.01",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "负 r 表示物理上无法满足该单项预算"
+    },
+    {
+      "name": "TTFT 反推阈值 alpha=0.21 eta=0.03",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "负 r 表示物理上无法满足该单项预算"
+    },
+    {
+      "name": "TTFT 反推阈值 alpha=0.3 eta=0",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "负 r 表示物理上无法满足该单项预算"
+    },
+    {
+      "name": "TTFT 反推阈值 alpha=0.3 eta=0.01",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "负 r 表示物理上无法满足该单项预算"
+    },
+    {
+      "name": "TTFT 反推阈值 alpha=0.3 eta=0.03",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "负 r 表示物理上无法满足该单项预算"
+    },
+    {
+      "name": "TTFT 反推阈值 alpha=0.6 eta=0",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "负 r 表示物理上无法满足该单项预算"
+    },
+    {
+      "name": "TTFT 反推阈值 alpha=0.6 eta=0.01",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "负 r 表示物理上无法满足该单项预算"
+    },
+    {
+      "name": "TTFT 反推阈值 alpha=0.6 eta=0.03",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "负 r 表示物理上无法满足该单项预算"
+    },
+    {
+      "name": "TTFT 反推阈值 alpha=0.9 eta=0",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "负 r 表示物理上无法满足该单项预算"
+    },
+    {
+      "name": "TTFT 反推阈值 alpha=0.9 eta=0.01",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "负 r 表示物理上无法满足该单项预算"
+    },
+    {
+      "name": "TTFT 反推阈值 alpha=0.9 eta=0.03",
+      "result": "VERIFIED_MATH",
+      "cases": 1,
+      "scope": "负 r 表示物理上无法满足该单项预算"
+    }
+  ],
+  "illustrative_results": {
+    "query_share_needed_for_20pct_ttft_reduction": [
+      0.5,
+      0.6666666666666667
+    ],
+    "balanced_32_stage_subpath_reduction": 0.484375,
+    "tpot_thresholds": [
+      {
+        "memory_fraction": 0.25,
+        "max_effective_bandwidth_loss": 0.10714285714285712
+      },
+      {
+        "memory_fraction": 0.5,
+        "max_effective_bandwidth_loss": 0.056603773584905655
+      },
+      {
+        "memory_fraction": 1.0,
+        "max_effective_bandwidth_loss": 0.029126213592233007
+      }
+    ],
+    "coflow_member_requirements": [
+      {
+        "members": 1,
+        "iid_member_quantile": 0.99,
+        "union_member_coverage": 0.99
+      },
+      {
+        "members": 2,
+        "iid_member_quantile": 0.99498743710662,
+        "union_member_coverage": 0.995
+      },
+      {
+        "members": 4,
+        "iid_member_quantile": 0.9974905699336811,
+        "union_member_coverage": 0.9975
+      },
+      {
+        "members": 8,
+        "iid_member_quantile": 0.9987444968227265,
+        "union_member_coverage": 0.99875
+      },
+      {
+        "members": 16,
+        "iid_member_quantile": 0.9993720512515479,
+        "union_member_coverage": 0.999375
+      }
+    ]
+  },
+  "parameters_sha256": "413db481c37999147998d45a94a0e9354276142a83eefdb75861aad284816f63",
+  "script_sha256": "3b6a277bb634c4c7fbad08495d17a0757f5fcb7d431a04e00dbf36fab35531bc",
+  "figures": [
+    {
+      "name": "01_增量收益条件.png",
+      "sha256": "4473c776caa549b7302b9b5c2d4dcf71a923cb18d384e4a155215be57c14ee5d"
+    },
+    {
+      "name": "02_流水收益边界.png",
+      "sha256": "0dfcd60f23179e104b814b72ee96c44ed80050e8055ecf79f9c6da3e92e80a0d"
+    },
+    {
+      "name": "03_TPOT干扰预算.png",
+      "sha256": "826d492473b8e5ea07e37eeb44cf5125378c47a15b9194b76517eac0138d364f"
+    },
+    {
+      "name": "04_平均排队敏感度.png",
+      "sha256": "a543a2c8da3f63f6a48faa9f8071789ffda6d58d6029172d64fdd98f63381d94"
+    }
+  ]
+}

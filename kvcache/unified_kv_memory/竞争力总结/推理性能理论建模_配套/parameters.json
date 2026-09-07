@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "date": "2026-09-07",
+  "evidence_type": "THEORETICAL_PARAMETER_SWEEP",
+  "observations": {
+    "source": "用户本会话概述，未提供原始测量文件",
+    "request_concurrency": 1,
+    "input_length_label": "16K Token",
+    "reused_prefix_tokens": null,
+    "tcp_query_latency_description": "几个毫秒级",
+    "rdma_query_latency_description": "几百微秒级",
+    "urma_query_latency_reduction_vs_rdma": [0.3, 0.4],
+    "exact_query_latency_ms": null,
+    "timing_boundary": null,
+    "query_percentile": null,
+    "end_to_end_ttft_ms": null,
+    "query_share_of_ttft": null
+  },
+  "illustration_parameters": {
+    "ttft_reduction_target": 0.2,
+    "added_overhead_fractions": [0.0, 0.01, 0.03],
+    "pipeline_stage_counts": [8, 16, 32],
+    "decode_memory_time_fractions": [0.25, 0.5, 1.0],
+    "tpot_interference_target": 0.03,
+    "queue_service_scaling_factors": [0.7, 0.85, 0.95],
+    "note": "以上均为展示数学关系的条件取值；不表示项目硬件参数或预测成绩。"
+  }
+}
