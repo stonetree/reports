@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>大模型注意力键值缓存 (KVCache) AI Infra 演进与优化方法技术地图</title>
+    <title>大模型注意力键值缓存 (KVCache) Host 侧存储与调度技术地图</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
@@ -23,47 +23,77 @@
                     <div class="w-2 h-16 bg-blue-600 rounded"></div>
                     <div>
                         <h1 class="text-2xl md:text-3xl font-extrabold text-gray-900 tracking-tight">大模型注意力键值缓存 (KVCache) Host 侧存储与调度技术地图</h1>
-                        <p class="text-sm md:text-base text-gray-500 mt-1">聚焦本机/集群/DDR/远端DDR/CXL/SSD 多级存储与调度体系 · 基于系统与存储顶会 (FAST/NSDI/OSDI/SIGCOMM/SIGMOD) 事实性解构</p>
+                        <p class="text-sm md:text-base text-gray-600 mt-1">围绕三大根源矛盾与六大关键问题 · 揭示 GPU/NPU 计算范式跃迁对 Host 侧存储与调度的系统级重塑</p>
                     </div>
                 </div>
                 <div class="flex flex-wrap gap-2">
-                    <span class="badge bg-blue-50 text-blue-700 border border-blue-200"><i class="fas fa-server mr-1"></i> 本机与集群协同</span>
-                    <span class="badge bg-red-50 text-red-700 border border-red-200"><i class="fas fa-memory mr-1"></i> DDR与远端池化</span>
-                    <span class="badge bg-green-50 text-green-700 border border-green-200"><i class="fas fa-microchip mr-1"></i> CXL内存直通</span>
-                    <span class="badge bg-purple-50 text-purple-700 border border-purple-200"><i class="fas fa-hdd mr-1"></i> SSD多级分层</span>
+                    <span class="badge bg-red-50 text-red-700 border border-red-200"><i class="fas fa-bolt mr-1"></i> 三大根源矛盾</span>
+                    <span class="badge bg-blue-50 text-blue-700 border border-blue-200"><i class="fas fa-rocket mr-1"></i> 五大计算驱动</span>
+                    <span class="badge bg-green-50 text-green-700 border border-green-200"><i class="fas fa-layer-group mr-1"></i> 六大物理层级</span>
+                    <span class="badge bg-purple-50 text-purple-700 border border-purple-200"><i class="fas fa-tools mr-1"></i> 24项核心技术</span>
                 </div>
             </div>
         </header>
 
-        <!-- Epoch Paradigm Shift Band -->
-        <section class="bg-white p-6 rounded-lg border border-gray-200 card-shadow">
-            <div class="flex items-center space-x-3 mb-4 pb-2 border-b border-gray-100">
-                <div class="w-1.5 h-6 bg-blue-600 rounded"></div>
-                <h2 class="text-lg font-bold text-gray-900">KVCache 在 Host 侧职责认知的三次代际跃迁 (Paradigm Shift)</h2>
+        <!-- Dialectical Contradictions & Paradigm Shift Banner -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <!-- Left: Three Core Contradictions (5 cols) -->
+            <div class="lg:col-span-5 bg-white p-5 rounded-lg border border-red-200 card-shadow">
+                <div class="flex items-center space-x-2 mb-3 pb-2 border-b border-red-100">
+                    <span class="text-red-600 text-lg"><i class="fas fa-bolt"></i></span>
+                    <h2 class="text-base font-bold text-red-950">AI 基础设施三大根源物理矛盾 (Dialectical Contradictions)</h2>
+                </div>
+                <div class="space-y-2.5">
+                    <div class="p-2.5 bg-red-50 rounded border border-red-200 text-xs">
+                        <div class="font-bold text-red-800 mb-0.5">• 矛盾一·算力 vs 传输：</div>
+                        <div class="text-red-950 leading-relaxed">算力演进极速 vs 传输阻抗高企：计算密集爆发 vs 慢速总线与协议栈税 <span class="text-red-600 font-semibold">(对应领域一、四)</span></div>
+                    </div>
+                    <div class="p-2.5 bg-red-50 rounded border border-red-200 text-xs">
+                        <div class="font-bold text-red-800 mb-0.5">• 矛盾二·复用 vs 同步：</div>
+                        <div class="text-red-950 leading-relaxed">海量复用潜力 vs 同步放大瓶颈：98%+ 历史前缀复用 vs 86.6% 控制流量与锁竞争 <span class="text-red-600 font-semibold">(对应领域二、三)</span></div>
+                    </div>
+                    <div class="p-2.5 bg-red-50 rounded border border-red-200 text-xs">
+                        <div class="font-bold text-red-800 mb-0.5">• 矛盾三·SLO vs 混压：</div>
+                        <div class="text-red-950 leading-relaxed">在线严苛 SLO vs 混压长尾抖动：毫秒级流式响应要求 vs SSD 慢 I/O 队头阻塞与换出争用 <span class="text-red-600 font-semibold">(对应领域五、六)</span></div>
+                    </div>
+                </div>
             </div>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div class="p-4 bg-gray-50 rounded border border-gray-200 card-hover">
-                    <div class="text-sm font-bold text-blue-600 mb-2">Phase 1 (2022-2023): Host 简单后备与被动换出区</div>
-                    <p class="text-xs text-gray-600 leading-relaxed mb-1"><span class="font-semibold text-gray-800">【系统角色】</span>Host 仅作为加速卡显存溢出时的二级暂存介质，单向被动换入换出。</p>
-                    <p class="text-xs text-gray-600 leading-relaxed"><span class="font-semibold text-gray-800">【核心瓶颈】</span>CPU 内存拷贝吞噬大量主机算力，Host DDR 与 PCIe 严重争用；同步阻塞推理流水。</p>
+
+            <!-- Right: Upstream GPU/NPU Compute Paradigms Driving Host Architecture (7 cols) -->
+            <div class="lg:col-span-7 bg-white p-5 rounded-lg border border-blue-200 card-shadow">
+                <div class="flex items-center space-x-2 mb-3 pb-2 border-b border-blue-100">
+                    <span class="text-blue-600 text-lg"><i class="fas fa-rocket"></i></span>
+                    <h2 class="text-base font-bold text-blue-950">GPU/NPU 计算与调度范式最新变革 ── 驱动 Host 侧存储与调度技术革新链路</h2>
                 </div>
-                <div class="p-4 bg-gray-50 rounded border border-blue-200 card-hover">
-                    <div class="text-sm font-bold text-blue-700 mb-2">Phase 2 (2024-2025): 分布式消息传输载荷与中继节点</div>
-                    <p class="text-xs text-gray-600 leading-relaxed mb-1"><span class="font-semibold text-gray-800">【系统角色】</span>PD 分离架构下的分布式网络消息载荷，Host 充当网络收发缓冲与集群分发中继。</p>
-                    <p class="text-xs text-gray-600 leading-relaxed"><span class="font-semibold text-gray-800">【核心焦点】</span>Host DDR 频繁搬运与小 I/O 序列化开销巨大；集中式 Master 元数据 RPC 瓶颈严重。</p>
-                </div>
-                <div class="p-4 bg-green-50 rounded border border-green-300 card-hover">
-                    <div class="text-sm font-bold text-green-700 mb-2">Phase 3 (2026 前沿): 异构多介质统一池化与硬件直达织物</div>
-                    <p class="text-xs text-gray-700 leading-relaxed mb-1"><span class="font-semibold text-gray-800">【系统角色】</span>Host CPU 统筹管理本机 DDR、远端 DDR、CXL 内存池与 SSD 的全局解耦分层织物。</p>
-                    <p class="text-xs text-gray-700 leading-relaxed"><span class="font-semibold text-gray-800">【核心焦点】</span>Host CPU 零数据拷贝、RCU 无锁索引、CXL 纳秒编址直达、用户态直接 I/O 与硬件硬 QoS 隔离。</p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-xs">
+                    <div class="p-2.5 bg-blue-50 rounded border border-blue-200">
+                        <span class="font-bold text-blue-800">① PD 分离计算解耦 ──></span>
+                        <p class="text-gray-700 mt-1">驱动集群非对称回源调度与树状中继网络广播分发</p>
+                    </div>
+                    <div class="p-2.5 bg-blue-50 rounded border border-blue-200">
+                        <span class="font-bold text-blue-800">② 分块流式预计算 (Chunked) ──></span>
+                        <p class="text-gray-700 mt-1">驱动连续物理块预分配与 SPDK/io_uring 用户态异步流水</p>
+                    </div>
+                    <div class="p-2.5 bg-blue-50 rounded border border-blue-200">
+                        <span class="font-bold text-blue-800">③ 原生稀疏注意力 (MLA/MoE) ──></span>
+                        <p class="text-gray-700 mt-1">驱动无锁 RCU 树状索引与内存语义全局纳秒编址直达</p>
+                    </div>
+                    <div class="p-2.5 bg-blue-50 rounded border border-blue-200">
+                        <span class="font-bold text-blue-800">④ Agent 多轮长程自主循环 ──></span>
+                        <p class="text-gray-700 mt-1">驱动前置弱信号自适应预取与重用距离感知淘汰</p>
+                    </div>
+                    <div class="p-2.5 bg-blue-50 rounded border border-blue-200 md:col-span-2">
+                        <span class="font-bold text-blue-800">⑤ 端到端静态计算图捕获 (CUDA Graph) ──></span>
+                        <span class="text-gray-700 ml-1">驱动 Host 剥离高频内存控制、静态物理预分配与 Host CPU 零数据拷贝</span>
+                    </div>
                 </div>
             </div>
-        </section>
+        </div>
 
         <!-- Interactive Filter & Search -->
         <div class="flex flex-col sm:flex-row items-center justify-between gap-3">
             <div class="text-sm font-semibold text-gray-700 flex items-center">
-                <i class="fas fa-th-large mr-2 text-blue-600"></i> 六大核心技术领域与关键解决手段
+                <i class="fas fa-th-large mr-2 text-blue-600"></i> 六大物理层级核心领域与 24 项关键解决技术
             </div>
             <div class="flex items-center space-x-2 w-full sm:w-auto">
                 <input type="text" id="searchInput" onkeyup="filterCards()" placeholder="搜索技术名称或手段关键字..." class="px-3 py-1.5 text-sm bg-white border border-gray-300 rounded shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full sm:w-64">
@@ -169,7 +199,7 @@
             <div class="bg-white rounded-lg border border-gray-200 card-shadow flex flex-col overflow-hidden domain-card">
                 <!-- Header -->
                 <div class="p-3 text-white flex justify-between items-center" style="background-color: #DC2626;">
-                    <h3 class="font-bold text-sm">【领域三】 远端 DDR 内存池化一致性税与同步雪崩</h3>
+                    <h3 class="font-bold text-sm">【领域三】 远端 DDR 内存池化一致性税与同步放大瓶颈</h3>
                     <span class="text-xs bg-black bg-opacity-20 px-2 py-0.5 rounded">远端解耦内存层</span>
                 </div>
                 
@@ -315,7 +345,7 @@
                     <!-- Core Problem -->
                     <div class="p-3 bg-red-50 border border-red-200 rounded text-xs text-red-950">
                         <div class="font-bold text-red-800 flex items-center mb-1">
-                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：动态多介质带宽波动导致性能反噬 vs 前后台混压 I/O 抖动击穿尾延迟
+                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：动态多介质带宽波动引发性能反噬 vs 混压 I/O 抖动击穿尾延迟
                         </div>
                         <div class="text-red-900 leading-relaxed">
                             【底层根因】各级介质有效带宽与拥塞程度动态剧烈波动，静态拉取在低带宽下耗时反超本地重算 (时延反噬)；后台满载换出瞬间抢占 Host 内存控制器与网卡队列，在线推理 TPOT 尾部延迟断崖式恶化。
@@ -353,7 +383,7 @@
 
         <!-- Footer -->
         <footer class="text-center py-6 text-xs text-gray-400 border-t border-gray-200 mt-8">
-            大模型注意力键值缓存 (KVCache) AI Infra 演进与优化方法技术地图 · 基于 2026 年五大系统与存储顶会事实性全景解构
+            大模型注意力键值缓存 (KVCache) Host 侧存储与调度技术地图 · 基于 2026 年系统与存储顶会客观事实全景解构
         </footer>
     </div>
 
