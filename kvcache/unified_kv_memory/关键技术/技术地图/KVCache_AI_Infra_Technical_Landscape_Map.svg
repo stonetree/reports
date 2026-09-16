@@ -1,0 +1,206 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" width="1920" height="1080">
+<defs>
+    <style>
+        .yahei { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
+    </style>
+    </defs>
+<rect width="1920" height="1080" fill="#FFFFFF"/>
+<rect x="58" y="36" width="26" height="69" fill="#0284C7"/>
+<text x="94" y="68" class="yahei" font-size="29" font-weight="bold" fill="#0F172A">大模型注意力键值缓存 (KVCache) AI Infra 演进与优化方法技术地图</text>
+<text x="94" y="96" class="yahei" font-size="14" fill="#64748B">基于学术界与工业界最新认知进展 · 2026 年系统/网络/存储五大会议 (FAST/NSDI/OSDI/SIGCOMM/SIGMOD) 事实性全景解构</text>
+<rect x="1205" y="46" width="145" height="46" fill="#F8FAFC" stroke="#DC2626" stroke-width="1.5" rx="4"/>
+<text x="1277.5" y="75" class="yahei" font-size="11.5" font-weight="bold" fill="#DC2626" text-anchor="middle">六大核心物理矛盾</text>
+<rect x="1365" y="46" width="145" height="46" fill="#F8FAFC" stroke="#D97706" stroke-width="1.5" rx="4"/>
+<text x="1437.5" y="75" class="yahei" font-size="11.5" font-weight="bold" fill="#D97706" text-anchor="middle">三次认知代际跃迁</text>
+<rect x="1525" y="46" width="145" height="46" fill="#F8FAFC" stroke="#059669" stroke-width="1.5" rx="4"/>
+<text x="1597.5" y="75" class="yahei" font-size="11.5" font-weight="bold" fill="#059669" text-anchor="middle">微体系结构协同</text>
+<rect x="1685" y="46" width="145" height="46" fill="#F8FAFC" stroke="#7C3AED" stroke-width="1.5" rx="4"/>
+<text x="1757.5" y="75" class="yahei" font-size="11.5" font-weight="bold" fill="#7C3AED" text-anchor="middle">系统级解耦演进</text>
+<rect x="58" y="115" width="1804" height="132" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5" rx="4"/>
+<rect x="70" y="127" width="9" height="108" fill="#0284C7"/>
+<text x="88" y="165" class="yahei" font-size="14" font-weight="bold" fill="#0284C7">KVCache 职责认知</text>
+<text x="88" y="200" class="yahei" font-size="14" font-weight="bold" fill="#0F172A">三次代际跃迁</text>
+<rect x="334" y="124" width="490" height="114" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5" rx="3"/>
+<text x="346" y="148" class="yahei" font-size="12" font-weight="bold" fill="#0284C7">Phase 1 (2022-2023): 单卡显存临时暂存区 (Ephemeral Scratchpad)</text>
+<text x="346" y="174" class="yahei" font-size="10.5" fill="#475569"><tspan font-weight="bold" fill="#334155">【系统角色】</tspan>单算子计算的临时中间张量，生命周期局限于单次推理请求，随批次结束即释放。</text>
+<text x="346" y="198" class="yahei" font-size="10.5" fill="#475569"><tspan font-weight="bold" fill="#334155">【核心焦点】</tspan>以 vLLM PagedAttention 为代表，重点解决单卡显存碎片化与显存容量墙；基</text>
+<text x="346" y="218" class="yahei" font-size="10.5" fill="#475569">础设施无感知。</text>
+<rect x="839" y="124" width="490" height="114" fill="#FFFFFF" stroke="#93C5FD" stroke-width="1.5" rx="3"/>
+<text x="851" y="148" class="yahei" font-size="12" font-weight="bold" fill="#2563EB">Phase 2 (2024-2025): 分离式网络传输载荷 (Disaggregated Payload)</text>
+<text x="851" y="174" class="yahei" font-size="10.5" fill="#475569"><tspan font-weight="bold" fill="#334155">【系统角色】</tspan>Prefill 与 Decode (PD) 分离架构下的分布式通信消息载荷，跨节点数据流主角。</text>
+<text x="851" y="198" class="yahei" font-size="10.5" fill="#475569"><tspan font-weight="bold" fill="#334155">【核心焦点】</tspan>基于 RDMA/TCP 的流式推拉 (Mooncake, LMCache)；Host DD</text>
+<text x="851" y="218" class="yahei" font-size="10.5" fill="#475569">R 频繁换入换出引发 Incast 与总线拥塞。</text>
+<rect x="1344" y="124" width="490" height="114" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5" rx="3"/>
+<text x="1356" y="148" class="yahei" font-size="12" font-weight="bold" fill="#16A34A">Phase 3 (2026 前沿): 共享状态织物与调度核心 (State Fabric & Infra Driver)</text>
+<text x="1356" y="174" class="yahei" font-size="10.5" fill="#475569"><tspan font-weight="bold" fill="#334155">【系统角色】</tspan>驱动集群互联拓扑、存储分层、总线流量仲裁与计算放置决策的第一等公民资源。</text>
+<text x="1356" y="198" class="yahei" font-size="10.5" fill="#475569"><tspan font-weight="bold" fill="#334155">【核心焦点】</tspan>计算存储双向感知、非对称总线借调、微架构 SMEM 零拷贝、无锁只读解耦与硬件硬 QoS </text>
+<text x="1356" y="218" class="yahei" font-size="10.5" fill="#475569">隔离。</text>
+<rect x="58" y="259" width="590" height="390" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.8"/>
+<rect x="58" y="259" width="590" height="38" fill="#0284C7"/>
+<text x="73" y="284" class="yahei" font-size="13.5" font-weight="bold" fill="#FFFFFF">【领域一】 微体系结构访存阻抗与零拷贝陷阱 <tspan font-size="11.5" font-weight="normal" fill="#E2E8F0">(算子微架构层)</tspan></text>
+<rect x="70" y="303" width="566" height="92" fill="#FEF2F2" stroke="#FCA5A5" stroke-width="1.2"/>
+<text x="78" y="325" class="yahei" font-size="11" font-weight="bold" fill="#991B1B">⚡ 核心矛盾：GPU SM 极速访存 (TB/s) 与慢速总线 (GB/s) 存在巨大物理鸿沟</text>
+<text x="78" y="345" class="yahei" font-size="9.8" fill="#450A0A">【底层根因】API 层朴素零拷贝解引用 Host 内存致 L2 缓存被击穿 (命中率 77%→3</text>
+<text x="78" y="361" class="yahei" font-size="9.8" fill="#450A0A">2%)，重复搬运数十 GB 冗余流量使延时暴增 20 倍；PagedAttention 细粒度小</text>
+<text x="78" y="377" class="yahei" font-size="9.8" fill="#450A0A">页撕裂总线 (有效利用率仅 5%~22%)；CPU 解释型分配器打断 CUDA Graph。</text>
+<rect x="70" y="403" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="70" y="403" width="6" height="51" fill="#0284C7"/>
+<text x="82" y="422" class="yahei" font-size="10.8" font-weight="bold" fill="#0284C7">• CPU 内存感知片上分块 (SMEM Tiling)：</text>
+<text x="82" y="439" class="yahei" font-size="9.6" fill="#334155">将 Host 慢速 KV 单次拉入 GPU SM 片上共享内存常驻，片上遍历本地 Query 与</text>
+<text x="82" y="450" class="yahei" font-size="9.6" fill="#334155">权重，总线重复搬运量削减 98.8%，L2 命中率恢复至 75.1%。</text>
+<rect x="70" y="460" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="70" y="460" width="6" height="51" fill="#0284C7"/>
+<text x="82" y="479" class="yahei" font-size="10.8" font-weight="bold" fill="#0284C7">• 计算与传输布局解耦 (Decoupled Layout)：</text>
+<text x="82" y="496" class="yahei" font-size="9.6" fill="#334155">显存侧采用 Layer-First 迎合注意力核函数局部性，外存侧采用 Page-First 连</text>
+<text x="82" y="507" class="yahei" font-size="9.6" fill="#334155">续大块打满总线物理带宽，突破小页总线饥饿 (有效带宽达 48 GB/s)。</text>
+<rect x="70" y="517" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="70" y="517" width="6" height="51" fill="#0284C7"/>
+<text x="82" y="536" class="yahei" font-size="10.8" font-weight="bold" fill="#0284C7">• GPU 协助细粒度并发转置 (GPU-Assisted I/O)：</text>
+<text x="82" y="553" class="yahei" font-size="9.6" fill="#334155">启动专用轻量 GPU 线程块，在流式搬运中以 128B 细粒度在线完成地址映射与布局转置，前台在</text>
+<text x="82" y="564" class="yahei" font-size="9.6" fill="#334155">线计算干扰低于 5%。</text>
+<rect x="70" y="574" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="70" y="574" width="6" height="51" fill="#0284C7"/>
+<text x="82" y="593" class="yahei" font-size="10.8" font-weight="bold" fill="#0284C7">• 图内并行缓存管理 (In-Graph Cache Manager)：</text>
+<text x="82" y="610" class="yahei" font-size="9.6" fill="#334155">将块映射表与分配状态全量下沉 GPU HBM，由 CUDA Graph 原生算子并行分配释放，消</text>
+<text x="82" y="621" class="yahei" font-size="9.6" fill="#334155">除 CPU 解释器打断，时延降低 1.6~1.9x。</text>
+<rect x="665" y="259" width="590" height="390" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.8"/>
+<rect x="665" y="259" width="590" height="38" fill="#4F46E5"/>
+<text x="680" y="284" class="yahei" font-size="13.5" font-weight="bold" fill="#FFFFFF">【领域二】 非对称拓扑拥塞与跨域闲置带宽汇聚 <tspan font-size="11.5" font-weight="normal" fill="#E2E8F0">(总线与网络拓扑层)</tspan></text>
+<rect x="677" y="303" width="566" height="92" fill="#FEF2F2" stroke="#FCA5A5" stroke-width="1.2"/>
+<text x="685" y="325" class="yahei" font-size="11" font-weight="bold" fill="#991B1B">⚡ 核心矛盾：局部通信链路过载饱和 vs 全局高速拓扑大面积闲置</text>
+<text x="685" y="345" class="yahei" font-size="9.8" fill="#450A0A">【底层根因】多轮长文本下历史 KV 命中率超 98%，传统 PD 分离仅允许 Prefill 节</text>
+<text x="685" y="361" class="yahei" font-size="9.8" fill="#450A0A">点读存储致其存储网卡 100% 满载，而 Decode 存储网卡常态闲置；单机内 GPU 私有 </text>
+<text x="685" y="377" class="yahei" font-size="9.8" fill="#450A0A">PCIe 链路所有权刚性 (利用率不足 27%)，局部打满时无法借用邻居空闲链路。</text>
+<rect x="677" y="403" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="677" y="403" width="6" height="51" fill="#4F46E5"/>
+<text x="689" y="422" class="yahei" font-size="10.8" font-weight="bold" fill="#4F46E5">• 双路径回源与中继转运 (Dual-Path Retrieval)：</text>
+<text x="689" y="439" class="yahei" font-size="9.6" fill="#334155">打破仅 PE 读存储假设，允许 Decode 节点利用空闲存储网卡回源历史 KV，再借助内部充裕</text>
+<text x="689" y="450" class="yahei" font-size="9.6" fill="#334155">的高速计算网络转运给 Prefill 节点，消除单侧过载。</text>
+<rect x="677" y="460" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="677" y="460" width="6" height="51" fill="#4F46E5"/>
+<text x="689" y="479" class="yahei" font-size="10.8" font-weight="bold" fill="#4F46E5">• 跨卡 Scale-Up 总线池化 (Scale-Up PCIe Pooling)：</text>
+<text x="689" y="496" class="yahei" font-size="9.6" fill="#334155">单机内 GPU 借助跨卡高速互连 (NVLink) 中继借用邻居 GPU 的空闲 PCIe 链路</text>
+<text x="689" y="507" class="yahei" font-size="9.6" fill="#334155">访问 Host 内存，将私有链路汇聚为整机共享带宽池。</text>
+<rect x="677" y="517" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="677" y="517" width="6" height="51" fill="#4F46E5"/>
+<text x="689" y="536" class="yahei" font-size="10.8" font-weight="bold" fill="#4F46E5">• 固定块双向流水中继 (Fixed-Block Pipelining)：</text>
+<text x="689" y="553" class="yahei" font-size="9.6" fill="#334155">将跨卡跨总线传输切分为 16MB 固定块双向流水，中继跳延迟完全被 PCIe 传输时间掩盖，固定</text>
+<text x="689" y="564" class="yahei" font-size="9.6" fill="#334155">显存占用仅需数十 MB。</text>
+<rect x="677" y="574" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="677" y="574" width="6" height="51" fill="#4F46E5"/>
+<text x="689" y="593" class="yahei" font-size="10.8" font-weight="bold" fill="#4F46E5">• 组级意图暴露与单份回源广播 (Grouped I/O Broadcast)：</text>
+<text x="689" y="610" class="yahei" font-size="9.6" fill="#334155">应用显式声明协同读写批次；多节点相同数据仅由单源从存储回源一次，随后在高速计算网络内流水串行广播</text>
+<text x="689" y="621" class="yahei" font-size="9.6" fill="#334155">分发，KVCache 冷读 TTFT 降低 23%。</text>
+<rect x="1272" y="259" width="590" height="390" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.8"/>
+<rect x="1272" y="259" width="590" height="38" fill="#DC2626"/>
+<text x="1287" y="284" class="yahei" font-size="13.5" font-weight="bold" fill="#FFFFFF">【领域三】 跨节点内存池化的一致性税与同步放大 <tspan font-size="11.5" font-weight="normal" fill="#E2E8F0">(分布式内存一致性层)</tspan></text>
+<rect x="1284" y="303" width="566" height="92" fill="#FEF2F2" stroke="#FCA5A5" stroke-width="1.2"/>
+<text x="1292" y="325" class="yahei" font-size="11" font-weight="bold" fill="#991B1B">⚡ 核心矛盾：海量分布式缓存复用 vs 控制面元数据流量吞噬有效载荷</text>
+<text x="1292" y="345" class="yahei" font-size="9.8" fill="#450A0A">【底层根因】解耦内存池跨机延迟高数十倍；传统缓存淘汰机制维持热度与双向链表吞噬 86.6% 网络</text>
+<text x="1292" y="361" class="yahei" font-size="9.8" fill="#450A0A">带宽 (正文仅占 13.4%)，并发原子 CAS 压制读吞吐 4.3x；硬件一致性区域 (SCR</text>
+<text x="1292" y="377" class="yahei" font-size="9.8" fill="#450A0A">) 受限于物理面积仅数十 MB，元数据换出引发级联雪崩。</text>
+<rect x="1284" y="403" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="1284" y="403" width="6" height="51" fill="#DC2626"/>
+<text x="1296" y="422" class="yahei" font-size="10.8" font-weight="bold" fill="#DC2626">• 只读不可变数据与元数据本地化 (Share Data, Not Metadata)：</text>
+<text x="1296" y="439" class="yahei" font-size="9.6" fill="#334155">共享池中仅存放不可变只读 KV 正文，目录索引与状态在本地闭环，从物理上杜绝并发写冲突，消除 9</text>
+<text x="1296" y="450" class="yahei" font-size="9.6" fill="#334155">5% 以上的总线探测一致性税。</text>
+<rect x="1284" y="460" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="1284" y="460" width="6" height="51" fill="#DC2626"/>
+<text x="1296" y="479" class="yahei" font-size="10.8" font-weight="bold" fill="#DC2626">• 组级生命周期管理解耦 (Group-Level Housekeeping)：</text>
+<text x="1296" y="496" class="yahei" font-size="9.6" fill="#334155">正文访问保持单对象细粒度直达，淘汰、状态刷新与回收按组 (如 64 个) 批量执行，将控制面管理</text>
+<text x="1296" y="507" class="yahei" font-size="9.6" fill="#334155">复杂度降低两个数量级。</text>
+<rect x="1284" y="517" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="1284" y="517" width="6" height="51" fill="#DC2626"/>
+<text x="1296" y="536" class="yahei" font-size="10.8" font-weight="bold" fill="#DC2626">• 本地热度累计与批量原子回刷 (Local Counting & Batched Flush)：</text>
+<text x="1296" y="553" class="yahei" font-size="9.6" fill="#334155">命中仅本地累加计数，跨机同步时单次 8B 原子指令打包连续多个对象计数批量回刷，发射频率降低 8</text>
+<text x="1296" y="564" class="yahei" font-size="9.6" fill="#334155"> 倍。</text>
+<rect x="1284" y="574" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="1284" y="574" width="6" height="51" fill="#DC2626"/>
+<text x="1296" y="593" class="yahei" font-size="10.8" font-weight="bold" fill="#DC2626">• 分裂式元数据与共享追加日志 (Split Metadata & Append-Only Log)：</text>
+<text x="1296" y="610" class="yahei" font-size="9.6" fill="#334155">硬件受限一致性区仅存放极简原子锁，庞大目录树移至大容量非一致性内存，通过顺序追加日志异步推进，元</text>
+<text x="1296" y="621" class="yahei" font-size="9.6" fill="#334155">数据换出开销削减 8 倍。</text>
+<rect x="58" y="659" width="590" height="390" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.8"/>
+<rect x="58" y="659" width="590" height="38" fill="#059669"/>
+<text x="73" y="684" class="yahei" font-size="13.5" font-weight="bold" fill="#FFFFFF">【领域四】 端到端内存语义直达与控制面解构 <tspan font-size="11.5" font-weight="normal" fill="#E2E8F0">(互联通信与内存语义层)</tspan></text>
+<rect x="70" y="703" width="566" height="92" fill="#FEF2F2" stroke="#FCA5A5" stroke-width="1.2"/>
+<text x="78" y="725" class="yahei" font-size="11" font-weight="bold" fill="#991B1B">⚡ 核心矛盾：高频细粒度存取需求 vs 繁重网络协议栈握手开销</text>
+<text x="78" y="745" class="yahei" font-size="9.8" fill="#450A0A">【底层根因】KVCache 呈跨层跨头离散分布，高频细粒度 Gather/Scatter 成为常</text>
+<text x="78" y="761" class="yahei" font-size="9.8" fill="#450A0A">态；RDMA 依然保留网络协议语义，描述符准备、完成队列轮询与流同步吃掉 75% 操作时间；交换</text>
+<text x="78" y="777" class="yahei" font-size="9.8" fill="#450A0A">式内存网络缺乏端侧流控，突发大吞吐霸占端口引发队头阻塞与饥饿。</text>
+<rect x="70" y="803" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="70" y="803" width="6" height="51" fill="#059669"/>
+<text x="82" y="822" class="yahei" font-size="10.8" font-weight="bold" fill="#059669">• 全局统一内存编址与直通映射 (Global DAX Memory Mapping)：</text>
+<text x="82" y="839" class="yahei" font-size="9.6" fill="#334155">利用内存交换网络将机架内共享内存映射为全局统一虚拟地址空间，计算核函数通过直接解引用直达访问，1</text>
+<text x="82" y="850" class="yahei" font-size="9.6" fill="#334155">6KB 访问从网络级 10µs 降至纳秒/微秒级。</text>
+<rect x="70" y="860" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="70" y="860" width="6" height="51" fill="#059669"/>
+<text x="82" y="879" class="yahei" font-size="10.8" font-weight="bold" fill="#059669">• 发起者角色判定软件一致性 (Initiator-Based Software Coherence)：</text>
+<text x="82" y="896" class="yahei" font-size="9.6" fill="#334155">按读写发起者角色在软件层精准下发轻量 Cache Flush/Invalidate 指令，消除昂</text>
+<text x="82" y="907" class="yahei" font-size="9.6" fill="#334155">贵的硬件全局侦听探测总线税。</text>
+<rect x="70" y="917" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="70" y="917" width="6" height="51" fill="#059669"/>
+<text x="82" y="936" class="yahei" font-size="10.8" font-weight="bold" fill="#059669">• 细粒度设备级重排核函数 (Fine-Grained Gather/Scatter Kernels)：</text>
+<text x="82" y="953" class="yahei" font-size="9.6" fill="#334155">在设备端原生实现离散页表到连续共享内存块的线速聚集写入与发散读取，配合多内存通道交错存取打满物理</text>
+<text x="82" y="964" class="yahei" font-size="9.6" fill="#334155">吞吐。</text>
+<rect x="70" y="974" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="70" y="974" width="6" height="51" fill="#059669"/>
+<text x="82" y="993" class="yahei" font-size="10.8" font-weight="bold" fill="#059669">• 核心无状态端侧流控传输 (Core-Stateless End-Host Transport)：</text>
+<text x="82" y="1010" class="yahei" font-size="9.6" fill="#334155">在不可编程交换机前端，通过读取 CPU 性能计数器反推真实内存流量需求，将路径瓶颈反向映射为线程</text>
+<text x="82" y="1021" class="yahei" font-size="9.6" fill="#334155">时间配额，根除队头阻塞。</text>
+<rect x="665" y="659" width="590" height="390" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.8"/>
+<rect x="665" y="659" width="590" height="38" fill="#D97706"/>
+<text x="680" y="684" class="yahei" font-size="13.5" font-weight="bold" fill="#FFFFFF">【领域五】 计算—存储跨层双向感知与状态预测 <tspan font-size="11.5" font-weight="normal" fill="#E2E8F0">(运行时感知与编排层)</tspan></text>
+<rect x="677" y="703" width="566" height="92" fill="#FEF2F2" stroke="#FCA5A5" stroke-width="1.2"/>
+<text x="685" y="725" class="yahei" font-size="11" font-weight="bold" fill="#991B1B">⚡ 核心矛盾：上层动态时序交互语义 vs 下层存储黑盒盲目调度决策</text>
+<text x="685" y="745" class="yahei" font-size="9.8" fill="#450A0A">【底层根因】存储层缺乏模型回答长度与用户交互感知，通用 LRU/LFU 错误驱逐高潜力历史 KV</text>
+<text x="685" y="761" class="yahei" font-size="9.8" fill="#450A0A">；计算调度看不见 KV 所在介质层级 (DRAM vs SSD)，慢速 SSD 请求占死队头引发</text>
+<text x="685" y="777" class="yahei" font-size="9.8" fill="#450A0A">响应恶化 3.8x；无前置预测信号导致多 GB 搬运硬生生落入 TTFT 关键路径。</text>
+<rect x="677" y="803" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="677" y="803" width="6" height="51" fill="#D97706"/>
+<text x="689" y="822" class="yahei" font-size="10.8" font-weight="bold" fill="#D97706">• 计算—存储双向感知提示接口 (Bidirectional Awareness Interface)：</text>
+<text x="689" y="839" class="yahei" font-size="9.6" fill="#334155">存储层向上暴露 KV 所在介质层级与字节规模；计算引擎向下输出模型回答长度，为下层淘汰决策提供未</text>
+<text x="689" y="850" class="yahei" font-size="9.6" fill="#334155">来重用距离关键线索。</text>
+<rect x="677" y="860" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="677" y="860" width="6" height="51" fill="#D97706"/>
+<text x="689" y="879" class="yahei" font-size="10.8" font-weight="bold" fill="#D97706">• 层级解耦双队列与响应比优先调度 (Split Queues & disk-HRRN)：</text>
+<text x="689" y="896" class="yahei" font-size="9.6" fill="#334155">将请求拆分为可执行队列与准备队列，慢速 SSD 读取按响应比动态升权调度，消除慢 I/O 对快速</text>
+<text x="689" y="907" class="yahei" font-size="9.6" fill="#334155">内存命中的队头阻塞，排队时延骤降 57.5%。</text>
+<rect x="677" y="917" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="677" y="917" width="6" height="51" fill="#D97706"/>
+<text x="689" y="936" class="yahei" font-size="10.8" font-weight="bold" fill="#D97706">• 基于回答长度的命中潜力淘汰 (Answer-Length Guided Eviction)：</text>
+<text x="689" y="953" class="yahei" font-size="9.6" fill="#334155">依据上一轮模型回答长度估算用户下一次交互的重用距离下界，优先保留更快被再次复用的历史张量，缓存未</text>
+<text x="689" y="964" class="yahei" font-size="9.6" fill="#334155">命中率降低 57%~70%。</text>
+<rect x="677" y="974" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="677" y="974" width="6" height="51" fill="#D97706"/>
+<text x="689" y="993" class="yahei" font-size="10.8" font-weight="bold" fill="#D97706">• 建议请求弱信号提前预取 (Advisory Requests & Predictive Prefetch)：</text>
+<text x="689" y="1010" class="yahei" font-size="9.6" fill="#334155">捕获用户输入、打字或 Agent 调用图等前置弱信号，在真实请求到达前 5~11 秒提前触发迁移</text>
+<text x="689" y="1021" class="yahei" font-size="9.6" fill="#334155">预取，彻底将多 GB 状态搬运剥离 TTFT 关键路径。</text>
+<rect x="1272" y="659" width="590" height="390" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.8"/>
+<rect x="1272" y="659" width="590" height="38" fill="#7C3AED"/>
+<text x="1287" y="684" class="yahei" font-size="13.5" font-weight="bold" fill="#FFFFFF">【领域六】 多维代价感知动态选路与混压 QoS 隔离 <tspan font-size="11.5" font-weight="normal" fill="#E2E8F0">(自适应流控层)</tspan></text>
+<rect x="1284" y="703" width="566" height="92" fill="#FEF2F2" stroke="#FCA5A5" stroke-width="1.2"/>
+<text x="1292" y="725" class="yahei" font-size="11" font-weight="bold" fill="#991B1B">⚡ 核心矛盾：静态配置无法适应动态波动 vs 前后台混压长尾抖动失控</text>
+<text x="1292" y="745" class="yahei" font-size="9.8" fill="#450A0A">【底层根因】网络有效带宽时刻剧烈波动，静态固定压缩在带宽充裕时编解码耗时反噬传输收益，引发高达 </text>
+<text x="1292" y="761" class="yahei" font-size="9.8" fill="#450A0A">0.9s 时延毛刺；软件内存遥测滞后数百毫秒且消耗 20% CPU 算力；后台满载换出瞬间抢占内</text>
+<text x="1292" y="777" class="yahei" font-size="9.8" fill="#450A0A">存控制器与网络队列，在线推理 TPOT 尾部延迟断崖式恶化。</text>
+<rect x="1284" y="803" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="1284" y="803" width="6" height="51" fill="#7C3AED"/>
+<text x="1296" y="822" class="yahei" font-size="10.8" font-weight="bold" fill="#7C3AED">• 模块化压缩空间与约束 Pareto 画像 (Modular Pareto Profiling)：</text>
+<text x="1296" y="839" class="yahei" font-size="9.6" fill="#334155">将压缩解构为变换、量化、编码三级流水，离线通过约束贝叶斯优化快速构建准确率、压缩比与耗时三维最优</text>
+<text x="1296" y="850" class="yahei" font-size="9.6" fill="#334155">候选集。</text>
+<rect x="1284" y="860" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="1284" y="860" width="6" height="51" fill="#7C3AED"/>
+<text x="1296" y="879" class="yahei" font-size="10.8" font-weight="bold" fill="#7C3AED">• 带宽阈值下包络常数时间选路 (Lower-Envelope O(1) Path Selection)：</text>
+<text x="1296" y="896" class="yahei" font-size="9.6" fill="#334155">基于实时链路有效带宽，沿多配置延时直线的下包络在常数时间内判定最优加载/压缩/重算路径，消除性能</text>
+<text x="1296" y="907" class="yahei" font-size="9.6" fill="#334155">倒挂，PD 分离下加速达 9.13x。</text>
+<rect x="1284" y="917" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="1284" y="917" width="6" height="51" fill="#7C3AED"/>
+<text x="1296" y="936" class="yahei" font-size="10.8" font-weight="bold" fill="#7C3AED">• 硬件级物理内存通道硬隔离 (Physical Memory Channel Hard Isolation)：</text>
+<text x="1296" y="953" class="yahei" font-size="9.6" fill="#334155">将低延迟在线业务与大吞吐后台搬运严格绑定至不同物理内存通道，彻底消除 99% 的总线与控制器争用</text>
+<text x="1296" y="964" class="yahei" font-size="9.6" fill="#334155">，在线推理性能逼近独占。</text>
+<rect x="1284" y="974" width="566" height="51" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="1284" y="974" width="6" height="51" fill="#7C3AED"/>
+<text x="1296" y="993" class="yahei" font-size="10.8" font-weight="bold" fill="#7C3AED">• 硬件多优先级队列统一仲裁与协处理卸载 (Hardware Priority VL & ASIC Offload)：</text>
+<text x="1296" y="1010" class="yahei" font-size="9.6" fill="#334155">在线推理通信映射高优先级硬件通道，后台大吞吐搬运映射低优先级；利用闲置 NVDEC 视频 ASI</text>
+<text x="1296" y="1021" class="yahei" font-size="9.6" fill="#334155">C 处理压缩流，保证在线 TPOT 零受挤占。</text>
+</svg>
