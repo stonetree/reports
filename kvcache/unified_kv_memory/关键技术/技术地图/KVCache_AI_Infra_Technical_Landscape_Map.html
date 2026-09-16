@@ -22,15 +22,15 @@
                 <div class="flex items-start space-x-4">
                     <div class="w-2 h-16 bg-blue-600 rounded"></div>
                     <div>
-                        <h1 class="text-2xl md:text-3xl font-extrabold text-gray-900 tracking-tight">大模型注意力键值缓存 (KVCache) AI Infra 演进与优化方法技术地图</h1>
-                        <p class="text-sm md:text-base text-gray-500 mt-1">基于学术界与工业界最新认知进展 · 2026 年系统/网络/存储五大会议 (FAST/NSDI/OSDI/SIGCOMM/SIGMOD) 事实性全景解构</p>
+                        <h1 class="text-2xl md:text-3xl font-extrabold text-gray-900 tracking-tight">大模型注意力键值缓存 (KVCache) Host 侧存储与调度技术地图</h1>
+                        <p class="text-sm md:text-base text-gray-500 mt-1">聚焦本机/集群/DDR/远端DDR/CXL/SSD 多级存储与调度体系 · 基于系统与存储顶会 (FAST/NSDI/OSDI/SIGCOMM/SIGMOD) 事实性解构</p>
                     </div>
                 </div>
                 <div class="flex flex-wrap gap-2">
-                    <span class="badge bg-red-50 text-red-700 border border-red-200"><i class="fas fa-bolt mr-1"></i> 六大核心物理矛盾</span>
-                    <span class="badge bg-yellow-50 text-yellow-700 border border-yellow-200"><i class="fas fa-history mr-1"></i> 三次认知代际跃迁</span>
-                    <span class="badge bg-green-50 text-green-700 border border-green-200"><i class="fas fa-microchip mr-1"></i> 微体系结构协同</span>
-                    <span class="badge bg-purple-50 text-purple-700 border border-purple-200"><i class="fas fa-project-diagram mr-1"></i> 系统级解耦演进</span>
+                    <span class="badge bg-blue-50 text-blue-700 border border-blue-200"><i class="fas fa-server mr-1"></i> 本机与集群协同</span>
+                    <span class="badge bg-red-50 text-red-700 border border-red-200"><i class="fas fa-memory mr-1"></i> DDR与远端池化</span>
+                    <span class="badge bg-green-50 text-green-700 border border-green-200"><i class="fas fa-microchip mr-1"></i> CXL内存直通</span>
+                    <span class="badge bg-purple-50 text-purple-700 border border-purple-200"><i class="fas fa-hdd mr-1"></i> SSD多级分层</span>
                 </div>
             </div>
         </header>
@@ -39,23 +39,23 @@
         <section class="bg-white p-6 rounded-lg border border-gray-200 card-shadow">
             <div class="flex items-center space-x-3 mb-4 pb-2 border-b border-gray-100">
                 <div class="w-1.5 h-6 bg-blue-600 rounded"></div>
-                <h2 class="text-lg font-bold text-gray-900">KVCache 职责认知的三次代际跃迁 (Paradigm Shift)</h2>
+                <h2 class="text-lg font-bold text-gray-900">KVCache 在 Host 侧职责认知的三次代际跃迁 (Paradigm Shift)</h2>
             </div>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div class="p-4 bg-gray-50 rounded border border-gray-200 card-hover">
-                    <div class="text-sm font-bold text-blue-600 mb-2">Phase 1 (2022-2023): 单卡显存临时暂存区</div>
-                    <p class="text-xs text-gray-600 leading-relaxed mb-1"><span class="font-semibold text-gray-800">【系统角色】</span>单算子计算的临时中间张量，生命周期局限于单次推理请求，随批次结束即释放。</p>
-                    <p class="text-xs text-gray-600 leading-relaxed"><span class="font-semibold text-gray-800">【核心焦点】</span>以 vLLM PagedAttention 为代表，重点解决单卡显存碎片化与显存容量墙；基础设施无感知。</p>
+                    <div class="text-sm font-bold text-blue-600 mb-2">Phase 1 (2022-2023): Host 简单后备与被动换出区</div>
+                    <p class="text-xs text-gray-600 leading-relaxed mb-1"><span class="font-semibold text-gray-800">【系统角色】</span>Host 仅作为加速卡显存溢出时的二级暂存介质，单向被动换入换出。</p>
+                    <p class="text-xs text-gray-600 leading-relaxed"><span class="font-semibold text-gray-800">【核心瓶颈】</span>CPU 内存拷贝吞噬大量主机算力，Host DDR 与 PCIe 严重争用；同步阻塞推理流水。</p>
                 </div>
                 <div class="p-4 bg-gray-50 rounded border border-blue-200 card-hover">
-                    <div class="text-sm font-bold text-blue-700 mb-2">Phase 2 (2024-2025): 分离式网络传输载荷</div>
-                    <p class="text-xs text-gray-600 leading-relaxed mb-1"><span class="font-semibold text-gray-800">【系统角色】</span>Prefill 与 Decode (PD) 分离架构下的分布式通信消息载荷，跨节点数据流主角。</p>
-                    <p class="text-xs text-gray-600 leading-relaxed"><span class="font-semibold text-gray-800">【核心焦点】</span>基于 RDMA/TCP 的流式推拉 (Mooncake, LMCache)；Host DDR 频繁换入换出引发 Incast 与总线拥塞。</p>
+                    <div class="text-sm font-bold text-blue-700 mb-2">Phase 2 (2024-2025): 分布式消息传输载荷与中继节点</div>
+                    <p class="text-xs text-gray-600 leading-relaxed mb-1"><span class="font-semibold text-gray-800">【系统角色】</span>PD 分离架构下的分布式网络消息载荷，Host 充当网络收发缓冲与集群分发中继。</p>
+                    <p class="text-xs text-gray-600 leading-relaxed"><span class="font-semibold text-gray-800">【核心焦点】</span>Host DDR 频繁搬运与小 I/O 序列化开销巨大；集中式 Master 元数据 RPC 瓶颈严重。</p>
                 </div>
                 <div class="p-4 bg-green-50 rounded border border-green-300 card-hover">
-                    <div class="text-sm font-bold text-green-700 mb-2">Phase 3 (2026 前沿): 共享状态织物与调度核心</div>
-                    <p class="text-xs text-gray-700 leading-relaxed mb-1"><span class="font-semibold text-gray-800">【系统角色】</span>驱动集群互联拓扑、存储分层、总线流量仲裁与计算放置决策的第一等公民资源。</p>
-                    <p class="text-xs text-gray-700 leading-relaxed"><span class="font-semibold text-gray-800">【核心焦点】</span>计算存储双向感知、非对称总线借调、微架构 SMEM 零拷贝、无锁只读解耦与硬件硬 QoS 隔离。</p>
+                    <div class="text-sm font-bold text-green-700 mb-2">Phase 3 (2026 前沿): 异构多介质统一池化与硬件直达织物</div>
+                    <p class="text-xs text-gray-700 leading-relaxed mb-1"><span class="font-semibold text-gray-800">【系统角色】</span>Host CPU 统筹管理本机 DDR、远端 DDR、CXL 内存池与 SSD 的全局解耦分层织物。</p>
+                    <p class="text-xs text-gray-700 leading-relaxed"><span class="font-semibold text-gray-800">【核心焦点】</span>Host CPU 零数据拷贝、RCU 无锁索引、CXL 纳秒编址直达、用户态直接 I/O 与硬件硬 QoS 隔离。</p>
                 </div>
             </div>
         </section>
@@ -77,18 +77,18 @@
             <div class="bg-white rounded-lg border border-gray-200 card-shadow flex flex-col overflow-hidden domain-card">
                 <!-- Header -->
                 <div class="p-3 text-white flex justify-between items-center" style="background-color: #0284C7;">
-                    <h3 class="font-bold text-sm">【领域一】 微体系结构访存阻抗与零拷贝陷阱</h3>
-                    <span class="text-xs bg-black bg-opacity-20 px-2 py-0.5 rounded">算子微架构层</span>
+                    <h3 class="font-bold text-sm">【领域一】 本机 Host DDR 访存与 CPU 拷贝陷阱</h3>
+                    <span class="text-xs bg-black bg-opacity-20 px-2 py-0.5 rounded">本机 NUMA 层</span>
                 </div>
                 
                 <div class="p-4 flex-1 flex flex-col space-y-3">
                     <!-- Core Problem -->
                     <div class="p-3 bg-red-50 border border-red-200 rounded text-xs text-red-950">
                         <div class="font-bold text-red-800 flex items-center mb-1">
-                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：GPU SM 极速访存 (TB/s) 与慢速总线 (GB/s) 存在巨大物理鸿沟
+                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：CPU 密集搬运数据 vs 主机算力侵蚀与 NUMA 总线争用
                         </div>
                         <div class="text-red-900 leading-relaxed">
-                            【底层根因】API 层朴素零拷贝解引用 Host 内存致 L2 缓存被击穿 (命中率 77%→32%)，重复搬运数十 GB 冗余流量使延时暴增 20 倍；PagedAttention 细粒度小页撕裂总线 (有效利用率仅 5%~22%)；CPU 解释型分配器打断 CUDA Graph。
+                            【底层根因】Host DDR 带宽远逊于多卡并发总需求，传统 CPU 参与数据拷贝使 Host Payload Touch 吞噬数百核 CPU 算力；跨 NUMA 远端访存增加 30%~50% 延迟；通用 malloc 产生严重外部碎片与页表开销。
                         </div>
                     </div>
 
@@ -96,23 +96,23 @@
                     <div class="space-y-2 flex-1">
         
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #0284C7;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #0284C7;">• CPU 内存感知片上分块 (SMEM Tiling)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">将 Host 慢速 KV 单次拉入 GPU SM 片上共享内存常驻，片上遍历本地 Query 与权重，总线重复搬运量削减 98.8%，L2 命中率恢复至 75.1%。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #0284C7;">• Host CPU 零数据拷贝控制架构：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">CPU 严格退守纯控制面与拓扑调度，数据正文由硬件 DMA 通道直达流转，Host Payload Touch Bytes 严格归零。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #0284C7;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #0284C7;">• 计算与传输布局解耦 (Decoupled Layout)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">显存侧采用 Layer-First 迎合注意力核函数局部性，外存侧采用 Page-First 连续大块打满总线物理带宽，突破小页总线饥饿 (有效带宽达 48 GB/s)。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #0284C7;">• NUMA 亲和绑定与大页预分配：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">将请求上下文与对应 NUMA 节点 DDR 通道严格绑定，结合 1GB/2MB 静态大页消除跨插槽总线争用与 TLB 抖动。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #0284C7;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #0284C7;">• GPU 协助细粒度并发转置 (GPU-Assisted I/O)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">启动专用轻量 GPU 线程块，在流式搬运中以 128B 细粒度在线完成地址映射与布局转置，前台在线计算干扰低于 5%。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #0284C7;">• 分层物理块连续分配器：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">废弃通用动态内存分配伙伴系统，按 4KB/64KB 硬件几何对齐直接预分配连续物理 Block，内存碎片率收敛至 0。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #0284C7;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #0284C7;">• 图内并行缓存管理 (In-Graph Cache Manager)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">将块映射表与分配状态全量下沉 GPU HBM，由 CUDA Graph 原生算子并行分配释放，消除 CPU 解释器打断，时延降低 1.6~1.9x。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #0284C7;">• 无锁 RCU 树状元数据索引：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">采用 Read-Copy-Update 读写无锁机制管理前缀树与物理块映射，前台读零停顿，CPU 控制开销削减 80% 以上。</div>
                         </div>
             
                     </div>
@@ -123,18 +123,18 @@
             <div class="bg-white rounded-lg border border-gray-200 card-shadow flex flex-col overflow-hidden domain-card">
                 <!-- Header -->
                 <div class="p-3 text-white flex justify-between items-center" style="background-color: #4F46E5;">
-                    <h3 class="font-bold text-sm">【领域二】 非对称拓扑拥塞与跨域闲置带宽汇聚</h3>
-                    <span class="text-xs bg-black bg-opacity-20 px-2 py-0.5 rounded">总线与网络拓扑层</span>
+                    <h3 class="font-bold text-sm">【领域二】 集群 Scale-Out 网络失衡与带宽汇聚</h3>
+                    <span class="text-xs bg-black bg-opacity-20 px-2 py-0.5 rounded">集群网络与中继层</span>
                 </div>
                 
                 <div class="p-4 flex-1 flex flex-col space-y-3">
                     <!-- Core Problem -->
                     <div class="p-3 bg-red-50 border border-red-200 rounded text-xs text-red-950">
                         <div class="font-bold text-red-800 flex items-center mb-1">
-                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：局部通信链路过载饱和 vs 全局高速拓扑大面积闲置
+                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：集群存储网络单源回流打满 vs 计算网络与闲置节点常态空闲
                         </div>
                         <div class="text-red-900 leading-relaxed">
-                            【底层根因】多轮长文本下历史 KV 命中率超 98%，传统 PD 分离仅允许 Prefill 节点读存储致其存储网卡 100% 满载，而 Decode 存储网卡常态闲置；单机内 GPU 私有 PCIe 链路所有权刚性 (利用率不足 27%)，局部打满时无法借用邻居空闲链路。
+                            【底层根因】长文本多轮交互下历史 KV 命中率超 98%，传统 PD 架构仅由 Prefill 节点直连存储，引发存储网卡 100% 满载与 Incast 丢包；而 Decode 存储网卡与大容量计算网络闲置；单机私有 PCIe 刚性封闭无法借调。
                         </div>
                     </div>
 
@@ -142,23 +142,23 @@
                     <div class="space-y-2 flex-1">
         
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #4F46E5;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #4F46E5;">• 双路径回源与中继转运 (Dual-Path Retrieval)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">打破仅 PE 读存储假设，允许 Decode 节点利用空闲存储网卡回源历史 KV，再借助内部充裕的高速计算网络转运给 Prefill 节点，消除单侧过载。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #4F46E5;">• 非对称多路径回源分流：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">突破单一节点读存储限制，调度闲置节点空闲存储网卡分流回源，再借助内部充裕的计算网络中继转运。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #4F46E5;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #4F46E5;">• 跨卡 Scale-Up 总线池化 (Scale-Up PCIe Pooling)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">单机内 GPU 借助跨卡高速互连 (NVLink) 中继借用邻居 GPU 的空闲 PCIe 链路访问 Host 内存，将私有链路汇聚为整机共享带宽池。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #4F46E5;">• 集群分层树状中继广播：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">热点前缀数据从存储源拉取单份，在计算节点间构建树状接力广播拓扑，将单源拉取网卡出口压力削减 75%。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #4F46E5;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #4F46E5;">• 固定块双向流水中继 (Fixed-Block Pipelining)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">将跨卡跨总线传输切分为 16MB 固定块双向流水，中继跳延迟完全被 PCIe 传输时间掩盖，固定显存占用仅需数十 MB。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #4F46E5;">• 固定块双向流水转运：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">将跨节点多跳中继切分为 16MB 固定块双向并发流水，中继节点转发延迟完全被网络传输时间掩盖。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #4F46E5;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #4F46E5;">• 组级意图暴露与单份回源广播 (Grouped I/O Broadcast)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">应用显式声明协同读写批次；多节点相同数据仅由单源从存储回源一次，随后在高速计算网络内流水串行广播分发，KVCache 冷读 TTFT 降低 23%。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #4F46E5;">• 组级协同 I/O 意图暴露：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">应用层显式声明批量读写批次，集群调度器统一聚合跨节点相同数据请求，消除存储网络重复拉取风暴。</div>
                         </div>
             
                     </div>
@@ -169,18 +169,18 @@
             <div class="bg-white rounded-lg border border-gray-200 card-shadow flex flex-col overflow-hidden domain-card">
                 <!-- Header -->
                 <div class="p-3 text-white flex justify-between items-center" style="background-color: #DC2626;">
-                    <h3 class="font-bold text-sm">【领域三】 跨节点内存池化的一致性税与同步放大</h3>
-                    <span class="text-xs bg-black bg-opacity-20 px-2 py-0.5 rounded">分布式内存一致性层</span>
+                    <h3 class="font-bold text-sm">【领域三】 远端 DDR 内存池化一致性税与同步雪崩</h3>
+                    <span class="text-xs bg-black bg-opacity-20 px-2 py-0.5 rounded">远端解耦内存层</span>
                 </div>
                 
                 <div class="p-4 flex-1 flex flex-col space-y-3">
                     <!-- Core Problem -->
                     <div class="p-3 bg-red-50 border border-red-200 rounded text-xs text-red-950">
                         <div class="font-bold text-red-800 flex items-center mb-1">
-                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：海量分布式缓存复用 vs 控制面元数据流量吞噬有效载荷
+                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：海量跨节点远端内存复用 vs 控制面同步元数据流量吞噬有效带宽
                         </div>
                         <div class="text-red-900 leading-relaxed">
-                            【底层根因】解耦内存池跨机延迟高数十倍；传统缓存淘汰机制维持热度与双向链表吞噬 86.6% 网络带宽 (正文仅占 13.4%)，并发原子 CAS 压制读吞吐 4.3x；硬件一致性区域 (SCR) 受限于物理面积仅数十 MB，元数据换出引发级联雪崩。
+                            【底层根因】远端 DDR 需经微秒级 RDMA 访问；传统分布式缓存淘汰为维护热度与链表，元数据与热度更新占用 86.6% 网络带宽 (正文仅占 13.4%)；跨机并发原子 CAS 导致正常读吞吐暴跌 4.3 倍。
                         </div>
                     </div>
 
@@ -188,23 +188,23 @@
                     <div class="space-y-2 flex-1">
         
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #DC2626;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #DC2626;">• 只读不可变数据与元数据本地化 (Share Data, Not Metadata)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">共享池中仅存放不可变只读 KV 正文，目录索引与状态在本地闭环，从物理上杜绝并发写冲突，消除 95% 以上的总线探测一致性税。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #DC2626;">• 只读不可变数据与元数据本地化：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">远端共享池仅存放不可变只读 KV 张量，目录索引与租约状态在本地 Host 闭环，从物理上消除跨机写冲突。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #DC2626;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #DC2626;">• 组级生命周期管理解耦 (Group-Level Housekeeping)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">正文访问保持单对象细粒度直达，淘汰、状态刷新与回收按组 (如 64 个) 批量执行，将控制面管理复杂度降低两个数量级。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #DC2626;">• 组级粗粒度生命周期管理：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">数据正文访问保持单对象细粒度直达，淘汰回收与租约更新按组 (如 64 个) 批量处理，控制面管理通信骤降 90%。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #DC2626;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #DC2626;">• 本地热度累计与批量原子回刷 (Local Counting & Batched Flush)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">命中仅本地累加计数，跨机同步时单次 8B 原子指令打包连续多个对象计数批量回刷，发射频率降低 8 倍。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #DC2626;">• 本地热度累积与批量原子回刷：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">节点本地累加访问计数，跨机同步时单次 8B 原子指令打包多个对象批量回刷，原子通信发射频率降低 8 倍。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #DC2626;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #DC2626;">• 分裂式元数据与共享追加日志 (Split Metadata & Append-Only Log)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">硬件受限一致性区仅存放极简原子锁，庞大目录树移至大容量非一致性内存，通过顺序追加日志异步推进，元数据换出开销削减 8 倍。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #DC2626;">• 追加式共享日志与异步推进：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">远端内存采用单调追加写入日志，后台异步推进元数据清理与垃圾回收，杜绝前台关键路径同步停顿。</div>
                         </div>
             
                     </div>
@@ -215,18 +215,18 @@
             <div class="bg-white rounded-lg border border-gray-200 card-shadow flex flex-col overflow-hidden domain-card">
                 <!-- Header -->
                 <div class="p-3 text-white flex justify-between items-center" style="background-color: #059669;">
-                    <h3 class="font-bold text-sm">【领域四】 端到端内存语义直达与控制面解构</h3>
-                    <span class="text-xs bg-black bg-opacity-20 px-2 py-0.5 rounded">互联通信与内存语义层</span>
+                    <h3 class="font-bold text-sm">【领域四】 CXL 交换式内存池直达与端侧流控</h3>
+                    <span class="text-xs bg-black bg-opacity-20 px-2 py-0.5 rounded">CXL 互联与交换层</span>
                 </div>
                 
                 <div class="p-4 flex-1 flex flex-col space-y-3">
                     <!-- Core Problem -->
                     <div class="p-3 bg-red-50 border border-red-200 rounded text-xs text-red-950">
                         <div class="font-bold text-red-800 flex items-center mb-1">
-                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：高频细粒度存取需求 vs 繁重网络协议栈握手开销
+                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：高频细粒度解引用存取 vs 交换网络端口争用与硬件一致性限制
                         </div>
                         <div class="text-red-900 leading-relaxed">
-                            【底层根因】KVCache 呈跨层跨头离散分布，高频细粒度 Gather/Scatter 成为常态；RDMA 依然保留网络协议语义，描述符准备、完成队列轮询与流同步吃掉 75% 操作时间；交换式内存网络缺乏端侧流控，突发大吞吐霸占端口引发队头阻塞与饥饿。
+                            【底层根因】传统网络 RPC 协议栈存在严重软硬件开销 (描述符与中断占 75% 耗时)；CXL 交换网络硬件仅支持链路级信用流控，突发大吞吐霸占端口引发严重队头阻塞；CXL 硬件一致性区受物理面积制约仅数十 MB。
                         </div>
                     </div>
 
@@ -234,23 +234,23 @@
                     <div class="space-y-2 flex-1">
         
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #059669;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #059669;">• 全局统一内存编址与直通映射 (Global DAX Memory Mapping)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">利用内存交换网络将机架内共享内存映射为全局统一虚拟地址空间，计算核函数通过直接解引用直达访问，16KB 访问从网络级 10µs 降至纳秒/微秒级。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #059669;">• 全局统一内存编址与直通映射：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">利用 CXL 交换网络将共享内存池映射为全局统一虚拟地址空间，CPU 直接解引用直达访问，时延降至百纳秒级。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #059669;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #059669;">• 发起者角色判定软件一致性 (Initiator-Based Software Coherence)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">按读写发起者角色在软件层精准下发轻量 Cache Flush/Invalidate 指令，消除昂贵的硬件全局侦听探测总线税。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #059669;">• 发起者角色判定软件一致性：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">根据读写发起者角色在 Host 软件层定向下发精确的 Cache Flush/Invalidate，绕过昂贵的硬件全局侦听总线税。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #059669;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #059669;">• 细粒度设备级重排核函数 (Fine-Grained Gather/Scatter Kernels)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">在设备端原生实现离散页表到连续共享内存块的线速聚集写入与发散读取，配合多内存通道交错存取打满物理吞吐。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #059669;">• 分裂式元数据与非一致性内存拓展：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">将高频原子锁留在硬件受限一致性区，庞大前缀树移入大容量非一致性 CXL 内存，元数据换出开销削减 8 倍。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #059669;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #059669;">• 核心无状态端侧流控传输 (Core-Stateless End-Host Transport)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">在不可编程交换机前端，通过读取 CPU 性能计数器反推真实内存流量需求，将路径瓶颈反向映射为线程时间配额，根除队头阻塞。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #059669;">• 端侧核心无状态流控传输：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">通过读取 Host CPU 性能计数器估算真实内存流量需求，在主机端主动调节线程注入配额，根除交换机队头阻塞。</div>
                         </div>
             
                     </div>
@@ -261,18 +261,18 @@
             <div class="bg-white rounded-lg border border-gray-200 card-shadow flex flex-col overflow-hidden domain-card">
                 <!-- Header -->
                 <div class="p-3 text-white flex justify-between items-center" style="background-color: #D97706;">
-                    <h3 class="font-bold text-sm">【领域五】 计算—存储跨层双向感知与状态预测</h3>
-                    <span class="text-xs bg-black bg-opacity-20 px-2 py-0.5 rounded">运行时感知与编排层</span>
+                    <h3 class="font-bold text-sm">【领域五】 NVMe SSD 分层存储沉淀与异步流水</h3>
+                    <span class="text-xs bg-black bg-opacity-20 px-2 py-0.5 rounded">NVMe SSD 分层层</span>
                 </div>
                 
                 <div class="p-4 flex-1 flex flex-col space-y-3">
                     <!-- Core Problem -->
                     <div class="p-3 bg-red-50 border border-red-200 rounded text-xs text-red-950">
                         <div class="font-bold text-red-800 flex items-center mb-1">
-                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：上层动态时序交互语义 vs 下层存储黑盒盲目调度决策
+                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：超大容量 SSD 低成本沉淀 vs 慢速介质读延迟与队头阻塞击穿 SLO
                         </div>
                         <div class="text-red-900 leading-relaxed">
-                            【底层根因】存储层缺乏模型回答长度与用户交互感知，通用 LRU/LFU 错误驱逐高潜力历史 KV；计算调度看不见 KV 所在介质层级 (DRAM vs SSD)，慢速 SSD 请求占死队头引发响应恶化 3.8x；无前置预测信号导致多 GB 搬运硬生生落入 TTFT 关键路径。
+                            【底层根因】SSD 读延迟比 DDR 慢两个数量级；传统内核 Page Cache 存在双重拷贝与锁争用；缺乏介质感知调度时，慢速 SSD 读取占死队头引发响应恶化 3.8 倍；冷热驱逐策略脱离长文本复用规律。
                         </div>
                     </div>
 
@@ -280,23 +280,23 @@
                     <div class="space-y-2 flex-1">
         
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #D97706;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #D97706;">• 计算—存储双向感知提示接口 (Bidirectional Awareness Interface)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">存储层向上暴露 KV 所在介质层级与字节规模；计算引擎向下输出模型回答长度，为下层淘汰决策提供未来重用距离关键线索。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #D97706;">• SPDK/io_uring 用户态异步直读：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">绕过内核文件系统与 Page Cache，基于用户态轮询驱动直接提交 4KB 对齐 NVMe 描述符，CPU 开销降低 70%。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #D97706;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #D97706;">• 层级解耦双队列与响应比优先调度 (Split Queues & disk-HRRN)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">将请求拆分为可执行队列与准备队列，慢速 SSD 读取按响应比动态升权调度，消除慢 I/O 对快速内存命中的队头阻塞，排队时延骤降 57.5%。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #D97706;">• 层级解耦双队列与响应比优先调度：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">将请求拆分为就绪队列与异步准备队列，慢速 SSD 读取按响应比动态升权，消除慢 I/O 对内存命中的队头阻塞。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #D97706;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #D97706;">• 基于回答长度的命中潜力淘汰 (Answer-Length Guided Eviction)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">依据上一轮模型回答长度估算用户下一次交互的重用距离下界，优先保留更快被再次复用的历史张量，缓存未命中率降低 57%~70%。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #D97706;">• 计算—存储双向语义感知淘汰：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">存储层向上暴露 KV 介质层级，计算调度向下传递回答长度与重用距离下界，多层缓存未命中率降低 57%~70%。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #D97706;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #D97706;">• 建议请求弱信号提前预取 (Advisory Requests & Predictive Prefetch)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">捕获用户输入、打字或 Agent 调用图等前置弱信号，在真实请求到达前 5~11 秒提前触发迁移预取，彻底将多 GB 状态搬运剥离 TTFT 关键路径。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #D97706;">• 弱信号前置自适应预取：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">捕获用户输入、打字或 Agent 调用拓扑前置信号，在请求到达前数秒提前触发迁移，将多 GB 搬运剥离关键路径。</div>
                         </div>
             
                     </div>
@@ -307,18 +307,18 @@
             <div class="bg-white rounded-lg border border-gray-200 card-shadow flex flex-col overflow-hidden domain-card">
                 <!-- Header -->
                 <div class="p-3 text-white flex justify-between items-center" style="background-color: #7C3AED;">
-                    <h3 class="font-bold text-sm">【领域六】 多维代价感知动态选路与混压 QoS 隔离</h3>
-                    <span class="text-xs bg-black bg-opacity-20 px-2 py-0.5 rounded">自适应流控层</span>
+                    <h3 class="font-bold text-sm">【领域六】 多维代价感知动态选路与混压隔离</h3>
+                    <span class="text-xs bg-black bg-opacity-20 px-2 py-0.5 rounded">动态选路与 QoS 层</span>
                 </div>
                 
                 <div class="p-4 flex-1 flex flex-col space-y-3">
                     <!-- Core Problem -->
                     <div class="p-3 bg-red-50 border border-red-200 rounded text-xs text-red-950">
                         <div class="font-bold text-red-800 flex items-center mb-1">
-                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：静态配置无法适应动态波动 vs 前后台混压长尾抖动失控
+                            <i class="fas fa-exclamation-triangle mr-1.5"></i> 核心矛盾：动态多介质带宽波动导致性能反噬 vs 前后台混压 I/O 抖动击穿尾延迟
                         </div>
                         <div class="text-red-900 leading-relaxed">
-                            【底层根因】网络有效带宽时刻剧烈波动，静态固定压缩在带宽充裕时编解码耗时反噬传输收益，引发高达 0.9s 时延毛刺；软件内存遥测滞后数百毫秒且消耗 20% CPU 算力；后台满载换出瞬间抢占内存控制器与网络队列，在线推理 TPOT 尾部延迟断崖式恶化。
+                            【底层根因】各级介质有效带宽与拥塞程度动态剧烈波动，静态拉取在低带宽下耗时反超本地重算 (时延反噬)；后台满载换出瞬间抢占 Host 内存控制器与网卡队列，在线推理 TPOT 尾部延迟断崖式恶化。
                         </div>
                     </div>
 
@@ -326,23 +326,23 @@
                     <div class="space-y-2 flex-1">
         
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #7C3AED;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #7C3AED;">• 模块化压缩空间与约束 Pareto 画像 (Modular Pareto Profiling)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">将压缩解构为变换、量化、编码三级流水，离线通过约束贝叶斯优化快速构建准确率、压缩比与耗时三维最优候选集。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #7C3AED;">• 常数时间动态选路决策引擎：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">实时遥测各级链路带宽与计算负载，沿延时包络在常数时间内判定直读、加载或本地重算，杜绝性能倒挂。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #7C3AED;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #7C3AED;">• 带宽阈值下包络常数时间选路 (Lower-Envelope O(1) Path Selection)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">基于实时链路有效带宽，沿多配置延时直线的下包络在常数时间内判定最优加载/压缩/重算路径，消除性能倒挂，PD 分离下加速达 9.13x。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #7C3AED;">• 硬件多优先级队列网络硬隔离：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">在线推理通信映射高优先级硬件队列，后台换出搬运映射低优先级，并配合动态整形，确保前台网络零排队。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #7C3AED;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #7C3AED;">• 硬件级物理内存通道硬隔离 (Physical Memory Channel Hard Isolation)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">将低延迟在线业务与大吞吐后台搬运严格绑定至不同物理内存通道，彻底消除 99% 的总线与控制器争用，在线推理性能逼近独占。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #7C3AED;">• 物理内存通道硬隔离与带宽保留：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">通过内存控制器将前台实时业务与后台大吞吐搬运严格绑定至不同物理通道，彻底消除 99% 的内存总线争用。</div>
                         </div>
             
                         <div class="p-2.5 bg-gray-50 border border-gray-200 rounded border-l-accent solution-item" style="border-left-color: #7C3AED;">
-                            <div class="text-xs font-bold mb-0.5" style="color: #7C3AED;">• 硬件多优先级队列统一仲裁与协处理卸载 (Hardware Priority VL & ASIC Offload)：</div>
-                            <div class="text-xs text-gray-700 leading-relaxed">在线推理通信映射高优先级硬件通道，后台大吞吐搬运映射低优先级；利用闲置 NVDEC 视频 ASIC 处理压缩流，保证在线 TPOT 零受挤占。</div>
+                            <div class="text-xs font-bold mb-0.5" style="color: #7C3AED;">• 视图租约安全守卫与异常平滑回退：</div>
+                            <div class="text-xs text-gray-700 leading-relaxed">远端直读与解耦内存建立租约机制，在远端故障、网络中断或超时时安全捕获异常并主动平滑回滚至本地重算。</div>
                         </div>
             
                     </div>
