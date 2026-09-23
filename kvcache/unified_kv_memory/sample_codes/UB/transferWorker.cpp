@@ -143,9 +143,10 @@ void UbWorkerPool::transferWorker(int thread_id) {
 #ifndef USE_FAKE_POST_SEND
         performPoll(thread_id);
 
-        // 【T1.5 标记：首次 Poll 结束】
+        // 【修正后的 T1.5】：只有当硬件真正收割到了第一批切片 (processed > 0) 时才触发打点！
         if (active_thread_id.load(std::memory_order_relaxed) == thread_id &&
             post_completed.load(std::memory_order_relaxed) &&
+            processed_slice_count_.load(std::memory_order_relaxed) > 0 &&
             !first_poll_completed.exchange(true)) {
             t1_5_after_first_poll = getCurrentTimeInNano();
             first_poll_processed = processed_slice_count_.load(std::memory_order_relaxed);
