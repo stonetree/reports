@@ -1,0 +1,13 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# 安装高性能异步 HTTP 与基础数学库
+RUN pip install --no-cache-dir aiohttp==3.9.5 requests==2.32.3 numpy==1.26.4
+
+# 复制压测脚本
+COPY scripts/shadow_worker.py /app/shadow_worker.py
+
+ENV PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python3", "/app/shadow_worker.py"]

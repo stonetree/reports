@@ -1,0 +1,42 @@
+{
+  "_description": "集群物理节点与测试环境配置字典，供 Python 压测脚本和预检工具自动读取",
+  "sut_nodes": {
+    "sut1": {
+      "ip": "192.168.10.101",
+      "port": 8000,
+      "hostname": "sut1",
+      "url": "http://192.168.10.101:8000",
+      "role": "vLLM / Mooncake Primary SUT Instance",
+      "metrics_endpoint": "http://192.168.10.101:8000/metrics",
+      "health_endpoint": "http://192.168.10.101:8000/health"
+    },
+    "sut2": {
+      "ip": "192.168.10.102",
+      "port": 8000,
+      "hostname": "sut2",
+      "url": "http://192.168.10.102:8000",
+      "role": "vLLM / Mooncake Secondary SUT Instance",
+      "metrics_endpoint": "http://192.168.10.102:8000/metrics",
+      "health_endpoint": "http://192.168.10.102:8000/health"
+    }
+  },
+  "controller": {
+    "ip": "192.168.10.100",
+    "shadow_worker_count": 18,
+    "burst_concurrency_per_worker": 22,
+    "total_simulated_concurrency": 396
+  },
+  "hardware_tuning": {
+    "roce_device": "mlx5_0",
+    "roce_gid_index": 3,
+    "numa_node": 0,
+    "hugepages_1gb_required": 450,
+    "mpam_resctrl_path": "/sys/fs/resctrl"
+  },
+  "paths": {
+    "probe_library": "./csrc/libcontrol_probe.so",
+    "ballast_binary": "./csrc/ballast_alloc",
+    "traces_dir": "./traces/salted_20",
+    "logs_dir": "./logs"
+  }
+}

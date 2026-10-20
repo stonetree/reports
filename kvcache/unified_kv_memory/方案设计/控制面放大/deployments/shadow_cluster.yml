@@ -1,0 +1,176 @@
+version: '3.8'
+
+# 18 影子压测实例集群 (Shadow Workers)
+# 作用：回放加盐 Trace，向 2 台真实 SUT 节点高频注入元数据快查与槽位预留，模拟 400 并发微突发
+x-shadow-base: &shadow-base
+  build:
+    context: ..
+    dockerfile: deployments/Dockerfile.shadow_worker
+  restart: unless-stopped
+  network_mode: "host"
+  volumes:
+    - ../traces:/app/traces:ro
+    - ../logs/shadow:/app/logs
+  environment:
+    - TARGET_SUT_URL=${SUT1_URL:-http://sut1:8000}
+    - BURST_CONCURRENCY=22  # 18 个实例合计约 400 并发
+    - REQUEST_TIMEOUT_S=30
+  deploy:
+    resources:
+      limits:
+        cpus: '1.5'
+        memory: 2G
+
+services:
+  shadow_worker_01:
+    <<: *shadow-base
+    container_name: shadow_worker_01
+    environment:
+      - WORKER_ID=1
+      - TENANT_ID=2
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_02.json
+
+  shadow_worker_02:
+    <<: *shadow-base
+    container_name: shadow_worker_02
+    environment:
+      - WORKER_ID=2
+      - TENANT_ID=3
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_03.json
+
+  shadow_worker_03:
+    <<: *shadow-base
+    container_name: shadow_worker_03
+    environment:
+      - WORKER_ID=3
+      - TENANT_ID=4
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_04.json
+
+  shadow_worker_04:
+    <<: *shadow-base
+    container_name: shadow_worker_04
+    environment:
+      - WORKER_ID=4
+      - TENANT_ID=5
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_05.json
+
+  shadow_worker_05:
+    <<: *shadow-base
+    container_name: shadow_worker_05
+    environment:
+      - WORKER_ID=5
+      - TENANT_ID=6
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_06.json
+
+  shadow_worker_06:
+    <<: *shadow-base
+    container_name: shadow_worker_06
+    environment:
+      - WORKER_ID=6
+      - TENANT_ID=7
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_07.json
+
+  shadow_worker_07:
+    <<: *shadow-base
+    container_name: shadow_worker_07
+    environment:
+      - WORKER_ID=7
+      - TENANT_ID=8
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_08.json
+
+  shadow_worker_08:
+    <<: *shadow-base
+    container_name: shadow_worker_08
+    environment:
+      - WORKER_ID=8
+      - TENANT_ID=9
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_09.json
+
+  shadow_worker_09:
+    <<: *shadow-base
+    container_name: shadow_worker_09
+    environment:
+      - WORKER_ID=9
+      - TENANT_ID=10
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_10.json
+
+  shadow_worker_10:
+    <<: *shadow-base
+    container_name: shadow_worker_10
+    environment:
+      - WORKER_ID=10
+      - TENANT_ID=11
+      - TARGET_SUT_URL=${SUT2_URL:-http://sut2:8000}
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_11.json
+
+  shadow_worker_11:
+    <<: *shadow-base
+    container_name: shadow_worker_11
+    environment:
+      - WORKER_ID=11
+      - TENANT_ID=12
+      - TARGET_SUT_URL=${SUT2_URL:-http://sut2:8000}
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_12.json
+
+  shadow_worker_12:
+    <<: *shadow-base
+    container_name: shadow_worker_12
+    environment:
+      - WORKER_ID=12
+      - TENANT_ID=13
+      - TARGET_SUT_URL=${SUT2_URL:-http://sut2:8000}
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_13.json
+
+  shadow_worker_13:
+    <<: *shadow-base
+    container_name: shadow_worker_13
+    environment:
+      - WORKER_ID=13
+      - TENANT_ID=14
+      - TARGET_SUT_URL=${SUT2_URL:-http://sut2:8000}
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_14.json
+
+  shadow_worker_14:
+    <<: *shadow-base
+    container_name: shadow_worker_14
+    environment:
+      - WORKER_ID=14
+      - TENANT_ID=15
+      - TARGET_SUT_URL=${SUT2_URL:-http://sut2:8000}
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_15.json
+
+  shadow_worker_15:
+    <<: *shadow-base
+    container_name: shadow_worker_15
+    environment:
+      - WORKER_ID=15
+      - TENANT_ID=16
+      - TARGET_SUT_URL=${SUT2_URL:-http://sut2:8000}
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_16.json
+
+  shadow_worker_16:
+    <<: *shadow-base
+    container_name: shadow_worker_16
+    environment:
+      - WORKER_ID=16
+      - TENANT_ID=17
+      - TARGET_SUT_URL=${SUT2_URL:-http://sut2:8000}
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_17.json
+
+  shadow_worker_17:
+    <<: *shadow-base
+    container_name: shadow_worker_17
+    environment:
+      - WORKER_ID=17
+      - TENANT_ID=18
+      - TARGET_SUT_URL=${SUT2_URL:-http://sut2:8000}
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_18.json
+
+  shadow_worker_18:
+    <<: *shadow-base
+    container_name: shadow_worker_18
+    environment:
+      - WORKER_ID=18
+      - TENANT_ID=19
+      - TARGET_SUT_URL=${SUT2_URL:-http://sut2:8000}
+      - TRACE_FILE=/app/traces/salted_20/trace_tenant_19.json

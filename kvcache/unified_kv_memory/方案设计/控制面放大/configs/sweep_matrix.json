@@ -1,0 +1,56 @@
+{
+  "benchmark_name": "KVCache_ControlPlane_Amplification_Sweep",
+  "version": "1.0",
+  "environment": {
+    "sut_node_1": "http://sut1:8000",
+    "sut_node_2": "http://sut2:8000",
+    "shadow_worker_count": 18
+  },
+  "sweep_parameters": {
+    "min_delay_ms": 0.0,
+    "max_delay_ms": 20.0,
+    "step_delay_ms": 0.25,
+    "num_points": 81,
+    "requests_per_point": 40000,
+    "concurrency_baseline": 64,
+    "microburst_concurrency": 400,
+    "microburst_interval_sec": 1.2
+  },
+  "stage_injection_mapping": {
+    "0": {
+      "name": "Prefix_Hash_Lookup",
+      "target_function": "is_existed_fastpath",
+      "weight": 0.25
+    },
+    "1": {
+      "name": "Dynamic_Routing_Decision",
+      "target_function": "query_plan_evaluate",
+      "weight": 0.25
+    },
+    "2": {
+      "name": "Descriptor_Compile_Submit",
+      "target_function": "build_umr_scatter_gather",
+      "weight": 0.25
+    },
+    "3": {
+      "name": "HBM_Eviction_Preparation",
+      "target_function": "block_manager_evict_victims",
+      "weight": 0.25
+    }
+  },
+  "threshold_redlines": {
+    "tpot_baseline_ms": 18.20,
+    "tpot_violation_limit_ms": 18.75,
+    "tpot_max_interference_pct": 3.0,
+    "min_ttft_improvement_pct": 20.0,
+    "min_qps_improvement_pct": 10.0,
+    "max_preemption_count": 0
+  },
+  "dataset_config": {
+    "sut_tenant_traces": [
+      "./traces/salted_20/trace_tenant_00.json",
+      "./traces/salted_20/trace_tenant_01.json"
+    ],
+    "shadow_traces_dir": "./traces/salted_20"
+  }
+}
