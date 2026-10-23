@@ -1,0 +1,186 @@
+# HOST-KVC Testbed 1.0 — 只改本文件的 value；路径相对本文件，或填写绝对路径。
+# Python >=3.11；服务端已部署。测试机器离线安装依赖后可直接 python -m kvcbench ...
+
+[run]
+output_root = "../../tmp/kvcbench/runs"
+duration_s = 60.0
+drain_s = 30.0
+request_timeout_s = 60.0
+max_inflight = 64
+max_pending = 256
+max_requests = 1000000
+warmup_requests = 8
+cooldown_s = 2.0
+
+[sources]
+vllm_ascend = "/srv/src/vllm-ascend"
+mooncake = "/srv/src/Mooncake"
+vllm = "/srv/src/vllm"
+strict = true
+
+[trace]
+root = "../../trace"
+datasets = ["SWE-bench_Verified", "deep-swe", "swe-marathon"]
+normalized_path = ""  # 非空时读取规范化 JSONL，datasets 不再生效
+timing_provenance = "unknown"  # supplied 文件不会自动当成生产 trace
+time_scale = 1.0       # normalized 模式：按原窗口平均到达率 / 目标 qps 缩放时间轴
+normalized_window_s = 0.0 # 0=最后到达 + 正间隔中位数；可填原 trace 明确的观测窗口
+max_tasks = 32
+turns = 4
+replicas = 1
+tenants = 1
+gap_s = 1.0
+arrival_interval_s = 0.1
+arrival_process = "constant"  # constant / poisson；仅用于从任务语料构造会话
+context_tokens = 0    # 0=原始任务；>0 添加带标识的合成上下文，实际 token 数由 tokenizer 核对
+append_tokens = 128
+output_tokens = 128
+tokenizer_path = ""   # 建议 /srv/models/<model>；空值仅长度估计，不参与实测 token 指标
+salt_mode = "session" # session / request / shared / tenant / none
+salt_transport = "prefix" # prefix 实际改变 token 前缀；cache_salt 需验证外部键是否采用
+cache_salt_verified = false
+seed = 20261023
+
+[experiment]
+variants = ["B0", "B1"] # B2/B3 只在真实部署了不同策略/路径时加入；不得复用同一个实现冒充消融
+repeats = 3
+randomize_order = true
+reference_qps = 0.0   # 优先读取 calibration.evidence_path；手填 >0 仅为声明输入
+
+[sweep]
+context_tokens = [0, 4096]
+load = [0.3, 0.6, 0.8, 0.9, 1.0, 1.1]
+gap_s = [0.0, 5.0]
+control_profiles = ["none"] # 开启钩子后可加入 lookup_delay / lookup_miss
+
+[slo]
+ttft_ms = 2000.0
+tpot_ms = 100.0
+e2e_ms = 60000.0
+min_output_tokens = 1
+
+[variants.B0]
+base_url = "http://127.0.0.1:8000"
+model = "served-model-name"
+accelerator_count = 8 # 为该端点服务的全部 NPU 数，TP/DP/PD 均计入
+hardware_id = "lab-a2-8npu-01"
+description = "设备本地前缀缓存 + 重算；不接外部缓存池；其余模型、容量预算和并行配置相同"
+api_key_env = "KVCBENCH_API_KEY"
+metrics_urls = ["http://127.0.0.1:8000/metrics"]
+cache_policy = "namespace" # namespace 隔离命中，但不能清除历史占用；严格容量对照用 reset
+request_options = { logprobs = 0 } # 获取逐 chunk token 数；缺失或合批时严格 TPOT 标记不可观测
+# cache_policy="reset" 时必须配置覆盖设备和外部池的 reset + verify 命令。
+# cache_reset_argv = ["/srv/lab/bin/reset_cache", "--variant", "B0"]
+# cache_verify_argv = ["/srv/lab/bin/verify_empty", "--variant", "B0"]
+# state_argv = ["/srv/lab/bin/dump_server_state", "--variant", "B0"]
+# server_argv 为原来能成功启动的命令；仅 server 子命令使用，不由 run 自动重启。
+# server_argv = ["vllm", "serve", "/srv/models/model", "--port", "8000", "--served-model-name", "served-model-name"]
+
+[variants.B1]
+base_url = "http://127.0.0.1:8001"
+model = "served-model-name"
+accelerator_count = 8
+hardware_id = "lab-a2-8npu-01"
+description = "同一资源预算，启用 Mooncake 外部缓存池与固定数据路径的容量基线"
+api_key_env = "KVCBENCH_API_KEY"
+metrics_urls = ["http://127.0.0.1:8001/metrics"]
+cache_policy = "namespace"
+request_options = { logprobs = 0 }
+# prepare_argv 可以切换已部署服务的配置，必须等待它准备完成才退出。
+# prepare_argv = ["/srv/lab/bin/select_variant", "B1"]
+# server_argv = ["vllm", "serve", "/srv/models/model", "--port", "8001", "--served-model-name", "served-model-name", "--kv-transfer-config", '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":"1"}}']
+
+[variants.B2]
+base_url = "http://127.0.0.1:8002"
+model = "served-model-name"
+accelerator_count = 8
+hardware_id = "lab-a2-8npu-01"
+description = "外部容量与 B1 相同，实验平台实际部署的当前 HOST 控制策略"
+cache_policy = "namespace"
+
+[variants.B3]
+base_url = "http://127.0.0.1:8003"
+model = "served-model-name"
+accelerator_count = 8
+hardware_id = "lab-a2-8npu-01"
+description = "外部容量与 B2 相同，实际部署的优化 HOST 控制或数据路径"
+cache_policy = "namespace"
+
+[calibration]
+variant = "B0"
+evidence_path = "" # calibrate 成功输出的 calibration.json 绝对路径
+qps = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+duration_s = 120.0
+gap_s = 0.0
+min_requests = 30
+required_compliance = 0.95
+# 可选硬件 service-curve 作业；argv 使用实际已安装的 benchmark 或适配脚本。
+# stdout 必须是 {"observations":[...],"conditions":{...}}；原始输出和条件原样归档。
+# [[calibration.jobs]]
+# name = "ddr_stream"
+# argv = ["/srv/lab/bin/stream_json", "--numa", "0", "--output", "{output_dir}"]
+# timeout_s = 300
+
+[hooks]
+enabled = false
+control_file = "../../tmp/kvcbench/hooks/control.json"
+event_dir = "../../tmp/kvcbench/hooks/events"
+# 通过 doctor 的 source_inventory.json 选择实验机真实存在的类和方法。
+# 服务端须使用 server 子命令启动一次才能装载钩子。多个进程须共享这两个路径。
+[[hooks.targets]]
+module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+class = "AscendStoreConnector"
+methods = ["get_num_new_matched_tokens", "start_load_kv", "wait_for_layer_load", "get_finished"]
+
+[controls.none]
+description = "观测基线；不注入延迟或未命中"
+rules = []
+
+[controls.lookup_delay]
+description = "连接器查找入口前增加 0.5ms 延迟；实际 sleep 和整个方法耗时均记录"
+variants = ["B1", "B2", "B3"]
+[[controls.lookup_delay.rules]]
+module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+class = "AscendStoreConnector"
+method = "get_num_new_matched_tokens"
+action = "delay"
+delay_ms = 0.5
+probability = 1.0
+
+[controls.lookup_miss]
+description = "在连接器查询入口返回无外部命中；不破坏已命中的 KV 数据"
+variants = ["B1", "B2", "B3"]
+[[controls.lookup_miss.rules]]
+module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+class = "AscendStoreConnector"
+method = "get_num_new_matched_tokens"
+action = "miss"
+delay_ms = 0.0
+probability = 1.0
+
+# 外部控制适配器（例如 CPU 配额/NUMA/带宽限制）：三条命令必须成套；argv 无 shell 展开。
+# [controls.cpu_affinity]
+# description = "将指定服务 PID 的全部当前线程限制在指定 CPU"
+# rules = []
+# apply_argv = ["python", "-m", "kvcbench.resource", "apply", "--pids", "123,456", "--cpus", "0-7", "--state", "/srv/lab/affinity-state.json"]
+# verify_argv = ["python", "-m", "kvcbench.resource", "verify", "--state", "/srv/lab/affinity-state.json"]
+# reset_argv = ["python", "-m", "kvcbench.resource", "reset", "--state", "/srv/lab/affinity-state.json"]
+
+[telemetry]
+interval_s = 1.0
+timeout_s = 5.0
+required_metrics = ["live_kv_demand_bytes", "kv_budget_bytes", "fetch_state_ready_ms", "recompute_state_ms", "state_stall_ratio", "ddr_bytes_per_s", "nic_bytes_per_s"]
+# 默认保存端点全部 Prometheus 原文。以下映射必须填实验版本实际导出的名字。
+# 不把 HBM 已占用量冒充 live KV 需求量，也不把 start_load_kv 方法耗时冒充完整 fetch-ready。
+# [[telemetry.metrics]]
+# name = "live_kv_demand_bytes"
+# url = "http://127.0.0.1:9100/metrics"
+# metric = "your_real_live_kv_demand_bytes"
+# labels = { role = "prefill" }
+# reducer = "sum" # sum / max / mean
+# scale = 1.0
+# [[telemetry.commands]]
+# name = "npu_smi"
+# argv = ["npu-smi", "info"]
+# format = "raw" # raw 保存原始文本；json 接受 {标准指标名:数值}，不解析未确认的硬件输出格式
+# timeout_s = 5

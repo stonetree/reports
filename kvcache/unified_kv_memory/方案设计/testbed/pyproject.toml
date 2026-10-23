@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "host-kvc-testbed"
+version = "1.0.0"
+description = "Trace driven vLLM Ascend / Mooncake value discovery testbed"
+requires-python = ">=3.11"
+dependencies = ["aiohttp>=3.9,<4"]
+
+[project.optional-dependencies]
+trace = ["pyarrow>=15", "transformers>=4.44"]
+
+[project.scripts]
+kvcbench = "kvcbench.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["kvcbench*"]
