@@ -10,6 +10,9 @@ from pathlib import Path
 import random
 import time
 import uuid
+import importlib.metadata
+import platform
+import sys
 
 import aiohttp
 
@@ -123,6 +126,21 @@ def calibration_identity(c: dict) -> str:
                    "trace_contract":{k:c["trace"].get(k) for k in trace_keys}})
 
 
+def validate_baseline_state(state: dict, variant: dict, name: str) -> bool:
+    if state.get("verified_from_runtime") is not True:
+        return False
+    for field in ("model","hardware_id","accelerator_count"):
+        if state.get(field) != variant.get(field):
+            raise ValueError(f"Runtime baseline mismatch for {name}: {field}")
+    if state.get("external_cache") is not (name != "B0"):
+        raise ValueError(f"Runtime external-cache state does not match {name}")
+    if not isinstance(state.get("hbm_budget_bytes"),(int,float)) or state["hbm_budget_bytes"] <= 0:
+        raise ValueError("Runtime state must include a positive aggregate hbm_budget_bytes")
+    if not state.get("runtime_build"):
+        raise ValueError("Runtime state requires actual runtime_build identity")
+    return True
+
+
 async def health(spec: dict, timeout=30):
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
         headers = {}
@@ -148,19 +166,11 @@ def new_run(c: dict, kind="experiment") -> Path:
 
 
 async def run(c: dict, mock=False, calibration: dict | None = None) -> Path:
-    root = new_run(c)
     source_info = inventory(c.get("sources", {})) if not mock else {}
     if not mock and c.get("sources", {}).get("strict", True):
         for key in ("vllm_ascend", "mooncake"):
             if not source_info.get(key,{}).get("exists"):
                 raise ValueError(f"sources.{key} must point to an existing source checkout")
-    evidence = "MOCK_SOFTWARE_ONLY" if mock else "HARDWARE_MEASURED"
-    manifest = {"schema_version":1,"evidence_class":evidence,"created_utc": datetime.now(timezone.utc).isoformat(),
-                "source_inventory":source_info,"status":"running", "trace_kind": "normalized_unverified" if c["trace"].get("normalized_path") else "synthetic_from_task_corpus",
-                "limitations": ["Request timings measure the client-observed service including network and queueing.",
-                                "Configuration descriptions are declared baseline semantics unless verified by a state command.",
-                                "State-stall, physical bandwidth, external cache capacity and fetch/recompute economics require dedicated observations."]}
-    dump(root / "manifest.json", manifest)
     if calibration is None:
         path = c.get("calibration",{}).get("evidence_path")
         calibration = read(Path(path)) if path else {}
@@ -174,6 +184,22 @@ async def run(c: dict, mock=False, calibration: dict | None = None) -> Path:
     reference = float(calibration.get("reference_qps") or c["experiment"].get("reference_qps",0))
     if reference <= 0:
         raise ValueError("Calibrate first, or configure experiment.reference_qps (declared; L is not measured without evidence)")
+    root = new_run(c)
+    evidence = "MOCK_SOFTWARE_ONLY" if mock else "HARDWARE_MEASURED"
+    versions={}
+    for distribution in ("aiohttp","vllm","vllm-ascend","mooncake-transfer-engine","pyarrow","transformers"):
+        try:
+            versions[distribution]=importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            versions[distribution]=None
+    manifest = {"schema_version":1,"evidence_class":evidence,"created_utc": datetime.now(timezone.utc).isoformat(),
+                "source_inventory":source_info,"status":"running", "trace_kind": "normalized_unverified" if c["trace"].get("normalized_path") else "synthetic_from_task_corpus",
+                "load_generator_environment":{"platform":platform.platform(),"python":sys.version,"executable":sys.executable,"packages":versions},
+                "refinement_of":c.get("_refinement_of"),
+                "limitations": ["Request timings measure the client-observed service including network and queueing.",
+                                "Configuration descriptions are declared baseline semantics unless verified by a state command.",
+                                "State-stall, physical bandwidth, external cache capacity and fetch/recompute economics require dedicated observations."]}
+    dump(root / "manifest.json", manifest)
     plan = make_plan(c)
     dump(root / "plan.json", plan)
     dump(root / "calibration.json", calibration)
@@ -203,6 +229,7 @@ async def run(c: dict, mock=False, calibration: dict | None = None) -> Path:
             case["cache_initial_state_verified"] = False
             case["cache_initial_state_note"] = "Namespace isolates hit keys; external capacity occupancy is not reset" if policy=="namespace" else "pending reset + verification"
             case["measurement_valid"] = False
+            case["baseline_verified"] = False
             dump(out / "case.json", case)
             print(f"[{index}/{len(plan)}] {case['case_id']} offered={offered:.3f} rps", flush=True)
             values = {"case_id":case["case_id"],"case_dir":out,"variant":case["variant"],
@@ -225,7 +252,13 @@ async def run(c: dict, mock=False, calibration: dict | None = None) -> Path:
                     case["cache_initial_state_verified"] = True
                     case["cache_initial_state_note"] = "Configured reset + verify commands exited successfully; inspect command evidence for coverage"
                 if variant.get("state_argv"):
-                    await command(variant["state_argv"],values,out/"server_state.json")
+                    result=await command(variant["state_argv"],values,out/"server_state.json")
+                    state=json.loads(result["stdout"])
+                    case["baseline_verified"]=validate_baseline_state(state,variant,case["variant"])
+                    if case["baseline_verified"]:
+                        # Include measured resource budgets in the cross-variant identity.
+                        case["pairing_signature"]=digest({"declared":case["pairing_signature"],
+                            "hbm_budget_bytes":state["hbm_budget_bytes"],"parallel_config":state.get("parallel_config")})
                 warm = int(c["run"].get("warmup_requests",0))
                 if warm:
                     warm_requests = [dict(r, arrival_s=i*.02) for i,r in enumerate(requests[:warm])]
@@ -252,7 +285,8 @@ async def run(c: dict, mock=False, calibration: dict | None = None) -> Path:
                                (rule.get("action")=="observe" or e.get("applied") is True) for e in events)
                 case["injection_verified"] = all(rule_observed(rule) for rule in profile.get("rules",[]))
                 case["telemetry_complete"] = not metrics["missing"] and not metrics["errors"]
-                case["measurement_valid"] = case["injection_verified"] and len(rows)==len(requests)
+                case["measurement_valid"] = case["injection_verified"] and bool(rows) and len(rows)==len(requests)
+                case["status"] = "completed" if case["measurement_valid"] else "invalid"
                 dump(out / "case.json", case)
                 if not case["injection_verified"]:
                     raise RuntimeError("Requested hook injection had zero observed applications; invalid case (see hook_summary.json)")

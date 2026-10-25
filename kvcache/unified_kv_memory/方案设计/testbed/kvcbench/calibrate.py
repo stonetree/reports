@@ -32,7 +32,14 @@ async def calibrate(c: dict, mock=False) -> Path:
         out = root/f"qps-{qps}"
         out.mkdir()
         run_spec = dict(c["run"], duration_s=spec.get("duration_s",c["run"]["duration_s"]))
-        requests = schedule(base,qps,run_spec["duration_s"],local,f"cal-{qps}")
+        requests = schedule(base,qps,run_spec["duration_s"],local,f"{root.name}:cal-{qps}")
+        warm=int(c["run"].get("warmup_requests",0))
+        if warm:
+            warm_requests=[dict(r,arrival_s=i*.02) for i,r in enumerate(requests[:warm])]
+            warm_spec=dict(run_spec,duration_s=max(.1,warm*.02),drain_s=c["run"]["request_timeout_s"])
+            warmed=await replay(warm_requests,variant,warm_spec,out/"warmup.jsonl",phase="warmup")
+            if any(r["status"]!="ok" for r in warmed):
+                raise RuntimeError("Calibration warmup failed")
         rows = await replay(requests,variant,run_spec,out/"requests.jsonl")
         s = summarize(rows,run_spec["duration_s"],variant["accelerator_count"],c["slo"])
         passed = bool(s["cohort_requests"] >= spec.get("min_requests",30) and
